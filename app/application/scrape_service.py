@@ -6,11 +6,13 @@ This layer is intentionally thin: it owns batching/concurrency and delegates
 single-URL work to the scraper gateway implementation.
 """
 
+import logging
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Protocol
 
 from app.scraper import PriceResult
+from app.scraper.scrape_spider import scrape_prices_with_spider
 
 
 class ScraperGateway(Protocol):
@@ -66,9 +68,16 @@ def _dedupe_preserving_order(urls: list[str]) -> list[str]:
 class ScrapeBatchService:
     """Coordinates batch execution and deterministic result ordering."""
 
-    def __init__(self, gateway: ScraperGateway, max_workers: int) -> None:
+    def __init__(
+        self,
+        gateway: ScraperGateway,
+        max_workers: int,
+        use_spider_runtime: bool = False,
+    ) -> None:
         self._gateway = gateway
         self._max_workers = max_workers
+        self._use_spider_runtime = use_spider_runtime
+        self._logger = logging.getLogger("scraper_api.scrape")
 
     def list_sites(self) -> dict[str, str]:
         return self._gateway.list_sites()
@@ -84,6 +93,29 @@ class ScrapeBatchService:
                 failure_count=0,
                 results=[],
             )
+
+        if self._use_spider_runtime:
+            try:
+                spider_results = scrape_prices_with_spider(
+                    urls=urls,
+                    timeout_seconds=payload.timeout_seconds,
+                    selected_sites=payload.selected_sites,
+                    fetch_mode=payload.fetch_mode,
+                    concurrent_requests=self._max_workers,
+                )
+                by_url = {item.url: item for item in spider_results}
+                ordered_results = [
+                    by_url.get(url)
+                    or PriceResult(
+                        url=url,
+                        success=False,
+                        error="internal_error: missing_spider_result",
+                    )
+                    for url in urls
+                ]
+                return self._build_output(payload.request_id, urls, ordered_results)
+            except Exception as exc:  # pragma: no cover - defensive fallback
+                self._logger.exception("spider_runtime_failed fallback=threadpool error=%s", exc)
 
         if self._max_workers == 1 or len(urls) == 1:
             # Fast path: avoid threadpool overhead when parallelism has no value.

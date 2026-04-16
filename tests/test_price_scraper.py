@@ -10,8 +10,10 @@ from app.scraper.domain import PriceCandidate
 from app.scraper.extractors.generic import extract_price_listings_from_selector
 from app.scraper.fetching import auto_followup_modes, detect_auto_escalation_signals
 from app.scraper.inputs import parse_fetch_mode, parse_sites_blob, parse_urls_blob
+from app.scraper.metadata import extract_product_metadata
 from app.scraper.parsing import make_item_id
 from app.scraper.registry import ADAPTERS, detect_site_key, list_supported_sites
+from app.scraper.service import extract_price_from_page
 
 
 def test_extract_from_meta_tags_single_listing() -> None:
@@ -350,3 +352,69 @@ def test_find_fallback_is_bounded() -> None:
 
     # Find fallback should not traverse beyond bounded slice.
     assert len(results) == 200
+
+
+def test_extract_product_metadata_prefers_json_ld_and_normalizes_fields() -> None:
+    page = Selector(
+        """
+        <html>
+          <head>
+            <link rel="canonical" href="/products/sample-phone">
+            <meta property="og:image" content="/images/phone.jpg">
+            <script type="application/ld+json">
+              {
+                "@context": "https://schema.org",
+                "@type": "Product",
+                "name": "Sample Phone X",
+                "brand": {"@type": "Brand", "name": "SampleBrand"},
+                "model": "X-2026",
+                "sku": "SKU-1000",
+                "gtin13": "1234567890123",
+                "image": "/images/phone-main.jpg",
+                "offers": {
+                  "@type": "Offer",
+                  "availability": "https://schema.org/InStock",
+                  "url": "/products/sample-phone"
+                }
+              }
+            </script>
+          </head>
+          <body></body>
+        </html>
+        """
+    )
+
+    metadata = extract_product_metadata(page, "https://shop.example.com/item")
+
+    assert metadata["product_name"] == "Sample Phone X"
+    assert metadata["brand"] == "SampleBrand"
+    assert metadata["model"] == "X-2026"
+    assert metadata["sku"] == "SKU-1000"
+    assert metadata["gtin"] == "1234567890123"
+    assert metadata["availability"] == "in_stock"
+    assert metadata["canonical_url"] == "https://shop.example.com/products/sample-phone"
+    assert metadata["image_url"] == "https://shop.example.com/images/phone-main.jpg"
+
+
+def test_extract_price_from_page_includes_metadata_fields() -> None:
+    page = Selector(
+        """
+        <html>
+          <head>
+            <meta property="og:title" content="Meta Product Name">
+            <meta property="og:image" content="https://cdn.example.com/product.png">
+          </head>
+          <body>
+            <span class="price">$199.99</span>
+          </body>
+        </html>
+        """
+    )
+
+    result = extract_price_from_page(page, "https://example.com/products/p1")
+
+    assert result.success is True
+    assert result.product_name == "Meta Product Name"
+    assert result.image_url == "https://cdn.example.com/product.png"
+    assert result.canonical_url == "https://example.com/products/p1"
+    assert result.extracted_at is not None

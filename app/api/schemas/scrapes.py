@@ -38,6 +38,15 @@ class PriceResultResponse(BaseModel):
     currency: str | None
     raw_text: str | None
     source: str | None
+    product_name: str | None = None
+    brand: str | None = None
+    model: str | None = None
+    sku: str | None = None
+    gtin: str | None = None
+    image_url: str | None = None
+    canonical_url: str | None = None
+    availability: str | None = None
+    extracted_at: str | None = None
     listing_count: int
     listings: list[PriceListingResponse]
     error: str | None

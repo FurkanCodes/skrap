@@ -47,6 +47,15 @@ class PriceResult:
     currency: str | None = None
     raw_text: str | None = None
     source: str | None = None
+    product_name: str | None = None
+    brand: str | None = None
+    model: str | None = None
+    sku: str | None = None
+    gtin: str | None = None
+    image_url: str | None = None
+    canonical_url: str | None = None
+    availability: str | None = None
+    extracted_at: str | None = None
     listing_count: int = 0
     listings: list[PriceListing] = field(default_factory=list)
     error: str | None = None

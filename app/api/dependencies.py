@@ -17,7 +17,11 @@ def get_app_settings() -> Settings:
 @lru_cache
 def _get_scrape_service_cached(scrape_concurrency: int) -> ScrapeBatchService:
     gateway = ScraplingGateway()
-    return ScrapeBatchService(gateway=gateway, max_workers=scrape_concurrency)
+    return ScrapeBatchService(
+        gateway=gateway,
+        max_workers=scrape_concurrency,
+        use_spider_runtime=True,
+    )
 
 
 def get_scrape_service(settings: Settings = Depends(get_app_settings)) -> ScrapeBatchService:

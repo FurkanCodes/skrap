@@ -10,13 +10,20 @@ This module is the application-facing entry point for scraping. It coordinates:
 """
 
 from collections.abc import Iterable
+from datetime import UTC, datetime
+from typing import Any
 
 from .constants import SUPPORTED_FETCH_MODES
 from .domain import PriceListing, PriceResult
 from .fetching import auto_followup_modes, detect_auto_escalation_signals, fetch_page_with_mode
 from .inputs import parse_fetch_mode
+from .metadata import extract_product_metadata
 from .parsing import make_item_id, make_product_id
 from .registry import ADAPTERS, detect_site_key, list_supported_sites
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(UTC).isoformat(timespec="seconds")
 
 
 def fetch_price(
@@ -33,6 +40,7 @@ def fetch_price(
     product_id = make_product_id(url)
     site_key = detect_site_key(url)
     adapter_key = site_key if site_key in ADAPTERS else "generic"
+    extracted_at = _utc_now_iso()
 
     try:
         normalized_fetch_mode = parse_fetch_mode(fetch_mode)
@@ -44,6 +52,7 @@ def fetch_price(
             site_key=site_key,
             adapter_key=adapter_key,
             error=str(exc),
+            extracted_at=extracted_at,
         )
 
     if selected_sites is not None and adapter_key not in selected_sites:
@@ -54,6 +63,7 @@ def fetch_price(
             site_key=site_key,
             adapter_key=adapter_key,
             error=f"site_filtered_out:{adapter_key}",
+            extracted_at=extracted_at,
         )
 
     modes_to_try = ["http"] if normalized_fetch_mode == "auto" else [normalized_fetch_mode]
@@ -71,44 +81,17 @@ def fetch_price(
             continue
 
         fetched_any_page = True
-        adapter = ADAPTERS[adapter_key]
-        candidates = adapter.extract(page, url)
-        used_adapter = adapter.key
-
-        if not candidates and adapter.key != "generic":
-            # Preserve site-specific extraction first, then generic fallback.
-            generic_allowed = selected_sites is None or "generic" in selected_sites
-            if generic_allowed:
-                candidates = ADAPTERS["generic"].extract(page, url)
-                used_adapter = "generic"
-
-        if candidates:
-            listings = [
-                PriceListing(
-                    item_id=make_item_id(url, candidate, index),
-                    amount=format(candidate.amount, "f"),
-                    currency=candidate.currency,
-                    raw_text=candidate.raw_text,
-                    source=candidate.source,
-                    seller=candidate.seller,
-                    listing_url=candidate.listing_url,
-                )
-                for index, candidate in enumerate(candidates, 1)
-            ]
-            first = listings[0]
-            return PriceResult(
-                url=url,
-                success=True,
-                product_id=product_id,
-                site_key=site_key,
-                adapter_key=used_adapter,
-                amount=first.amount,
-                currency=first.currency,
-                raw_text=first.raw_text,
-                source=first.source,
-                listing_count=len(listings),
-                listings=listings,
-            )
+        extracted = extract_price_from_page(
+            page=page,
+            url=url,
+            selected_sites=selected_sites,
+            product_id=product_id,
+            site_key=site_key,
+            adapter_key=adapter_key,
+            extracted_at=extracted_at,
+        )
+        if extracted.success:
+            return extracted
 
         if normalized_fetch_mode == "auto" and mode == "http":
             # HTTP succeeded but extraction failed; inspect signals for escalation.
@@ -125,6 +108,7 @@ def fetch_price(
             site_key=site_key,
             adapter_key=adapter_key,
             error="price_not_found",
+            extracted_at=extracted_at,
         )
 
     error_detail = "; ".join(attempted_fetch_errors) if attempted_fetch_errors else "unknown"
@@ -135,6 +119,109 @@ def fetch_price(
         site_key=site_key,
         adapter_key=adapter_key,
         error=f"fetch_failed: {error_detail}",
+        extracted_at=extracted_at,
+    )
+
+
+def extract_price_from_page(
+    page: Any,
+    url: str,
+    selected_sites: set[str] | None = None,
+    *,
+    product_id: str | None = None,
+    site_key: str | None = None,
+    adapter_key: str | None = None,
+    extracted_at: str | None = None,
+) -> PriceResult:
+    """Extract a normalized `PriceResult` from an already-fetched page."""
+    resolved_product_id = product_id or make_product_id(url)
+    resolved_site_key = site_key or detect_site_key(url)
+    resolved_adapter_key = adapter_key or (resolved_site_key if resolved_site_key in ADAPTERS else "generic")
+    resolved_extracted_at = extracted_at or _utc_now_iso()
+    metadata = extract_product_metadata(page, url)
+
+    if selected_sites is not None and resolved_adapter_key not in selected_sites:
+        return PriceResult(
+            url=url,
+            success=False,
+            product_id=resolved_product_id,
+            site_key=resolved_site_key,
+            adapter_key=resolved_adapter_key,
+            error=f"site_filtered_out:{resolved_adapter_key}",
+            product_name=metadata["product_name"],
+            brand=metadata["brand"],
+            model=metadata["model"],
+            sku=metadata["sku"],
+            gtin=metadata["gtin"],
+            image_url=metadata["image_url"],
+            canonical_url=metadata["canonical_url"],
+            availability=metadata["availability"],
+            extracted_at=resolved_extracted_at,
+        )
+
+    adapter = ADAPTERS[resolved_adapter_key]
+    candidates = adapter.extract(page, url)
+    used_adapter = adapter.key
+
+    if not candidates and adapter.key != "generic":
+        generic_allowed = selected_sites is None or "generic" in selected_sites
+        if generic_allowed:
+            candidates = ADAPTERS["generic"].extract(page, url)
+            used_adapter = "generic"
+
+    if not candidates:
+        return PriceResult(
+            url=url,
+            success=False,
+            product_id=resolved_product_id,
+            site_key=resolved_site_key,
+            adapter_key=resolved_adapter_key,
+            error="price_not_found",
+            product_name=metadata["product_name"],
+            brand=metadata["brand"],
+            model=metadata["model"],
+            sku=metadata["sku"],
+            gtin=metadata["gtin"],
+            image_url=metadata["image_url"],
+            canonical_url=metadata["canonical_url"],
+            availability=metadata["availability"],
+            extracted_at=resolved_extracted_at,
+        )
+
+    listings = [
+        PriceListing(
+            item_id=make_item_id(url, candidate, index),
+            amount=format(candidate.amount, "f"),
+            currency=candidate.currency,
+            raw_text=candidate.raw_text,
+            source=candidate.source,
+            seller=candidate.seller,
+            listing_url=candidate.listing_url,
+        )
+        for index, candidate in enumerate(candidates, 1)
+    ]
+    first = listings[0]
+    return PriceResult(
+        url=url,
+        success=True,
+        product_id=resolved_product_id,
+        site_key=resolved_site_key,
+        adapter_key=used_adapter,
+        amount=first.amount,
+        currency=first.currency,
+        raw_text=first.raw_text,
+        source=first.source,
+        product_name=metadata["product_name"],
+        brand=metadata["brand"],
+        model=metadata["model"],
+        sku=metadata["sku"],
+        gtin=metadata["gtin"],
+        image_url=metadata["image_url"],
+        canonical_url=metadata["canonical_url"],
+        availability=metadata["availability"],
+        extracted_at=resolved_extracted_at,
+        listing_count=len(listings),
+        listings=listings,
     )
 
 
@@ -153,6 +240,7 @@ def scrape_prices(
 
 __all__ = [
     "SUPPORTED_FETCH_MODES",
+    "extract_price_from_page",
     "fetch_price",
     "list_supported_sites",
     "scrape_prices",
