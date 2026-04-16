@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+"""Generic extraction strategy shared across all sites.
+
+Fallback order is intentionally strict to prioritize high-signal sources first:
+1) structured data, 2) DOM selectors, 3) find/find_all, 4) metadata, 5) page text.
+"""
+
 import json
 from typing import Any, Iterator
 
@@ -21,6 +27,7 @@ from ..parsing import normalize_currency, parse_decimal, scan_price_in_text, sca
 
 
 def _iter_json_nodes(value: Any) -> Iterator[dict[str, Any]]:
+    """Yield every nested dict node from JSON-LD payloads."""
     if isinstance(value, dict):
         yield value
         for child in value.values():
@@ -31,6 +38,7 @@ def _iter_json_nodes(value: Any) -> Iterator[dict[str, Any]]:
 
 
 def _candidate_from_price_data(data: dict[str, Any], source: str) -> PriceCandidate | None:
+    """Build one candidate from schema-like price fields on a node."""
     direct_price = data.get("price")
     direct_currency = data.get("priceCurrency") or data.get("pricecurrency")
 
@@ -78,6 +86,7 @@ def _candidate_from_price_data(data: dict[str, Any], source: str) -> PriceCandid
 
 
 def _candidates_from_dict(data: dict[str, Any], source: str) -> list[PriceCandidate]:
+    """Extract candidate list from a schema node, prioritizing explicit offers."""
     candidates: list[PriceCandidate] = []
     offers = data.get("offers")
 
@@ -88,7 +97,7 @@ def _candidates_from_dict(data: dict[str, Any], source: str) -> list[PriceCandid
     elif isinstance(offers, dict):
         candidates.extend(_candidates_from_dict(offers, source))
 
-    # If we got explicit offers, they are the actual listings we want.
+    # Explicit offers represent individual listings and should win over aggregate values.
     if candidates:
         return candidates
 
@@ -97,6 +106,7 @@ def _candidates_from_dict(data: dict[str, Any], source: str) -> list[PriceCandid
 
 
 def deduplicate_candidates(candidates: list[PriceCandidate]) -> list[PriceCandidate]:
+    """Deduplicate by normalized economic identity fields."""
     seen: set[tuple[str, str, str, str]] = set()
     deduped: list[PriceCandidate] = []
 
@@ -116,6 +126,7 @@ def deduplicate_candidates(candidates: list[PriceCandidate]) -> list[PriceCandid
 
 
 def _element_text_candidates(element: Selector) -> tuple[str, str, str, str, str]:
+    """Collect text/attribute values once so scanners can reuse them."""
     return (
         str(element.get_all_text(separator=" ", strip=True)),
         str(element.attrib.get("content", "")),
@@ -132,6 +143,7 @@ def _candidate_from_element(
     require_currency: bool,
     text_candidates: tuple[str, str, str, str, str] | None = None,
 ) -> PriceCandidate | None:
+    """Parse one candidate from a selected element using pre-collected text fields."""
     listing_url = str(element.attrib.get("href", "")).strip() or None
     values = text_candidates or _element_text_candidates(element)
 
@@ -153,6 +165,7 @@ def _candidate_from_element(
 
 
 def _extract_find_based_candidates(page: Selector, meta_currency: str | None) -> list[PriceCandidate]:
+    """Fallback extraction using Scrapling `find/find_all` filters and regex."""
     candidates: list[PriceCandidate] = []
 
     for index, filter_map in enumerate(FIND_PRICE_ATTRIBUTE_FILTERS):
@@ -214,6 +227,12 @@ def _extract_find_based_candidates(page: Selector, meta_currency: str | None) ->
 
 
 def extract_price_listings_from_selector(page: Selector) -> list[PriceCandidate]:
+    """Extract all price listings from a parsed page.
+
+    This function is the canonical generic strategy used directly by the generic
+    adapter and indirectly by site adapters as a fallback.
+    """
+    # Resolve a page-level currency hint once, then propagate it downstream.
     meta_currency: str | None = None
     for selector in META_CURRENCY_SELECTORS:
         value = page.css(selector).get()
@@ -222,7 +241,7 @@ def extract_price_listings_from_selector(page: Selector) -> list[PriceCandidate]
             if meta_currency:
                 break
 
-    # 1) Structured data first: this is where multi-listing pages usually expose all offers.
+    # 1) Structured data is usually the most reliable on multi-offer pages.
     json_candidates: list[PriceCandidate] = []
     for idx, json_blob in enumerate(page.css("script[type='application/ld+json']::text").getall()):
         blob_text = str(json_blob).strip()
@@ -239,7 +258,7 @@ def extract_price_listings_from_selector(page: Selector) -> list[PriceCandidate]
     if json_candidates:
         return deduplicate_candidates(json_candidates)
 
-    # 2) DOM selectors: capture one candidate per matching element.
+    # 2) DOM selectors capture common rendered price widgets.
     dom_candidates: list[PriceCandidate] = []
     for selector in DOM_PRICE_SELECTORS:
         for element in page.css(selector)[:MAX_DOM_ELEMENTS]:
@@ -265,12 +284,12 @@ def extract_price_listings_from_selector(page: Selector) -> list[PriceCandidate]
     if dom_candidates:
         return deduplicate_candidates(dom_candidates)
 
-    # 3) find/find_all fallback (filters + regex).
+    # 3) Filter-based find/find_all fallback for weaker or shifting markup.
     find_candidates = _extract_find_based_candidates(page, meta_currency=meta_currency)
     if find_candidates:
         return find_candidates
 
-    # 4) Metadata fallback.
+    # 4) Metadata fallback for pages exposing only meta prices.
     for selector, source in META_PRICE_SELECTORS:
         value = page.css(selector).get()
         if not value:
@@ -288,7 +307,7 @@ def extract_price_listings_from_selector(page: Selector) -> list[PriceCandidate]
                 )
             ]
 
-    # 5) Fallback to full-page text, requiring currency token to reduce false positives.
+    # 5) Last resort: full-page scan requiring currency tokens to reduce noise.
     all_text = str(page.get_all_text(separator=" ", strip=True))
     fallback_candidates = scan_prices_in_text(all_text, source="page-text", require_currency=True)[
         :MAX_PAGE_TEXT_CANDIDATES
@@ -308,5 +327,6 @@ def extract_price_listings_from_selector(page: Selector) -> list[PriceCandidate]
 
 
 def extract_price_from_selector(page: Selector) -> PriceCandidate | None:
+    """Convenience accessor for callers that only need the first candidate."""
     listings = extract_price_listings_from_selector(page)
     return listings[0] if listings else None

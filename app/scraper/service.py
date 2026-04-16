@@ -1,5 +1,14 @@
 from __future__ import annotations
 
+"""Main scraper orchestration service.
+
+This module is the application-facing entry point for scraping. It coordinates:
+- URL/site resolution
+- fetcher mode selection/escalation
+- adapter execution
+- final result shaping
+"""
+
 from collections.abc import Iterable
 
 from .constants import SUPPORTED_FETCH_MODES
@@ -16,6 +25,11 @@ def fetch_price(
     selected_sites: set[str] | None = None,
     fetch_mode: str = "auto",
 ) -> PriceResult:
+    """Fetch and extract prices for a single URL.
+
+    The function keeps the high-level policy in one place so API and other
+    callers get identical behavior.
+    """
     product_id = make_product_id(url)
     site_key = detect_site_key(url)
     adapter_key = site_key if site_key in ADAPTERS else "generic"
@@ -52,6 +66,7 @@ def fetch_price(
         except Exception as exc:
             attempted_fetch_errors.append(f"{mode}: {exc}")
             if normalized_fetch_mode == "auto" and mode == "http":
+                # If plain HTTP fails, queue browser modes as next attempts.
                 modes_to_try.extend(["dynamic", "stealth"])
             continue
 
@@ -61,6 +76,7 @@ def fetch_price(
         used_adapter = adapter.key
 
         if not candidates and adapter.key != "generic":
+            # Preserve site-specific extraction first, then generic fallback.
             generic_allowed = selected_sites is None or "generic" in selected_sites
             if generic_allowed:
                 candidates = ADAPTERS["generic"].extract(page, url)
@@ -95,6 +111,7 @@ def fetch_price(
             )
 
         if normalized_fetch_mode == "auto" and mode == "http":
+            # HTTP succeeded but extraction failed; inspect signals for escalation.
             signals = detect_auto_escalation_signals(page)
             for followup_mode in auto_followup_modes(signals):
                 if followup_mode not in modes_to_try:
@@ -127,6 +144,7 @@ def scrape_prices(
     selected_sites: set[str] | None = None,
     fetch_mode: str = "auto",
 ) -> list[PriceResult]:
+    """Batch wrapper around `fetch_price` for in-process callers."""
     return [
         fetch_price(url, timeout=timeout, selected_sites=selected_sites, fetch_mode=fetch_mode)
         for url in urls

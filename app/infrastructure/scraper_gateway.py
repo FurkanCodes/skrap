@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Infrastructure adapter that bridges app service -> scraper package."""
+
 from dataclasses import dataclass
 
 from app.scraper import PriceResult, fetch_price, list_supported_sites
@@ -7,6 +9,8 @@ from app.scraper import PriceResult, fetch_price, list_supported_sites
 
 @dataclass(frozen=True)
 class ScraplingGateway:
+    """Concrete gateway implementation backed by the local scraper modules."""
+
     def fetch_price(
         self,
         url: str,

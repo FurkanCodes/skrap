@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Pure parsing/normalization helpers reused by extractors and adapters."""
+
 import hashlib
 import re
 from decimal import Decimal, InvalidOperation
@@ -10,6 +12,7 @@ from .domain import PriceCandidate
 
 
 def normalize_currency(token: str | None) -> str | None:
+    """Normalize symbol/code variants to canonical ISO-like codes."""
     if not token:
         return None
     normalized = token.strip().upper()
@@ -17,6 +20,7 @@ def normalize_currency(token: str | None) -> str | None:
 
 
 def parse_decimal(raw_amount: str) -> Decimal | None:
+    """Parse localized amount strings (thousands separators + decimal marks)."""
     cleaned = raw_amount.replace(" ", "")
 
     if "," in cleaned and "." in cleaned:
@@ -44,6 +48,7 @@ def parse_decimal(raw_amount: str) -> Decimal | None:
 
 
 def scan_price_in_text(text: str, source: str, require_currency: bool) -> PriceCandidate | None:
+    """Return the first price candidate found in a text fragment."""
     compact = " ".join(text.split())
 
     for match in PRICE_PATTERN.finditer(compact):
@@ -67,6 +72,7 @@ def scan_price_in_text(text: str, source: str, require_currency: bool) -> PriceC
 
 
 def scan_prices_in_text(text: str, source: str, require_currency: bool) -> list[PriceCandidate]:
+    """Return all price candidates found in a text fragment."""
     compact = " ".join(text.split())
     candidates: list[PriceCandidate] = []
 
@@ -93,6 +99,7 @@ def scan_prices_in_text(text: str, source: str, require_currency: bool) -> list[
 
 
 def strip_tracking_query_params(url: str) -> str:
+    """Normalize URL and remove tracking parameters for stable ID generation."""
     parsed = urlparse(url)
     filtered_query = [
         (key, value)
@@ -121,12 +128,17 @@ def strip_tracking_query_params(url: str) -> str:
 
 
 def make_product_id(url: str) -> str:
+    """Generate stable product ID from normalized canonical URL."""
     normalized_url = strip_tracking_query_params(url)
     digest = hashlib.sha256(normalized_url.encode("utf-8")).hexdigest()[:20]
     return f"prd_{digest}"
 
 
 def make_item_id(base_url: str, candidate: PriceCandidate, index: int) -> str:
+    """Generate stable listing/item ID using listing URL when available.
+
+    `index` is only used in fallback seeds where no listing URL exists.
+    """
     normalized_base = strip_tracking_query_params(base_url)
     if candidate.listing_url:
         listing_ref = candidate.listing_url.strip()

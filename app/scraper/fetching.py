@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Fetcher selection and auto-escalation heuristics."""
+
 from scrapling.fetchers import DynamicFetcher, Fetcher, StealthyFetcher
 from scrapling.parser import Selector
 
@@ -7,6 +9,12 @@ from .constants import JAVASCRIPT_HINTS, PROTECTION_HINTS, PROTECTION_STATUS_COD
 
 
 def fetch_page_with_mode(url: str, timeout: int, mode: str) -> Selector:
+    """Fetch a page using the requested fetch transport mode.
+
+    - `http`: lightweight HTTP fetcher
+    - `dynamic`: Playwright-backed browser fetcher
+    - `stealth`: hardened browser fetcher for protected targets
+    """
     if mode == "http":
         return Fetcher.get(
             url,
@@ -40,6 +48,7 @@ def fetch_page_with_mode(url: str, timeout: int, mode: str) -> Selector:
 
 
 def detect_auto_escalation_signals(page: Selector) -> set[str]:
+    """Detect whether HTTP results indicate JS/protection escalation is needed."""
     signals: set[str] = set()
 
     status = getattr(page, "status", None)
@@ -63,6 +72,7 @@ def detect_auto_escalation_signals(page: Selector) -> set[str]:
 
 
 def auto_followup_modes(signals: set[str]) -> list[str]:
+    """Choose follow-up modes in preferred order for auto mode."""
     if "protection" in signals:
         return ["stealth", "dynamic"]
     if "javascript" in signals:

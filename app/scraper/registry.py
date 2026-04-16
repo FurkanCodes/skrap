@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Site registry and domain-to-adapter routing."""
+
 from urllib.parse import urlparse
 
 from .adapters import AkakceAdapter, GenericAdapter, NeweggAdapter, SiteAdapter
@@ -23,10 +25,12 @@ ADAPTERS: dict[str, SiteAdapter] = {
 
 
 def list_supported_sites() -> dict[str, str]:
+    """Return a copy so callers cannot mutate registry state."""
     return dict(SUPPORTED_SITES)
 
 
 def detect_site_key(url: str) -> str:
+    """Map URL host to adapter key, falling back to `generic`."""
     host = urlparse(url).netloc.lower()
     if host.startswith("www."):
         host = host[4:]

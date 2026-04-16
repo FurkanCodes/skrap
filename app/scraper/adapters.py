@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+"""Site-specific extraction adapters.
+
+Adapters isolate target-specific selectors while reusing shared parsing helpers.
+"""
+
 import re
 
 from scrapling.parser import Selector
@@ -10,6 +15,8 @@ from .parsing import scan_price_in_text
 
 
 class SiteAdapter:
+    """Base adapter contract used by the registry/service layers."""
+
     key = "generic"
 
     def extract(self, page: Selector, url: str) -> list[PriceCandidate]:
@@ -17,6 +24,8 @@ class SiteAdapter:
 
 
 class GenericAdapter(SiteAdapter):
+    """Default adapter for unknown domains."""
+
     key = "generic"
 
     def extract(self, page: Selector, url: str) -> list[PriceCandidate]:
@@ -24,6 +33,8 @@ class GenericAdapter(SiteAdapter):
 
 
 class AkakceAdapter(SiteAdapter):
+    """Akakce-specific listing parser with seller cleanup rules."""
+
     key = "akakce"
 
     @staticmethod
@@ -85,6 +96,8 @@ class AkakceAdapter(SiteAdapter):
 
 
 class NeweggAdapter(SiteAdapter):
+    """Newegg parser for both listing and product-detail pages."""
+
     key = "newegg"
 
     def extract(self, page: Selector, url: str) -> list[PriceCandidate]:
@@ -118,7 +131,7 @@ class NeweggAdapter(SiteAdapter):
             if candidates:
                 return deduplicate_candidates(candidates)
 
-        # Product detail fallback
+        # Product-detail fallback when no listing grid is available.
         price_nodes = page.css(".price-current")
         if price_nodes:
             price_text = str(price_nodes[0].get_all_text(separator=" ", strip=True))
