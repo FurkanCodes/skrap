@@ -95,6 +95,36 @@ DOM_PRICE_SELECTORS = [
     "[id*='price']",
 ]
 
+FIND_PRICE_ATTRIBUTE_FILTERS: list[dict[str, str]] = [
+    {"itemprop": "price"},
+    {"class*": "price"},
+    {"id*": "price"},
+    {"data-testid*": "price"},
+    {"data-qa*": "price"},
+    {"data-price*": ""},
+    {"aria-label*": "price"},
+]
+
+FIND_TEXT_PRICE_REGEX = re.compile(
+    rf"(?:{CURRENCY_TOKEN_PATTERN})\s*\d[\d\s.,]*|\d[\d\s.,]*\s*(?:{CURRENCY_TOKEN_PATTERN})",
+    re.IGNORECASE,
+)
+
+SKIPPED_FIND_REGEX_TAGS = {
+    "html",
+    "body",
+    "main",
+    "section",
+    "article",
+    "ul",
+    "ol",
+    "table",
+    "thead",
+    "tbody",
+    "tfoot",
+    "tr",
+}
+
 SUPPORTED_SITES: dict[str, str] = {
     "generic": "Generic extractor (fallback for any site)",
     "akakce": "Akakce adapter",
@@ -426,6 +456,88 @@ def _deduplicate_candidates(candidates: list[PriceCandidate]) -> list[PriceCandi
     return deduped
 
 
+def _candidate_from_element(
+    element: Selector, source: str, meta_currency: str | None, require_currency: bool
+) -> PriceCandidate | None:
+    text_candidates = [
+        str(element.get_all_text(separator=" ", strip=True)),
+        str(element.attrib.get("content", "")),
+        str(element.attrib.get("data-price", "")),
+        str(element.attrib.get("value", "")),
+        str(element.attrib.get("aria-label", "")),
+    ]
+
+    listing_url = str(element.attrib.get("href", "")).strip() or None
+
+    for text in text_candidates:
+        if not text:
+            continue
+        parsed = _scan_price_in_text(text, source=source, require_currency=require_currency)
+        if not parsed:
+            continue
+        return PriceCandidate(
+            raw_text=parsed.raw_text,
+            amount=parsed.amount,
+            currency=parsed.currency or meta_currency,
+            source=source,
+            listing_url=listing_url,
+        )
+
+    return None
+
+
+def _extract_find_based_candidates(page: Selector, meta_currency: str | None) -> list[PriceCandidate]:
+    candidates: list[PriceCandidate] = []
+
+    for index, filter_map in enumerate(FIND_PRICE_ATTRIBUTE_FILTERS):
+        source = f"find:filter:{index}"
+        first_element = page.find(filter_map)
+        if first_element:
+            candidate = _candidate_from_element(
+                first_element,
+                source=f"{source}:first",
+                meta_currency=meta_currency,
+                require_currency=False,
+            )
+            if candidate:
+                candidates.append(candidate)
+
+        for element in page.find_all(filter_map)[:200]:
+            candidate = _candidate_from_element(
+                element,
+                source=source,
+                meta_currency=meta_currency,
+                require_currency=False,
+            )
+            if candidate:
+                candidates.append(candidate)
+
+    first_regex_match = page.find(FIND_TEXT_PRICE_REGEX)
+    if first_regex_match:
+        first_candidate = _candidate_from_element(
+            first_regex_match,
+            source="find:regex:first",
+            meta_currency=meta_currency,
+            require_currency=True,
+        )
+        if first_candidate:
+            candidates.append(first_candidate)
+
+    for element in page.find_all(FIND_TEXT_PRICE_REGEX)[:200]:
+        if str(getattr(element, "tag", "")).lower() in SKIPPED_FIND_REGEX_TAGS:
+            continue
+        candidate = _candidate_from_element(
+            element,
+            source="find:regex",
+            meta_currency=meta_currency,
+            require_currency=True,
+        )
+        if candidate:
+            candidates.append(candidate)
+
+    return _deduplicate_candidates(candidates)
+
+
 def _extract_generic_price_listings_from_selector(page: Selector) -> list[PriceCandidate]:
     meta_currency: str | None = None
     for selector in META_CURRENCY_SELECTORS:
@@ -488,7 +600,12 @@ def _extract_generic_price_listings_from_selector(page: Selector) -> list[PriceC
     if dom_candidates:
         return _deduplicate_candidates(dom_candidates)
 
-    # 3) Metadata fallback.
+    # 3) find/find_all fallback (filters + regex).
+    find_candidates = _extract_find_based_candidates(page, meta_currency=meta_currency)
+    if find_candidates:
+        return find_candidates
+
+    # 4) Metadata fallback.
     for selector, source in META_PRICE_SELECTORS:
         value = page.css(selector).get()
         if not value:
@@ -506,7 +623,7 @@ def _extract_generic_price_listings_from_selector(page: Selector) -> list[PriceC
                 )
             ]
 
-    # 4) Fallback to full-page text, requiring currency token to reduce false positives.
+    # 5) Fallback to full-page text, requiring currency token to reduce false positives.
     all_text = str(page.get_all_text(separator=" ", strip=True))
     fallback_candidates = _scan_prices_in_text(all_text, source="page-text", require_currency=True)[:200]
     normalized_fallback = [

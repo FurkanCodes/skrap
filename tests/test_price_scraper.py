@@ -104,6 +104,45 @@ def test_extract_from_dom_text_fallback() -> None:
     assert results[0].source.startswith("dom:")
 
 
+def test_extract_from_find_fallback_with_attribute_filters() -> None:
+    page = Selector(
+        """
+        <html>
+          <body>
+            <div data-qa="price-tag">$129.50</div>
+          </body>
+        </html>
+        """
+    )
+
+    results = extract_price_listings_from_selector(page)
+
+    assert len(results) == 1
+    assert str(results[0].amount) == "129.50"
+    assert results[0].currency == "USD"
+    assert results[0].source.startswith("find:")
+
+
+def test_extract_from_find_fallback_with_regex_search() -> None:
+    page = Selector(
+        """
+        <html>
+          <body>
+            <div class='offer-card'>Special deal EUR 31,20 today only</div>
+            <div class='offer-card'>Another deal US$44.00 with shipping</div>
+          </body>
+        </html>
+        """
+    )
+
+    results = extract_price_listings_from_selector(page)
+
+    assert len(results) >= 2
+    assert any(str(item.amount) == "31.20" and item.currency == "EUR" for item in results)
+    assert any(str(item.amount) == "44.00" and item.currency == "USD" for item in results)
+    assert any(item.source.startswith("find:regex") for item in results)
+
+
 def test_parse_urls_blob() -> None:
     urls = parse_urls_blob(
         """

@@ -84,7 +84,7 @@ You can optionally set a site filter in the `sites` input (example: `akakce,newe
 ## Notes
 
 - Adapter flow: domain -> site adapter (`akakce` / `newegg`) -> optional generic fallback.
-- Generic extraction order: JSON-LD listings -> DOM listings -> meta tags -> page-text fallback.
+- Generic extraction order: JSON-LD listings -> DOM listings -> `find/find_all` fallback -> meta tags -> page-text fallback.
 - Some websites hide prices behind JavaScript/anti-bot checks. In those cases, dynamic fetchers may be needed.
 
 ## 4) Add a new site adapter
