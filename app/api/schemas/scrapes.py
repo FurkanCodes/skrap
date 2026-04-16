@@ -56,3 +56,33 @@ class ScrapeBatchResponse(BaseModel):
     success_count: int
     failure_count: int
     results: list[PriceResultResponse]
+
+
+class DiscoveryStatsResponse(BaseModel):
+    requests_count: int
+    failed_requests_count: int
+    blocked_requests_count: int
+    offsite_requests_count: int
+    elapsed_seconds: float
+    sessions_requests_count: dict[str, int]
+
+
+class DiscoverBatchRequest(BaseModel):
+    start_urls: list[AnyHttpUrl] = Field(min_length=1)
+    sites: list[str] | None = None
+    timeout_seconds: int | None = Field(default=None, ge=1)
+    fetch_mode: Literal["auto", "http", "dynamic", "stealth"] = "auto"
+    max_pages: int = Field(default=50, ge=1, le=300)
+    max_depth: int = Field(default=2, ge=0, le=5)
+
+
+class DiscoverBatchResponse(BaseModel):
+    request_id: str
+    seed_count: int
+    discovered_url_count: int
+    discovered_urls: list[str]
+    discovery_stats: DiscoveryStatsResponse
+    total_urls: int
+    success_count: int
+    failure_count: int
+    results: list[PriceResultResponse]

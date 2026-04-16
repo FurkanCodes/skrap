@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api.routers.discover import router as discover_router
 from app.api.routers.health import router as health_router
 from app.api.routers.scrapes import router as scrapes_router
 from app.api.routers.sites import router as sites_router
@@ -81,9 +82,9 @@ def create_app() -> FastAPI:
 
     app.include_router(health_router)
     app.include_router(sites_router, prefix=settings.api_prefix)
+    app.include_router(discover_router, prefix=settings.api_prefix)
     app.include_router(scrapes_router, prefix=settings.api_prefix)
     return app
 
 
 app = create_app()
-

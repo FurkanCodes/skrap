@@ -4,10 +4,16 @@ from dataclasses import dataclass
 
 from fastapi.testclient import TestClient
 
-from app.api.dependencies import get_scrape_service
-from app.scraper import PriceListing, PriceResult
+from app.api.dependencies import get_discovery_service, get_scrape_service
+from app.application.discovery_service import (
+    DiscoveryBatchInput,
+    DiscoveryBatchOutput,
+    DiscoveryPhaseError,
+)
 from app.application.scrape_service import ScrapeBatchInput, ScrapeBatchOutput
 from app.main import app
+from app.scraper import PriceListing, PriceResult
+from app.scraper.discovery import DiscoveryStats
 
 
 @dataclass
@@ -87,15 +93,81 @@ class FakeScrapeService:
         )
 
 
-def _build_client(fake_service: FakeScrapeService) -> TestClient:
-    app.dependency_overrides[get_scrape_service] = lambda: fake_service
+@dataclass
+class FakeDiscoveryService:
+    last_input: DiscoveryBatchInput | None = None
+
+    def list_sites(self) -> dict[str, str]:
+        return {
+            "akakce": "Akakce adapter",
+            "generic": "Generic extractor (fallback for any site)",
+            "newegg": "Newegg adapter",
+        }
+
+    def discover_and_scrape(self, payload: DiscoveryBatchInput) -> DiscoveryBatchOutput:
+        self.last_input = payload
+
+        listing = PriceListing(
+            item_id="itm_discover",
+            amount="149.90",
+            currency="USD",
+            raw_text="$149.90",
+            source="test:discover",
+            seller="Discover Store",
+            listing_url="https://example.com/product-1",
+        )
+        result = PriceResult(
+            url="https://example.com/product-1",
+            success=True,
+            product_id="prd_discover",
+            site_key="generic",
+            adapter_key="generic",
+            amount=listing.amount,
+            currency=listing.currency,
+            raw_text=listing.raw_text,
+            source=listing.source,
+            listing_count=1,
+            listings=[listing],
+        )
+        return DiscoveryBatchOutput(
+            request_id=payload.request_id,
+            seed_count=len(payload.start_urls),
+            discovered_url_count=1,
+            discovered_urls=["https://example.com/product-1"],
+            discovery_stats=DiscoveryStats(
+                requests_count=6,
+                failed_requests_count=0,
+                blocked_requests_count=1,
+                offsite_requests_count=2,
+                elapsed_seconds=1.25,
+                sessions_requests_count={"http": 5, "stealth": 1},
+            ),
+            total_urls=1,
+            success_count=1,
+            failure_count=0,
+            results=[result],
+        )
+
+
+def _build_client(
+    fake_scrape_service: FakeScrapeService | None = None,
+    fake_discovery_service: object | None = None,
+) -> TestClient:
+    if fake_scrape_service is not None:
+        app.dependency_overrides[get_scrape_service] = lambda: fake_scrape_service
+    if fake_discovery_service is not None:
+        app.dependency_overrides[get_discovery_service] = lambda: fake_discovery_service
     return TestClient(app)
 
 
-def test_health_endpoint_returns_ok_and_request_id() -> None:
-    client = _build_client(FakeScrapeService())
-    response = client.get("/health")
+def _clear_overrides() -> None:
     app.dependency_overrides.clear()
+
+
+def test_health_endpoint_returns_ok_and_request_id() -> None:
+    client = _build_client(fake_scrape_service=FakeScrapeService(), fake_discovery_service=FakeDiscoveryService())
+    response = client.get("/health")
+    _clear_overrides()
 
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
@@ -103,9 +175,9 @@ def test_health_endpoint_returns_ok_and_request_id() -> None:
 
 
 def test_sites_endpoint_returns_supported_sites() -> None:
-    client = _build_client(FakeScrapeService())
+    client = _build_client(fake_scrape_service=FakeScrapeService())
     response = client.get("/api/v1/sites")
-    app.dependency_overrides.clear()
+    _clear_overrides()
 
     assert response.status_code == 200
     payload = response.json()
@@ -114,7 +186,7 @@ def test_sites_endpoint_returns_supported_sites() -> None:
 
 def test_scrapes_endpoint_returns_batch_summary_and_deduped_urls() -> None:
     fake_service = FakeScrapeService()
-    client = _build_client(fake_service)
+    client = _build_client(fake_scrape_service=fake_service)
     response = client.post(
         "/api/v1/scrapes",
         json={
@@ -128,7 +200,7 @@ def test_scrapes_endpoint_returns_batch_summary_and_deduped_urls() -> None:
             "fetch_mode": "http",
         },
     )
-    app.dependency_overrides.clear()
+    _clear_overrides()
 
     assert response.status_code == 200
     body = response.json()
@@ -148,7 +220,7 @@ def test_scrapes_endpoint_returns_batch_summary_and_deduped_urls() -> None:
 
 
 def test_scrapes_endpoint_rejects_unknown_site_key() -> None:
-    client = _build_client(FakeScrapeService())
+    client = _build_client(fake_scrape_service=FakeScrapeService())
     response = client.post(
         "/api/v1/scrapes",
         json={
@@ -156,7 +228,7 @@ def test_scrapes_endpoint_rejects_unknown_site_key() -> None:
             "sites": ["unknown_site"],
         },
     )
-    app.dependency_overrides.clear()
+    _clear_overrides()
 
     assert response.status_code == 422
     assert "Unsupported site key" in response.json()["detail"]
@@ -164,15 +236,138 @@ def test_scrapes_endpoint_rejects_unknown_site_key() -> None:
 
 def test_scrapes_endpoint_uses_auto_fetch_mode_by_default() -> None:
     fake_service = FakeScrapeService()
-    client = _build_client(fake_service)
+    client = _build_client(fake_scrape_service=fake_service)
     response = client.post(
         "/api/v1/scrapes",
         json={
             "urls": ["https://example.com/product-a"],
         },
     )
-    app.dependency_overrides.clear()
+    _clear_overrides()
 
     assert response.status_code == 200
     assert fake_service.last_input is not None
     assert fake_service.last_input.fetch_mode == "auto"
+
+
+def test_discover_endpoint_returns_summary_stats_and_results() -> None:
+    fake_service = FakeDiscoveryService()
+    client = _build_client(fake_discovery_service=fake_service)
+    response = client.post(
+        "/api/v1/discover",
+        json={
+            "start_urls": ["https://example.com/category/laptops"],
+            "sites": ["generic"],
+            "timeout_seconds": 20,
+            "fetch_mode": "auto",
+            "max_pages": 40,
+            "max_depth": 2,
+        },
+    )
+    _clear_overrides()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["seed_count"] == 1
+    assert body["discovered_url_count"] == 1
+    assert body["total_urls"] == 1
+    assert body["success_count"] == 1
+    assert body["failure_count"] == 0
+    assert body["discovery_stats"]["requests_count"] == 6
+    assert body["discovery_stats"]["sessions_requests_count"] == {"http": 5, "stealth": 1}
+    assert len(body["results"]) == 1
+
+    assert fake_service.last_input is not None
+    assert fake_service.last_input.selected_sites == {"generic"}
+    assert fake_service.last_input.max_pages == 40
+    assert fake_service.last_input.max_depth == 2
+
+
+def test_discover_endpoint_rejects_unknown_site_key() -> None:
+    client = _build_client(fake_discovery_service=FakeDiscoveryService())
+    response = client.post(
+        "/api/v1/discover",
+        json={
+            "start_urls": ["https://example.com/category/laptops"],
+            "sites": ["unknown_site"],
+        },
+    )
+    _clear_overrides()
+
+    assert response.status_code == 422
+    assert "Unsupported site key" in response.json()["detail"]
+
+
+def test_discover_endpoint_rejects_max_pages_out_of_bounds() -> None:
+    client = _build_client(fake_discovery_service=FakeDiscoveryService())
+    response = client.post(
+        "/api/v1/discover",
+        json={
+            "start_urls": ["https://example.com/category/laptops"],
+            "max_pages": 999,
+        },
+    )
+    _clear_overrides()
+
+    assert response.status_code == 422
+
+
+def test_discover_endpoint_rejects_max_depth_out_of_bounds() -> None:
+    client = _build_client(fake_discovery_service=FakeDiscoveryService())
+    response = client.post(
+        "/api/v1/discover",
+        json={
+            "start_urls": ["https://example.com/category/laptops"],
+            "max_depth": 99,
+        },
+    )
+    _clear_overrides()
+
+    assert response.status_code == 422
+
+
+def test_discover_endpoint_rejects_timeout_out_of_bounds() -> None:
+    client = _build_client(fake_discovery_service=FakeDiscoveryService())
+    response = client.post(
+        "/api/v1/discover",
+        json={
+            "start_urls": ["https://example.com/category/laptops"],
+            "timeout_seconds": 1,
+        },
+    )
+    _clear_overrides()
+
+    assert response.status_code == 422
+    assert "timeout_seconds must be between" in response.json()["detail"]
+
+
+def test_discover_endpoint_rejects_too_many_seed_urls() -> None:
+    client = _build_client(fake_discovery_service=FakeDiscoveryService())
+    urls = [f"https://example.com/seed/{index}" for index in range(60)]
+    response = client.post(
+        "/api/v1/discover",
+        json={"start_urls": urls},
+    )
+    _clear_overrides()
+
+    assert response.status_code == 422
+    assert "At most" in response.json()["detail"]
+
+
+def test_discover_endpoint_maps_discovery_phase_errors_to_502() -> None:
+    class _FailingDiscoveryService:
+        def list_sites(self) -> dict[str, str]:
+            return {"generic": "Generic extractor (fallback for any site)"}
+
+        def discover_and_scrape(self, payload: DiscoveryBatchInput) -> DiscoveryBatchOutput:  # noqa: ARG002
+            raise DiscoveryPhaseError("spider_crashed")
+
+    client = _build_client(fake_discovery_service=_FailingDiscoveryService())
+    response = client.post(
+        "/api/v1/discover",
+        json={"start_urls": ["https://example.com/category/laptops"]},
+    )
+    _clear_overrides()
+
+    assert response.status_code == 502
+    assert response.json()["detail"] == "discovery_failed: spider_crashed"

@@ -4,6 +4,7 @@ from functools import lru_cache
 
 from fastapi import Depends
 
+from app.application.discovery_service import DiscoveryBatchService
 from app.application.scrape_service import ScrapeBatchService
 from app.core.config import Settings, get_settings
 from app.infrastructure.scraper_gateway import ScraplingGateway
@@ -21,3 +22,13 @@ def _get_scrape_service_cached(scrape_concurrency: int) -> ScrapeBatchService:
 
 def get_scrape_service(settings: Settings = Depends(get_app_settings)) -> ScrapeBatchService:
     return _get_scrape_service_cached(settings.scrape_concurrency)
+
+
+@lru_cache
+def _get_discovery_service_cached(scrape_concurrency: int) -> DiscoveryBatchService:
+    scrape_service = _get_scrape_service_cached(scrape_concurrency)
+    return DiscoveryBatchService(scrape_service=scrape_service)
+
+
+def get_discovery_service(settings: Settings = Depends(get_app_settings)) -> DiscoveryBatchService:
+    return _get_discovery_service_cached(settings.scrape_concurrency)
