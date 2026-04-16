@@ -5,9 +5,9 @@ from dataclasses import dataclass
 from fastapi.testclient import TestClient
 
 from app.api.dependencies import get_scrape_service
+from app.scraper import PriceListing, PriceResult
 from app.application.scrape_service import ScrapeBatchInput, ScrapeBatchOutput
 from app.main import app
-from price_scraper import PriceListing, PriceResult
 
 
 @dataclass

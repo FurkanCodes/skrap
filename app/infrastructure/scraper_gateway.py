@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from price_scraper import SUPPORTED_SITES, PriceResult, fetch_price
+from app.scraper import PriceResult, fetch_price, list_supported_sites
 
 
 @dataclass(frozen=True)
@@ -22,4 +22,4 @@ class ScraplingGateway:
         )
 
     def list_sites(self) -> dict[str, str]:
-        return dict(SUPPORTED_SITES)
+        return list_supported_sites()

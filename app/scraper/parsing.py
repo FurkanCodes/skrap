@@ -1,0 +1,154 @@
+from __future__ import annotations
+
+import hashlib
+import re
+from decimal import Decimal, InvalidOperation
+from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
+
+from .constants import CURRENCY_TOKEN_TO_CODE, PRICE_PATTERN
+from .domain import PriceCandidate
+
+
+def normalize_currency(token: str | None) -> str | None:
+    if not token:
+        return None
+    normalized = token.strip().upper()
+    return CURRENCY_TOKEN_TO_CODE.get(normalized)
+
+
+def parse_decimal(raw_amount: str) -> Decimal | None:
+    cleaned = raw_amount.replace(" ", "")
+
+    if "," in cleaned and "." in cleaned:
+        if cleaned.rfind(",") > cleaned.rfind("."):
+            cleaned = cleaned.replace(".", "").replace(",", ".")
+        else:
+            cleaned = cleaned.replace(",", "")
+    elif "," in cleaned:
+        parts = cleaned.split(",")
+        if len(parts) > 1 and len(parts[-1]) == 2:
+            cleaned = cleaned.replace(",", ".")
+        else:
+            cleaned = cleaned.replace(",", "")
+    elif "." in cleaned:
+        parts = cleaned.split(".")
+        if len(parts) > 2:
+            cleaned = cleaned.replace(".", "")
+        elif len(parts) == 2 and len(parts[-1]) == 3:
+            cleaned = cleaned.replace(".", "")
+
+    try:
+        return Decimal(cleaned)
+    except InvalidOperation:
+        return None
+
+
+def scan_price_in_text(text: str, source: str, require_currency: bool) -> PriceCandidate | None:
+    compact = " ".join(text.split())
+
+    for match in PRICE_PATTERN.finditer(compact):
+        currency_token = match.group("currency_before") or match.group("currency_after")
+        if require_currency and not currency_token:
+            continue
+
+        amount = parse_decimal(match.group("amount"))
+        if amount is None:
+            continue
+
+        raw = match.group(0).strip()
+        return PriceCandidate(
+            raw_text=raw,
+            amount=amount,
+            currency=normalize_currency(currency_token),
+            source=source,
+        )
+
+    return None
+
+
+def scan_prices_in_text(text: str, source: str, require_currency: bool) -> list[PriceCandidate]:
+    compact = " ".join(text.split())
+    candidates: list[PriceCandidate] = []
+
+    for match in PRICE_PATTERN.finditer(compact):
+        currency_token = match.group("currency_before") or match.group("currency_after")
+        if require_currency and not currency_token:
+            continue
+
+        amount = parse_decimal(match.group("amount"))
+        if amount is None:
+            continue
+
+        raw = match.group(0).strip()
+        candidates.append(
+            PriceCandidate(
+                raw_text=raw,
+                amount=amount,
+                currency=normalize_currency(currency_token),
+                source=source,
+            )
+        )
+
+    return candidates
+
+
+def strip_tracking_query_params(url: str) -> str:
+    parsed = urlparse(url)
+    filtered_query = [
+        (key, value)
+        for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+        if not re.match(
+            r"^(utm_|fbclid$|gclid$|yclid$|ref$|tag$|aff$|affiliate$|mc_cid$|mc_eid$)",
+            key,
+            re.IGNORECASE,
+        )
+    ]
+    normalized_query = urlencode(sorted(filtered_query), doseq=True)
+    normalized_path = parsed.path or "/"
+    if normalized_path != "/":
+        normalized_path = normalized_path.rstrip("/")
+
+    return urlunparse(
+        (
+            parsed.scheme.lower(),
+            parsed.netloc.lower(),
+            normalized_path,
+            "",
+            normalized_query,
+            "",
+        )
+    )
+
+
+def make_product_id(url: str) -> str:
+    normalized_url = strip_tracking_query_params(url)
+    digest = hashlib.sha256(normalized_url.encode("utf-8")).hexdigest()[:20]
+    return f"prd_{digest}"
+
+
+def make_item_id(base_url: str, candidate: PriceCandidate, index: int) -> str:
+    normalized_base = strip_tracking_query_params(base_url)
+    if candidate.listing_url:
+        listing_ref = candidate.listing_url.strip()
+        if listing_ref.startswith("#"):
+            seed = f"url-fragment|{normalized_base}|{listing_ref}"
+        else:
+            absolute_listing = urljoin(base_url, listing_ref)
+            normalized_listing = strip_tracking_query_params(absolute_listing)
+            seed = f"url|{normalized_listing}"
+    else:
+        seed = "|".join(
+            [
+                "fallback",
+                normalized_base,
+                (candidate.seller or "").strip().lower(),
+                (candidate.currency or "").strip().upper(),
+                format(candidate.amount, "f"),
+                candidate.source.strip().lower(),
+                candidate.raw_text.strip().lower(),
+                str(index),
+            ]
+        )
+
+    digest = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:20]
+    return f"itm_{digest}"

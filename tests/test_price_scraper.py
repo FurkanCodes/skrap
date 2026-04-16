@@ -1,19 +1,17 @@
-from scrapling.parser import Selector
+from __future__ import annotations
 
 from decimal import Decimal
 
 import pytest
+from scrapling.parser import Selector
 
-from price_scraper import (
-    AkakceAdapter,
-    PriceCandidate,
-    _make_item_id,
-    detect_site_key,
-    extract_price_listings_from_selector,
-    parse_fetch_mode,
-    parse_sites_blob,
-    parse_urls_blob,
-)
+from app.scraper.adapters import AkakceAdapter
+from app.scraper.domain import PriceCandidate
+from app.scraper.extractors.generic import extract_price_listings_from_selector
+from app.scraper.fetching import auto_followup_modes, detect_auto_escalation_signals
+from app.scraper.inputs import parse_fetch_mode, parse_sites_blob, parse_urls_blob
+from app.scraper.parsing import make_item_id
+from app.scraper.registry import ADAPTERS, detect_site_key, list_supported_sites
 
 
 def test_extract_from_meta_tags_single_listing() -> None:
@@ -178,8 +176,8 @@ def test_item_id_is_stable_for_same_listing_url() -> None:
         listing_url="https://shop.example/one?utm_source=test",
     )
 
-    first = _make_item_id("https://example.com/product", candidate, 1)
-    second = _make_item_id("https://example.com/product", candidate, 99)
+    first = make_item_id("https://example.com/product", candidate, 1)
+    second = make_item_id("https://example.com/product", candidate, 99)
 
     assert first == second
     assert first.startswith("itm_")
@@ -203,8 +201,8 @@ def test_item_id_changes_for_different_listing_urls() -> None:
         listing_url="https://shop.example/two",
     )
 
-    first = _make_item_id("https://example.com/product", first_candidate, 1)
-    second = _make_item_id("https://example.com/product", second_candidate, 1)
+    first = make_item_id("https://example.com/product", first_candidate, 1)
+    second = make_item_id("https://example.com/product", second_candidate, 1)
 
     assert first != second
 
@@ -227,8 +225,8 @@ def test_item_id_changes_for_different_fragment_listing_urls() -> None:
         listing_url="#/2739099/?s=2&v=10001",
     )
 
-    first = _make_item_id("https://www.akakce.com/example,123.html", first_candidate, 1)
-    second = _make_item_id("https://www.akakce.com/example,123.html", second_candidate, 1)
+    first = make_item_id("https://www.akakce.com/example,123.html", first_candidate, 1)
+    second = make_item_id("https://www.akakce.com/example,123.html", second_candidate, 1)
 
     assert first != second
 
@@ -301,3 +299,54 @@ def test_detect_site_key() -> None:
     assert detect_site_key("https://www.akakce.com/ssd/a") == "akakce"
     assert detect_site_key("https://newegg.com/p/pl?d=4070") == "newegg"
     assert detect_site_key("https://example.com/product") == "generic"
+
+
+def test_registry_keys_match_supported_sites() -> None:
+    assert set(ADAPTERS) == set(list_supported_sites())
+
+
+def test_auto_escalation_signals_and_followup_order() -> None:
+    class _Selection(list):
+        def getall(self) -> list[str]:
+            return list(self)
+
+    class _FakePage:
+        def __init__(self, status: int | None, text: str, script_count: int = 0, noscript: list[str] | None = None):
+            self.status = status
+            self._text = text
+            self._script_count = script_count
+            self._noscript = noscript or []
+
+        def get_all_text(self, separator: str = " ", strip: bool = True) -> str:
+            return self._text
+
+        def css(self, selector: str) -> _Selection:
+            if selector == "script":
+                return _Selection([object() for _ in range(self._script_count)])
+            if selector == "noscript::text":
+                return _Selection(self._noscript)
+            return _Selection([])
+
+    protection_page = _FakePage(status=403, text="welcome")
+    js_page = _FakePage(status=None, text="Please enable JavaScript to continue", script_count=20)
+
+    protection_signals = detect_auto_escalation_signals(protection_page)
+    js_signals = detect_auto_escalation_signals(js_page)
+
+    assert protection_signals == {"protection"}
+    assert js_signals == {"javascript"}
+    assert auto_followup_modes(protection_signals) == ["stealth", "dynamic"]
+    assert auto_followup_modes(js_signals) == ["dynamic", "stealth"]
+
+
+def test_find_fallback_is_bounded() -> None:
+    rows = "\n".join(
+        f"<div data-qa='price-tag'>US${index}.00</div>"
+        for index in range(1, 501)
+    )
+    page = Selector(f"<html><body>{rows}</body></html>")
+
+    results = extract_price_listings_from_selector(page)
+
+    # Find fallback should not traverse beyond bounded slice.
+    assert len(results) == 200

@@ -4,7 +4,7 @@ from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Protocol
 
-from price_scraper import PriceResult
+from app.scraper import PriceResult
 
 
 class ScraperGateway(Protocol):

@@ -1,45 +1,12 @@
-# Product Price Scraper (Scrapling)
+# Product Price Scraper API (Scrapling)
 
-This project scrapes product prices from pasted product URLs.
-It returns all detected listings per URL (single-offer stores or multi-offer comparison pages).
-Each product response includes a stable `product_id`, and each listing includes a stable `item_id` for alarms/watchlists.
+This project provides a REST API that scrapes product prices from URLs.
+Each scrape response returns:
 
-## 1) CLI usage
+- a stable `product_id` per input URL
+- one or more price listings with stable `item_id` values
 
-Use the project virtualenv Python:
-
-```bash
-./.venv/bin/python price_scraper.py --json https://example.com/product-1
-```
-
-List supported adapters:
-
-```bash
-./.venv/bin/python price_scraper.py --list-sites
-```
-
-Filter scraping to selected adapters:
-
-```bash
-./.venv/bin/python price_scraper.py --sites akakce,newegg --json https://www.akakce.com/...
-```
-
-Choose fetch strategy (default `auto`):
-
-```bash
-./.venv/bin/python price_scraper.py --fetch-mode auto --json https://example.com/product-1
-```
-
-Or paste many links via stdin:
-
-```bash
-cat <<'EOF' | ./.venv/bin/python price_scraper.py
-https://example.com/product-1
-https://example.com/product-2
-EOF
-```
-
-## 2) REST API (FastAPI)
+## Run the API
 
 Install dependencies:
 
@@ -47,18 +14,18 @@ Install dependencies:
 ./.venv/bin/pip install -r requirements.txt
 ```
 
-Run the API server:
+Start the server:
 
 ```bash
 ./.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
 ```
 
-Open API docs:
+Docs:
 
 - Swagger UI: <http://127.0.0.1:8000/docs>
 - ReDoc: <http://127.0.0.1:8000/redoc>
 
-Main endpoints:
+## Endpoints
 
 - `GET /health`
 - `GET /api/v1/sites`
@@ -77,27 +44,20 @@ curl -X POST http://127.0.0.1:8000/api/v1/scrapes \
   }'
 ```
 
-## 3) Paste-links web UI
+## Scraper Architecture
 
-Run a local server:
+The scraper internals are under `app/scraper`:
 
-```bash
-./.venv/bin/python paste_links_server.py --host 127.0.0.1 --port 8000
-```
-
-Open <http://127.0.0.1:8000>, paste links (one per line), and submit.
-You can optionally set a site filter in the `sites` input (example: `akakce,newegg`).
+- `domain.py`: result/value models (`PriceCandidate`, `PriceListing`, `PriceResult`)
+- `parsing.py`: currency, decimal, text parsing, URL normalization, ID generation
+- `fetching.py`: fetch-mode routing and auto-escalation signal detection
+- `extractors/generic.py`: generic extraction pipeline and fallback order
+- `adapters.py`: site-specific adapters (`generic`, `akakce`, `newegg`)
+- `registry.py`: supported sites, domain suffix routing, adapter registry
+- `service.py`: orchestrates `fetch_price` / `scrape_prices`
 
 ## Notes
 
 - Adapter flow: domain -> site adapter (`akakce` / `newegg`) -> optional generic fallback.
-- Auto fetch flow: HTTP `Fetcher` first, then browser fetchers (`DynamicFetcher`/`StealthyFetcher`) only when JS/protection signals are detected.
+- Auto fetch flow: HTTP `Fetcher` first, then browser fetchers (`DynamicFetcher`/`StealthyFetcher`) when JS/protection signals are detected.
 - Generic extraction order: JSON-LD listings -> DOM listings -> `find/find_all` fallback -> meta tags -> page-text fallback.
-- Some websites hide prices behind JavaScript/anti-bot checks. In those cases, dynamic fetchers may be needed.
-
-## 4) Add a new site adapter
-
-1. In `price_scraper.py`, create a new adapter class inheriting `SiteAdapter`.
-2. Register the key in `SUPPORTED_SITES`, map domains in `SITE_DOMAIN_SUFFIXES`, and add the adapter instance to `ADAPTERS`.
-3. Keep the adapter returning a `list[PriceCandidate]` so IDs/listings logic stays shared.
-4. Add tests in `tests/test_price_scraper.py` for parser behavior and ID stability.
