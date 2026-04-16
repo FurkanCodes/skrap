@@ -24,6 +24,12 @@ Filter scraping to selected adapters:
 ./.venv/bin/python price_scraper.py --sites akakce,newegg --json https://www.akakce.com/...
 ```
 
+Choose fetch strategy (default `auto`):
+
+```bash
+./.venv/bin/python price_scraper.py --fetch-mode auto --json https://example.com/product-1
+```
+
 Or paste many links via stdin:
 
 ```bash
@@ -66,7 +72,8 @@ curl -X POST http://127.0.0.1:8000/api/v1/scrapes \
   -d '{
     "urls": ["https://example.com/product-1", "https://example.com/product-2"],
     "sites": ["akakce", "newegg"],
-    "timeout_seconds": 30
+    "timeout_seconds": 30,
+    "fetch_mode": "auto"
   }'
 ```
 
@@ -84,6 +91,7 @@ You can optionally set a site filter in the `sites` input (example: `akakce,newe
 ## Notes
 
 - Adapter flow: domain -> site adapter (`akakce` / `newegg`) -> optional generic fallback.
+- Auto fetch flow: HTTP `Fetcher` first, then browser fetchers (`DynamicFetcher`/`StealthyFetcher`) only when JS/protection signals are detected.
 - Generic extraction order: JSON-LD listings -> DOM listings -> `find/find_all` fallback -> meta tags -> page-text fallback.
 - Some websites hide prices behind JavaScript/anti-bot checks. In those cases, dynamic fetchers may be needed.
 

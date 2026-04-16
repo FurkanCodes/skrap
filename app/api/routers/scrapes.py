@@ -60,6 +60,7 @@ async def post_scrape_batch(
         urls=request_urls,
         timeout_seconds=timeout_seconds,
         selected_sites=selected_sites,
+        fetch_mode=payload.fetch_mode,
     )
 
     output = await run_in_threadpool(service.scrape, batch_input)
@@ -72,4 +73,3 @@ async def post_scrape_batch(
         failure_count=output.failure_count,
         results=results,
     )
-

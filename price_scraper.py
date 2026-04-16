@@ -10,7 +10,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Iterable, Iterator
 from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
 
-from scrapling.fetchers import Fetcher
+from scrapling.fetchers import DynamicFetcher, Fetcher, StealthyFetcher
 from scrapling.parser import Selector
 
 
@@ -136,6 +136,30 @@ SITE_DOMAIN_SUFFIXES: dict[str, tuple[str, ...]] = {
     "newegg": ("newegg.com",),
 }
 
+SUPPORTED_FETCH_MODES: dict[str, str] = {
+    "auto": "Start with HTTP Fetcher, escalate to browser fetchers when needed",
+    "http": "Use HTTP Fetcher only",
+    "dynamic": "Use DynamicFetcher only",
+    "stealth": "Use StealthyFetcher only",
+}
+
+PROTECTION_STATUS_CODES = {401, 403, 429, 503}
+
+JAVASCRIPT_HINTS = (
+    "enable javascript",
+    "javascript is required",
+    "please turn javascript",
+    "requires javascript",
+)
+
+PROTECTION_HINTS = (
+    "captcha",
+    "cloudflare",
+    "access denied",
+    "attention required",
+    "bot detection",
+)
+
 
 @dataclass(frozen=True)
 class PriceCandidate:
@@ -201,6 +225,14 @@ def parse_sites_blob(blob: str) -> set[str]:
             raise ValueError(f"Unsupported site key '{token}'. Supported keys: {supported}")
         selected.add(token)
     return selected
+
+
+def parse_fetch_mode(value: str) -> str:
+    mode = value.strip().lower()
+    if mode not in SUPPORTED_FETCH_MODES:
+        supported = ", ".join(sorted(SUPPORTED_FETCH_MODES))
+        raise ValueError(f"Unsupported fetch mode '{value}'. Supported modes: {supported}")
+    return mode
 
 
 def detect_site_key(url: str) -> str:
@@ -538,6 +570,70 @@ def _extract_find_based_candidates(page: Selector, meta_currency: str | None) ->
     return _deduplicate_candidates(candidates)
 
 
+def _fetch_page_with_mode(url: str, timeout: int, mode: str) -> Selector:
+    if mode == "http":
+        return Fetcher.get(
+            url,
+            timeout=timeout,
+            retries=2,
+            retry_delay=1,
+            stealthy_headers=True,
+            follow_redirects="safe",
+        )
+
+    browser_timeout_ms = max(1000, timeout * 1000)
+    base_kwargs = {
+        "timeout": browser_timeout_ms,
+        "retries": 2,
+        "retry_delay": 1,
+        "headless": True,
+        "disable_resources": True,
+    }
+
+    if mode == "dynamic":
+        return DynamicFetcher.fetch(url, **base_kwargs)
+    if mode == "stealth":
+        return StealthyFetcher.fetch(
+            url,
+            solve_cloudflare=True,
+            block_webrtc=True,
+            **base_kwargs,
+        )
+
+    raise ValueError(f"Unsupported fetch mode '{mode}'")
+
+
+def _detect_auto_escalation_signals(page: Selector) -> set[str]:
+    signals: set[str] = set()
+
+    status = getattr(page, "status", None)
+    if isinstance(status, int) and status in PROTECTION_STATUS_CODES:
+        signals.add("protection")
+
+    page_text = str(page.get_all_text(separator=" ", strip=True)).lower()
+    if any(token in page_text for token in PROTECTION_HINTS):
+        signals.add("protection")
+    if any(token in page_text for token in JAVASCRIPT_HINTS):
+        signals.add("javascript")
+
+    if len(page_text) < 200 and len(page.css("script")) >= 15:
+        signals.add("javascript")
+
+    noscript_text = " ".join(page.css("noscript::text").getall()).lower()
+    if "javascript" in noscript_text:
+        signals.add("javascript")
+
+    return signals
+
+
+def _auto_followup_modes(signals: set[str]) -> list[str]:
+    if "protection" in signals:
+        return ["stealth", "dynamic"]
+    if "javascript" in signals:
+        return ["dynamic", "stealth"]
+    return []
+
+
 def _extract_generic_price_listings_from_selector(page: Selector) -> list[PriceCandidate]:
     meta_currency: str | None = None
     for selector in META_CURRENCY_SELECTORS:
@@ -789,10 +885,27 @@ def extract_price_from_selector(page: Selector) -> PriceCandidate | None:
     return listings[0] if listings else None
 
 
-def fetch_price(url: str, timeout: int = 30, selected_sites: set[str] | None = None) -> PriceResult:
+def fetch_price(
+    url: str,
+    timeout: int = 30,
+    selected_sites: set[str] | None = None,
+    fetch_mode: str = "auto",
+) -> PriceResult:
     product_id = _make_product_id(url)
     site_key = detect_site_key(url)
     adapter_key = site_key if site_key in ADAPTERS else "generic"
+
+    try:
+        normalized_fetch_mode = parse_fetch_mode(fetch_mode)
+    except ValueError as exc:
+        return PriceResult(
+            url=url,
+            success=False,
+            product_id=product_id,
+            site_key=site_key,
+            adapter_key=adapter_key,
+            error=str(exc),
+        )
 
     if selected_sites is not None and adapter_key not in selected_sites:
         return PriceResult(
@@ -804,76 +917,95 @@ def fetch_price(url: str, timeout: int = 30, selected_sites: set[str] | None = N
             error=f"site_filtered_out:{adapter_key}",
         )
 
-    try:
-        page = Fetcher.get(
-            url,
-            timeout=timeout,
-            retries=2,
-            retry_delay=1,
-            stealthy_headers=True,
-            follow_redirects="safe",
-        )
-    except Exception as exc:
+    modes_to_try = ["http"] if normalized_fetch_mode == "auto" else [normalized_fetch_mode]
+    attempted_fetch_errors: list[str] = []
+    fetched_any_page = False
+
+    for mode in modes_to_try:
+        try:
+            page = _fetch_page_with_mode(url, timeout=timeout, mode=mode)
+        except Exception as exc:
+            attempted_fetch_errors.append(f"{mode}: {exc}")
+            if normalized_fetch_mode == "auto" and mode == "http":
+                modes_to_try.extend(["dynamic", "stealth"])
+            continue
+
+        fetched_any_page = True
+        adapter = ADAPTERS[adapter_key]
+        candidates = adapter.extract(page, url)
+        used_adapter = adapter.key
+
+        if not candidates and adapter.key != "generic":
+            generic_allowed = selected_sites is None or "generic" in selected_sites
+            if generic_allowed:
+                candidates = ADAPTERS["generic"].extract(page, url)
+                used_adapter = "generic"
+
+        if candidates:
+            listings = [
+                PriceListing(
+                    item_id=_make_item_id(url, candidate, index),
+                    amount=format(candidate.amount, "f"),
+                    currency=candidate.currency,
+                    raw_text=candidate.raw_text,
+                    source=candidate.source,
+                    seller=candidate.seller,
+                    listing_url=candidate.listing_url,
+                )
+                for index, candidate in enumerate(candidates, 1)
+            ]
+            first = listings[0]
+            return PriceResult(
+                url=url,
+                success=True,
+                product_id=product_id,
+                site_key=site_key,
+                adapter_key=used_adapter,
+                amount=first.amount,
+                currency=first.currency,
+                raw_text=first.raw_text,
+                source=first.source,
+                listing_count=len(listings),
+                listings=listings,
+            )
+
+        if normalized_fetch_mode == "auto" and mode == "http":
+            signals = _detect_auto_escalation_signals(page)
+            for followup_mode in _auto_followup_modes(signals):
+                if followup_mode not in modes_to_try:
+                    modes_to_try.append(followup_mode)
+
+    if fetched_any_page:
         return PriceResult(
             url=url,
             success=False,
             product_id=product_id,
             site_key=site_key,
             adapter_key=adapter_key,
-            error=f"fetch_failed: {exc}",
-        )
-
-    adapter = ADAPTERS[adapter_key]
-    candidates = adapter.extract(page, url)
-    used_adapter = adapter.key
-
-    if not candidates and adapter.key != "generic":
-        generic_allowed = selected_sites is None or "generic" in selected_sites
-        if generic_allowed:
-            candidates = ADAPTERS["generic"].extract(page, url)
-            used_adapter = "generic"
-
-    if not candidates:
-        return PriceResult(
-            url=url,
-            success=False,
-            product_id=product_id,
-            site_key=site_key,
-            adapter_key=used_adapter,
             error="price_not_found",
         )
 
-    listings = [
-        PriceListing(
-            item_id=_make_item_id(url, candidate, index),
-            amount=format(candidate.amount, "f"),
-            currency=candidate.currency,
-            raw_text=candidate.raw_text,
-            source=candidate.source,
-            seller=candidate.seller,
-            listing_url=candidate.listing_url,
-        )
-        for index, candidate in enumerate(candidates, 1)
-    ]
-    first = listings[0]
-
+    error_detail = "; ".join(attempted_fetch_errors) if attempted_fetch_errors else "unknown"
     return PriceResult(
         url=url,
-        success=True,
+        success=False,
         product_id=product_id,
         site_key=site_key,
-        adapter_key=used_adapter,
-        amount=first.amount,
-        currency=first.currency,
-        raw_text=first.raw_text,
-        source=first.source,
-        listing_count=len(listings),
-        listings=listings,
+        adapter_key=adapter_key,
+        error=f"fetch_failed: {error_detail}",
     )
 
 
-def scrape_prices(urls: Iterable[str], timeout: int = 30, selected_sites: set[str] | None = None) -> list[PriceResult]:
-    return [fetch_price(url, timeout=timeout, selected_sites=selected_sites) for url in urls]
+def scrape_prices(
+    urls: Iterable[str],
+    timeout: int = 30,
+    selected_sites: set[str] | None = None,
+    fetch_mode: str = "auto",
+) -> list[PriceResult]:
+    return [
+        fetch_price(url, timeout=timeout, selected_sites=selected_sites, fetch_mode=fetch_mode)
+        for url in urls
+    ]
 
 
 def _print_table(results: list[PriceResult]) -> None:
@@ -946,6 +1078,13 @@ def main() -> int:
     parser.add_argument("--timeout", type=int, default=30, help="Request timeout in seconds")
     parser.add_argument("--json", action="store_true", help="Print JSON output")
     parser.add_argument(
+        "--fetch-mode",
+        type=str,
+        default="auto",
+        choices=sorted(SUPPORTED_FETCH_MODES),
+        help="Fetcher mode to use: auto, http, dynamic, or stealth.",
+    )
+    parser.add_argument(
         "--sites",
         type=str,
         default="",
@@ -967,7 +1106,12 @@ def main() -> int:
 
     selected_sites_or_none = selected_sites if selected_sites else None
     urls = _collect_input_urls(args.urls)
-    results = scrape_prices(urls, timeout=args.timeout, selected_sites=selected_sites_or_none)
+    results = scrape_prices(
+        urls,
+        timeout=args.timeout,
+        selected_sites=selected_sites_or_none,
+        fetch_mode=args.fetch_mode,
+    )
 
     if args.json:
         print(json.dumps([asdict(result) for result in results], indent=2))

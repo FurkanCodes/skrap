@@ -35,6 +35,7 @@ class FakeScrapeService:
             urls=deduped_urls,
             timeout_seconds=payload.timeout_seconds,
             selected_sites=payload.selected_sites,
+            fetch_mode=payload.fetch_mode,
         )
         results: list[PriceResult] = []
         for url in deduped_urls:
@@ -124,6 +125,7 @@ def test_scrapes_endpoint_returns_batch_summary_and_deduped_urls() -> None:
             ],
             "sites": ["generic"],
             "timeout_seconds": 20,
+            "fetch_mode": "http",
         },
     )
     app.dependency_overrides.clear()
@@ -142,6 +144,7 @@ def test_scrapes_endpoint_returns_batch_summary_and_deduped_urls() -> None:
     ]
     assert fake_service.last_input.selected_sites == {"generic"}
     assert fake_service.last_input.timeout_seconds == 20
+    assert fake_service.last_input.fetch_mode == "http"
 
 
 def test_scrapes_endpoint_rejects_unknown_site_key() -> None:
@@ -157,3 +160,19 @@ def test_scrapes_endpoint_rejects_unknown_site_key() -> None:
 
     assert response.status_code == 422
     assert "Unsupported site key" in response.json()["detail"]
+
+
+def test_scrapes_endpoint_uses_auto_fetch_mode_by_default() -> None:
+    fake_service = FakeScrapeService()
+    client = _build_client(fake_service)
+    response = client.post(
+        "/api/v1/scrapes",
+        json={
+            "urls": ["https://example.com/product-a"],
+        },
+    )
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert fake_service.last_input is not None
+    assert fake_service.last_input.fetch_mode == "auto"

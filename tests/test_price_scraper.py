@@ -10,6 +10,7 @@ from price_scraper import (
     _make_item_id,
     detect_site_key,
     extract_price_listings_from_selector,
+    parse_fetch_mode,
     parse_sites_blob,
     parse_urls_blob,
 )
@@ -277,6 +278,18 @@ def test_parse_sites_blob() -> None:
     assert parse_sites_blob("akakce,newegg") == {"akakce", "newegg"}
     assert parse_sites_blob("all") == set()
     assert parse_sites_blob("") == set()
+
+
+def test_parse_fetch_mode() -> None:
+    assert parse_fetch_mode("auto") == "auto"
+    assert parse_fetch_mode("HTTP") == "http"
+    assert parse_fetch_mode("dynamic") == "dynamic"
+    assert parse_fetch_mode("stealth") == "stealth"
+
+
+def test_parse_fetch_mode_invalid_key() -> None:
+    with pytest.raises(ValueError):
+        parse_fetch_mode("invalid")
 
 
 def test_parse_sites_blob_invalid_key() -> None:

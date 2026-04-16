@@ -8,7 +8,13 @@ from price_scraper import PriceResult
 
 
 class ScraperGateway(Protocol):
-    def fetch_price(self, url: str, timeout: int, selected_sites: set[str] | None = None) -> PriceResult:
+    def fetch_price(
+        self,
+        url: str,
+        timeout: int,
+        selected_sites: set[str] | None = None,
+        fetch_mode: str = "auto",
+    ) -> PriceResult:
         ...
 
     def list_sites(self) -> dict[str, str]:
@@ -21,6 +27,7 @@ class ScrapeBatchInput:
     urls: list[str]
     timeout_seconds: int
     selected_sites: set[str] | None
+    fetch_mode: str = "auto"
 
 
 @dataclass(frozen=True)
@@ -63,14 +70,23 @@ class ScrapeBatchService:
             )
 
         if self._max_workers == 1 or len(urls) == 1:
-            results = [self._run_single(url, payload.timeout_seconds, payload.selected_sites) for url in urls]
+            results = [
+                self._run_single(url, payload.timeout_seconds, payload.selected_sites, payload.fetch_mode)
+                for url in urls
+            ]
             return self._build_output(payload.request_id, urls, results)
 
         results_by_index: list[PriceResult | None] = [None] * len(urls)
         with ThreadPoolExecutor(max_workers=self._max_workers) as executor:
             future_map: dict[Future[PriceResult], tuple[int, str]] = {}
             for index, url in enumerate(urls):
-                future = executor.submit(self._run_single, url, payload.timeout_seconds, payload.selected_sites)
+                future = executor.submit(
+                    self._run_single,
+                    url,
+                    payload.timeout_seconds,
+                    payload.selected_sites,
+                    payload.fetch_mode,
+                )
                 future_map[future] = (index, url)
 
             for future in as_completed(future_map):
@@ -88,8 +104,19 @@ class ScrapeBatchService:
         ordered_results = [result for result in results_by_index if result is not None]
         return self._build_output(payload.request_id, urls, ordered_results)
 
-    def _run_single(self, url: str, timeout_seconds: int, selected_sites: set[str] | None) -> PriceResult:
-        return self._gateway.fetch_price(url, timeout=timeout_seconds, selected_sites=selected_sites)
+    def _run_single(
+        self,
+        url: str,
+        timeout_seconds: int,
+        selected_sites: set[str] | None,
+        fetch_mode: str,
+    ) -> PriceResult:
+        return self._gateway.fetch_price(
+            url,
+            timeout=timeout_seconds,
+            selected_sites=selected_sites,
+            fetch_mode=fetch_mode,
+        )
 
     @staticmethod
     def _build_output(request_id: str, urls: list[str], results: list[PriceResult]) -> ScrapeBatchOutput:
@@ -101,4 +128,3 @@ class ScrapeBatchService:
             failure_count=len(results) - success_count,
             results=results,
         )
-

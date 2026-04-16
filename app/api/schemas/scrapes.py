@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import AnyHttpUrl, BaseModel, Field
 
 
@@ -45,6 +47,7 @@ class ScrapeBatchRequest(BaseModel):
     urls: list[AnyHttpUrl] = Field(min_length=1)
     sites: list[str] | None = None
     timeout_seconds: int | None = Field(default=None, ge=1)
+    fetch_mode: Literal["auto", "http", "dynamic", "stealth"] = "auto"
 
 
 class ScrapeBatchResponse(BaseModel):
@@ -53,4 +56,3 @@ class ScrapeBatchResponse(BaseModel):
     success_count: int
     failure_count: int
     results: list[PriceResultResponse]
-
