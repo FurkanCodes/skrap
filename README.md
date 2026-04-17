@@ -30,6 +30,11 @@ Docs:
 - `GET /health`
 - `GET /api/v1/sites`
 - `POST /api/v1/scrapes`
+- `POST /api/v1/tracked-items`
+- `GET /api/v1/tracked-items`
+- `GET /api/v1/tracked-items/{item_id}`
+- `PATCH /api/v1/tracked-items/{item_id}`
+- `DELETE /api/v1/tracked-items/{item_id}`
 
 Example scrape request:
 
