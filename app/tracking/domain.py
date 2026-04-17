@@ -6,6 +6,7 @@ from typing import Literal
 TrackingStatus = Literal["active", "paused"]
 TrackingMode = Literal["monitor", "alert"]
 TrackingCheckRunStatus = Literal["running", "succeeded", "failed"]
+AlertRuleType = Literal["price_below"]
 
 
 def derive_tracking_mode(target_amount: str | None) -> TrackingMode:
@@ -98,3 +99,19 @@ class TrackingBootstrapIdempotencyRecord:
     item_id: str | None
     created_at: str
     updated_at: str
+
+
+@dataclass(frozen=True)
+class AlertEvent:
+    """Idempotent alert decision emitted from a successful snapshot."""
+
+    event_id: str
+    idempotency_key: str
+    item_id: str
+    snapshot_id: str
+    rule_type: AlertRuleType
+    previous_amount: str | None
+    current_amount: str
+    target_amount: str
+    currency: str | None
+    triggered_at: str

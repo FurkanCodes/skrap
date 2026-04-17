@@ -11,6 +11,7 @@ from app.application.tracking_scheduler_service import (
 )
 from app.scraper import PriceListing, PriceResult
 from app.tracking import (
+    AlertEvent,
     PriceSnapshot,
     TrackedItem,
     TrackingBootstrapIdempotencyRecord,
@@ -31,6 +32,7 @@ def _item(
     status: str = "active",
     next_check_at: str | None = None,
     last_amount: str | None = "100.00",
+    target_amount: str | None = None,
 ) -> TrackedItem:
     stamp = _iso(now)
     return TrackedItem(
@@ -53,7 +55,7 @@ def _item(
         last_source="test:init",
         status=status,
         check_interval_minutes=60,
-        target_amount=None,
+        target_amount=target_amount,
         created_at=stamp,
         updated_at=stamp,
         last_checked_at=stamp,
@@ -96,6 +98,8 @@ class _InMemoryTrackingRepository:
     runs_by_id: dict[str, TrackingCheckRun]
     runs_by_job_key: dict[str, str]
     idempotency: dict[str, TrackingBootstrapIdempotencyRecord]
+    alerts_by_id: dict[str, AlertEvent]
+    alerts_by_idempotency_key: dict[str, str]
 
     def initialize(self) -> None:
         return None
@@ -145,6 +149,13 @@ class _InMemoryTrackingRepository:
                 continue
             self.runs_by_job_key.pop(run.job_key or "", None)
             self.runs_by_id.pop(run_id, None)
+
+        for event_id in list(self.alerts_by_id.keys()):
+            event = self.alerts_by_id[event_id]
+            if event.item_id != item_id:
+                continue
+            self.alerts_by_idempotency_key.pop(event.idempotency_key, None)
+            self.alerts_by_id.pop(event_id, None)
         return True
 
     def add_snapshot(self, snapshot: PriceSnapshot) -> None:
@@ -153,6 +164,35 @@ class _InMemoryTrackingRepository:
     def list_snapshots(self, item_id: str, limit: int) -> list[PriceSnapshot]:
         rows = [snapshot for snapshot in self.snapshots_by_id.values() if snapshot.item_id == item_id]
         rows.sort(key=lambda snapshot: snapshot.checked_at, reverse=True)
+        return rows[:limit]
+
+    def create_alert_event(self, event: AlertEvent) -> bool:
+        existing_event_id = self.alerts_by_idempotency_key.get(event.idempotency_key)
+        if existing_event_id is not None:
+            return False
+        self.alerts_by_id[event.event_id] = event
+        self.alerts_by_idempotency_key[event.idempotency_key] = event.event_id
+        return True
+
+    def get_last_alert_event(
+        self,
+        *,
+        item_id: str,
+        rule_type: str,
+    ) -> AlertEvent | None:
+        rows = [
+            event
+            for event in self.alerts_by_id.values()
+            if event.item_id == item_id and event.rule_type == rule_type
+        ]
+        if not rows:
+            return None
+        rows.sort(key=lambda event: event.triggered_at, reverse=True)
+        return rows[0]
+
+    def list_alert_events(self, item_id: str, limit: int) -> list[AlertEvent]:
+        rows = [event for event in self.alerts_by_id.values() if event.item_id == item_id]
+        rows.sort(key=lambda event: event.triggered_at, reverse=True)
         return rows[:limit]
 
     def claim_due_items(
@@ -316,6 +356,8 @@ def _build_repo() -> _InMemoryTrackingRepository:
         runs_by_id={},
         runs_by_job_key={},
         idempotency={},
+        alerts_by_id={},
+        alerts_by_idempotency_key={},
     )
     return repo
 
@@ -650,3 +692,171 @@ def test_scheduler_skips_duplicate_job_key_and_avoids_duplicate_snapshot() -> No
 
     snapshots = repo.list_snapshots(item.item_id, limit=10)
     assert len(snapshots) == 1
+
+
+def test_scheduler_emits_alert_event_on_price_below_crossing() -> None:
+    repo = _build_repo()
+    now = datetime.now(tz=UTC)
+    item = _item(
+        item_id="trk_alert",
+        url="https://example.com/alert",
+        now=now,
+        next_check_at=_iso(now - timedelta(minutes=1)),
+        last_amount="120.00",
+        target_amount="100.00",
+    )
+    repo.save_item(item)
+
+    scrape_result = PriceResult(
+        url=item.source_url,
+        success=True,
+        amount="95.00",
+        currency="USD",
+        raw_text="$95.00",
+        source="test:alert",
+        site_key="generic",
+        adapter_key="generic",
+    )
+
+    scheduler = TrackingSchedulerService(
+        repository=repo,
+        scrape_runner=_FakeScrapeRunner({item.source_url: scrape_result}),
+        timeout_seconds=30,
+        claim_batch_size=50,
+        max_inflight=4,
+        lease_seconds=180,
+        jitter_percent=0,
+        lease_owner="scheduler-test",
+        alert_cooldown_minutes=60,
+    )
+
+    outcome = scheduler.run_once()
+    assert outcome.success_count == 1
+
+    events = repo.list_alert_events(item.item_id, limit=10)
+    assert len(events) == 1
+    assert events[0].rule_type == "price_below"
+    assert events[0].previous_amount == "120.00"
+    assert events[0].current_amount == "95.00"
+    assert events[0].target_amount == "100.00"
+
+
+def test_scheduler_does_not_emit_alert_without_crossing() -> None:
+    repo = _build_repo()
+    now = datetime.now(tz=UTC)
+    item = _item(
+        item_id="trk_no_cross",
+        url="https://example.com/no-cross",
+        now=now,
+        next_check_at=_iso(now - timedelta(minutes=1)),
+        last_amount="95.00",
+        target_amount="100.00",
+    )
+    repo.save_item(item)
+
+    scrape_result = PriceResult(
+        url=item.source_url,
+        success=True,
+        amount="90.00",
+        currency="USD",
+        raw_text="$90.00",
+        source="test:no-cross",
+        site_key="generic",
+        adapter_key="generic",
+    )
+
+    scheduler = TrackingSchedulerService(
+        repository=repo,
+        scrape_runner=_FakeScrapeRunner({item.source_url: scrape_result}),
+        timeout_seconds=30,
+        claim_batch_size=50,
+        max_inflight=4,
+        lease_seconds=180,
+        jitter_percent=0,
+        lease_owner="scheduler-test",
+        alert_cooldown_minutes=60,
+    )
+
+    outcome = scheduler.run_once()
+    assert outcome.success_count == 1
+    assert repo.list_alert_events(item.item_id, limit=10) == []
+
+
+def test_scheduler_suppresses_alerts_during_cooldown() -> None:
+    repo = _build_repo()
+    now = datetime.now(tz=UTC)
+    scheduled_for = _iso(now - timedelta(minutes=1))
+    item = _item(
+        item_id="trk_cooldown",
+        url="https://example.com/cooldown",
+        now=now,
+        next_check_at=scheduled_for,
+        last_amount="120.00",
+        target_amount="100.00",
+    )
+    repo.save_item(item)
+
+    first_result = PriceResult(
+        url=item.source_url,
+        success=True,
+        amount="95.00",
+        currency="USD",
+        raw_text="$95.00",
+        source="test:cooldown-1",
+        site_key="generic",
+        adapter_key="generic",
+    )
+    second_result = PriceResult(
+        url=item.source_url,
+        success=True,
+        amount="94.00",
+        currency="USD",
+        raw_text="$94.00",
+        source="test:cooldown-2",
+        site_key="generic",
+        adapter_key="generic",
+    )
+
+    scheduler = TrackingSchedulerService(
+        repository=repo,
+        scrape_runner=_FakeScrapeRunner({item.source_url: first_result}),
+        timeout_seconds=30,
+        claim_batch_size=50,
+        max_inflight=4,
+        lease_seconds=180,
+        jitter_percent=0,
+        lease_owner="scheduler-test",
+        alert_cooldown_minutes=60,
+    )
+
+    first = scheduler.run_once()
+    assert first.success_count == 1
+    assert len(repo.list_alert_events(item.item_id, limit=10)) == 1
+
+    updated = repo.get_item(item.item_id)
+    assert updated is not None
+    second_due_time = _iso(now - timedelta(minutes=2))
+    repo.save_item(
+        replace(
+            updated,
+            last_amount="150.00",
+            next_check_at=second_due_time,
+            lease_owner=None,
+            lease_until=None,
+        )
+    )
+    second_scheduler = TrackingSchedulerService(
+        repository=repo,
+        scrape_runner=_FakeScrapeRunner({item.source_url: second_result}),
+        timeout_seconds=30,
+        claim_batch_size=50,
+        max_inflight=4,
+        lease_seconds=180,
+        jitter_percent=0,
+        lease_owner="scheduler-test",
+        alert_cooldown_minutes=60,
+    )
+
+    second = second_scheduler.run_once()
+    assert second.success_count == 1
+    assert len(repo.list_alert_events(item.item_id, limit=10)) == 1

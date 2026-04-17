@@ -6,11 +6,12 @@ import uuid
 from collections import defaultdict
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal, InvalidOperation
 from typing import Protocol
 
 from app.application.scrape_service import ScrapeBatchInput, ScrapeBatchOutput
 from app.scraper import PriceResult
-from app.tracking import PriceSnapshot, TrackedItem, TrackingRepository
+from app.tracking import AlertEvent, PriceSnapshot, TrackedItem, TrackingRepository
 
 
 class TrackingSchedulerError(RuntimeError):
@@ -75,6 +76,7 @@ class TrackingSchedulerService:
         jitter_percent: int,
         lease_owner: str,
         fetch_mode: str = "auto",
+        alert_cooldown_minutes: int = 60,
     ) -> None:
         self._repository = repository
         self._scrape_runner = scrape_runner
@@ -85,6 +87,7 @@ class TrackingSchedulerService:
         self._jitter_percent = max(0, jitter_percent)
         self._lease_owner = lease_owner
         self._fetch_mode = fetch_mode
+        self._alert_cooldown_minutes = max(0, alert_cooldown_minutes)
 
     def run_once(self) -> SchedulerCycleResult:
         started = time.perf_counter()
@@ -269,6 +272,11 @@ class TrackingSchedulerService:
                 scheduled_for=context.scheduled_for,
             )
             self._repository.save_item_and_snapshot(updated_item, snapshot)
+            self._emit_alert_if_crossed(
+                item_before=item,
+                snapshot=snapshot,
+                current_amount=scrape_result.amount,
+            )
             self._repository.finish_check_run(
                 run_id=context.run_id,
                 status="succeeded",
@@ -308,6 +316,68 @@ class TrackingSchedulerService:
             error=error,
         )
         return False
+
+    def _emit_alert_if_crossed(
+        self,
+        *,
+        item_before: TrackedItem,
+        snapshot: PriceSnapshot,
+        current_amount: str | None,
+    ) -> None:
+        """Emit one idempotent alert event when price crosses below target."""
+        if not item_before.alerts_enabled:
+            return
+
+        target = _parse_decimal(item_before.target_amount)
+        previous = _parse_decimal(item_before.last_amount)
+        current = _parse_decimal(current_amount)
+        if target is None or previous is None or current is None:
+            return
+
+        crossed = previous > target and current <= target
+        if not crossed:
+            return
+
+        rule_type = "price_below"
+        if self._is_in_cooldown(
+            item_id=item_before.item_id,
+            rule_type=rule_type,
+            now=snapshot.checked_at,
+        ):
+            return
+
+        event = AlertEvent(
+            event_id=_new_alert_event_id(),
+            idempotency_key=_build_alert_idempotency_key(
+                item_id=item_before.item_id,
+                rule_type=rule_type,
+                snapshot_id=snapshot.snapshot_id,
+            ),
+            item_id=item_before.item_id,
+            snapshot_id=snapshot.snapshot_id,
+            rule_type=rule_type,
+            previous_amount=_decimal_to_str(previous),
+            current_amount=_decimal_to_str(current),
+            target_amount=_decimal_to_str(target),
+            currency=snapshot.currency or item_before.currency,
+            triggered_at=snapshot.checked_at,
+        )
+        self._repository.create_alert_event(event)
+
+    def _is_in_cooldown(self, *, item_id: str, rule_type: str, now: str) -> bool:
+        if self._alert_cooldown_minutes <= 0:
+            return False
+        last_event = self._repository.get_last_alert_event(
+            item_id=item_id,
+            rule_type=rule_type,
+        )
+        if last_event is None:
+            return False
+
+        now_dt = datetime.fromisoformat(now.replace("Z", "+00:00"))
+        last_dt = datetime.fromisoformat(last_event.triggered_at.replace("Z", "+00:00"))
+        elapsed = now_dt - last_dt
+        return elapsed < timedelta(minutes=self._alert_cooldown_minutes)
 
     def _mark_context_failure(self, context: _ItemRunContext, error: str) -> None:
         finished_at = _to_iso(_utcnow())
@@ -404,6 +474,10 @@ def _new_run_id() -> str:
     return f"run_{uuid.uuid4().hex[:20]}"
 
 
+def _new_alert_event_id() -> str:
+    return f"aev_{uuid.uuid4().hex[:20]}"
+
+
 def _utcnow() -> datetime:
     return datetime.now(tz=UTC)
 
@@ -462,3 +536,24 @@ def _classify_error(error: str | None) -> str:
 
 def _build_job_key(item_id: str, scheduled_for: str) -> str:
     return f"{item_id}:{scheduled_for}"
+
+
+def _build_alert_idempotency_key(*, item_id: str, rule_type: str, snapshot_id: str) -> str:
+    return f"{item_id}:{rule_type}:{snapshot_id}"
+
+
+def _parse_decimal(value: str | None) -> Decimal | None:
+    if value is None:
+        return None
+    normalized = value.strip()
+    if not normalized:
+        return None
+    try:
+        return Decimal(normalized)
+    except InvalidOperation:
+        return None
+
+
+def _decimal_to_str(value: Decimal) -> str:
+    # Keep a stable non-scientific string representation for storage and APIs.
+    return format(value, "f")

@@ -1,4 +1,6 @@
 from .domain import (
+    AlertEvent,
+    AlertRuleType,
     PriceSnapshot,
     TrackingBootstrapIdempotencyRecord,
     TrackedItem,
@@ -11,6 +13,8 @@ from .domain import (
 from .repository import TrackingRepository
 
 __all__ = [
+    "AlertEvent",
+    "AlertRuleType",
     "PriceSnapshot",
     "TrackingBootstrapIdempotencyRecord",
     "TrackedItem",

@@ -57,6 +57,7 @@ Useful scheduler env vars:
 - `SCHEDULER_MAX_INFLIGHT` (default: `64`)
 - `SCHEDULER_LEASE_SECONDS` (default: `180`)
 - `SCHEDULER_JITTER_PERCENT` (default: `10`)
+- `SCHEDULER_ALERT_COOLDOWN_MINUTES` (default: `60`, set `0` to disable cooldown)
 - `SCHEDULER_LEASE_OWNER` (optional explicit worker id)
 
 Database/pool env vars:

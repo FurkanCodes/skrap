@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Protocol
 
 from app.tracking.domain import (
+    AlertEvent,
     PriceSnapshot,
     TrackingBootstrapIdempotencyRecord,
     TrackedItem,
@@ -39,6 +40,25 @@ class TrackingRepository(Protocol):
         ...
 
     def list_snapshots(self, item_id: str, limit: int) -> list[PriceSnapshot]:
+        ...
+
+    def create_alert_event(self, event: AlertEvent) -> bool:
+        """Persist alert event idempotently.
+
+        Returns True when a new event row is created, False when the event
+        already exists (idempotency conflict).
+        """
+        ...
+
+    def get_last_alert_event(
+        self,
+        *,
+        item_id: str,
+        rule_type: str,
+    ) -> AlertEvent | None:
+        ...
+
+    def list_alert_events(self, item_id: str, limit: int) -> list[AlertEvent]:
         ...
 
     def claim_due_items(

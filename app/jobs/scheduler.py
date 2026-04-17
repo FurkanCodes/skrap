@@ -130,6 +130,7 @@ def _build_scheduler_service() -> tuple[TrackingSchedulerService, int]:
         jitter_percent=settings.scheduler_jitter_percent,
         lease_owner=_resolve_lease_owner(),
         fetch_mode="auto",
+        alert_cooldown_minutes=settings.scheduler_alert_cooldown_minutes,
     )
     return scheduler_service, settings.scheduler_poll_seconds
 

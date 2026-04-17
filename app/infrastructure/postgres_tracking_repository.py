@@ -7,6 +7,7 @@ from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 
 from app.tracking.domain import (
+    AlertEvent,
     PriceSnapshot,
     TrackedItem,
     TrackingBootstrapIdempotencyRecord,
@@ -75,6 +76,20 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS alert_events (
+        event_id TEXT PRIMARY KEY,
+        idempotency_key TEXT NOT NULL UNIQUE,
+        item_id TEXT NOT NULL REFERENCES tracked_items(item_id) ON DELETE CASCADE,
+        snapshot_id TEXT NOT NULL REFERENCES price_snapshots(snapshot_id) ON DELETE CASCADE,
+        rule_type TEXT NOT NULL CHECK (rule_type IN ('price_below')),
+        previous_amount TEXT,
+        current_amount TEXT NOT NULL,
+        target_amount TEXT NOT NULL,
+        currency TEXT,
+        triggered_at TIMESTAMPTZ NOT NULL
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS tracking_bootstrap_idempotency (
         idempotency_key TEXT PRIMARY KEY,
         request_hash TEXT NOT NULL,
@@ -119,6 +134,14 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
     """
     CREATE INDEX IF NOT EXISTS idx_bootstrap_idempotency_item
       ON tracking_bootstrap_idempotency(item_id)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_alert_events_item_triggered
+      ON alert_events(item_id, triggered_at DESC)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_alert_events_rule_triggered
+      ON alert_events(rule_type, triggered_at DESC)
     """,
 )
 
@@ -425,6 +448,76 @@ class PostgresTrackingRepository:
                 (item_id, limit),
             ).fetchall()
         return [self._row_to_snapshot(row) for row in rows]
+
+    def create_alert_event(self, event: AlertEvent) -> bool:
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                """
+                INSERT INTO alert_events (
+                    event_id,
+                    idempotency_key,
+                    item_id,
+                    snapshot_id,
+                    rule_type,
+                    previous_amount,
+                    current_amount,
+                    target_amount,
+                    currency,
+                    triggered_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT(idempotency_key) DO NOTHING
+                RETURNING event_id
+                """,
+                (
+                    event.event_id,
+                    event.idempotency_key,
+                    event.item_id,
+                    event.snapshot_id,
+                    event.rule_type,
+                    event.previous_amount,
+                    event.current_amount,
+                    event.target_amount,
+                    event.currency,
+                    _parse_timestamp(event.triggered_at),
+                ),
+            ).fetchone()
+        return row is not None
+
+    def get_last_alert_event(
+        self,
+        *,
+        item_id: str,
+        rule_type: str,
+    ) -> AlertEvent | None:
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                """
+                SELECT *
+                FROM alert_events
+                WHERE item_id = %s
+                  AND rule_type = %s
+                ORDER BY triggered_at DESC
+                LIMIT 1
+                """,
+                (item_id, rule_type),
+            ).fetchone()
+        if row is None:
+            return None
+        return self._row_to_alert_event(row)
+
+    def list_alert_events(self, item_id: str, limit: int) -> list[AlertEvent]:
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM alert_events
+                WHERE item_id = %s
+                ORDER BY triggered_at DESC
+                LIMIT %s
+                """,
+                (item_id, limit),
+            ).fetchall()
+        return [self._row_to_alert_event(row) for row in rows]
 
     def claim_due_items(
         self,
@@ -783,6 +876,21 @@ class PostgresTrackingRepository:
             source=_as_str(row.get("source")),
             error=_as_str(row.get("error")),
             scheduled_for=_format_timestamp(row.get("scheduled_for")),
+        )
+
+    @staticmethod
+    def _row_to_alert_event(row: dict[str, object]) -> AlertEvent:
+        return AlertEvent(
+            event_id=str(row["event_id"]),
+            idempotency_key=str(row["idempotency_key"]),
+            item_id=str(row["item_id"]),
+            snapshot_id=str(row["snapshot_id"]),
+            rule_type=str(row["rule_type"]),
+            previous_amount=_as_str(row.get("previous_amount")),
+            current_amount=str(row["current_amount"]),
+            target_amount=str(row["target_amount"]),
+            currency=_as_str(row.get("currency")),
+            triggered_at=_format_timestamp(row.get("triggered_at")),
         )
 
     @staticmethod

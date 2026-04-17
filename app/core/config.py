@@ -71,6 +71,7 @@ class Settings:
     scheduler_max_inflight: int
     scheduler_lease_seconds: int
     scheduler_jitter_percent: int
+    scheduler_alert_cooldown_minutes: int
 
 
 @lru_cache
@@ -107,6 +108,9 @@ def get_settings() -> Settings:
         scheduler_max_inflight=_parse_int_env("SCHEDULER_MAX_INFLIGHT", 64),
         scheduler_lease_seconds=_parse_int_env("SCHEDULER_LEASE_SECONDS", 180),
         scheduler_jitter_percent=_parse_int_env("SCHEDULER_JITTER_PERCENT", 10),
+        scheduler_alert_cooldown_minutes=_parse_int_env(
+            "SCHEDULER_ALERT_COOLDOWN_MINUTES", 60
+        ),
     )
 
     if settings.scrape_timeout_min < 1:
@@ -157,5 +161,7 @@ def get_settings() -> Settings:
         raise RuntimeError("SCHEDULER_LEASE_SECONDS must be >= 1")
     if settings.scheduler_jitter_percent < 0 or settings.scheduler_jitter_percent > 50:
         raise RuntimeError("SCHEDULER_JITTER_PERCENT must be between 0 and 50")
+    if settings.scheduler_alert_cooldown_minutes < 0:
+        raise RuntimeError("SCHEDULER_ALERT_COOLDOWN_MINUTES must be >= 0")
 
     return settings
