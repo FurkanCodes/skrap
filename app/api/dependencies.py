@@ -5,6 +5,7 @@ from functools import lru_cache
 from fastapi import Depends
 
 from app.application.discovery_service import DiscoveryBatchService
+from app.application.scrape_result_cache import ScrapeResultCache
 from app.application.scrape_service import ScrapeBatchService
 from app.application.tracking_service import TrackingService
 from app.core.config import Settings, get_settings
@@ -42,6 +43,23 @@ def get_discovery_service(
     settings: Settings = Depends(get_app_settings),
 ) -> DiscoveryBatchService:
     return _get_discovery_service_cached(settings.scrape_concurrency)
+
+
+@lru_cache
+def _get_scrape_result_cache_cached(
+    ttl_seconds: int,
+    max_batches: int,
+) -> ScrapeResultCache:
+    return ScrapeResultCache(ttl_seconds=ttl_seconds, max_batches=max_batches)
+
+
+def get_scrape_result_cache(
+    settings: Settings = Depends(get_app_settings),
+) -> ScrapeResultCache:
+    return _get_scrape_result_cache_cached(
+        ttl_seconds=settings.scrape_result_cache_ttl_seconds,
+        max_batches=settings.scrape_result_cache_max_batches,
+    )
 
 
 @lru_cache

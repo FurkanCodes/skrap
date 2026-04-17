@@ -5,8 +5,9 @@ from dataclasses import asdict
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 
-from app.api.dependencies import get_app_settings, get_scrape_service
+from app.api.dependencies import get_app_settings, get_scrape_result_cache, get_scrape_service
 from app.api.schemas.scrapes import PriceResultResponse, ScrapeBatchRequest, ScrapeBatchResponse
+from app.application.scrape_result_cache import ScrapeResultCache
 from app.application.scrape_service import ScrapeBatchInput, ScrapeBatchService
 from app.core.config import Settings
 
@@ -38,6 +39,7 @@ async def post_scrape_batch(
     request: Request,
     settings: Settings = Depends(get_app_settings),
     service: ScrapeBatchService = Depends(get_scrape_service),
+    cache: ScrapeResultCache = Depends(get_scrape_result_cache),
 ) -> ScrapeBatchResponse:
     request_urls = [str(url) for url in payload.urls]
     if len(request_urls) > settings.scrape_max_urls:
@@ -64,10 +66,16 @@ async def post_scrape_batch(
     )
 
     output = await run_in_threadpool(service.scrape, batch_input)
-    results = [PriceResultResponse.model_validate(asdict(item)) for item in output.results]
+    cached_refs = await run_in_threadpool(cache.store, output.results)
+    results = []
+    for item, result_ref in zip(output.results, cached_refs.result_refs, strict=False):
+        payload_data = asdict(item)
+        payload_data["result_ref"] = result_ref
+        results.append(PriceResultResponse.model_validate(payload_data))
 
     return ScrapeBatchResponse(
         request_id=output.request_id,
+        scrape_ref=cached_refs.scrape_ref,
         total_urls=output.total_urls,
         success_count=output.success_count,
         failure_count=output.failure_count,

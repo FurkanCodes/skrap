@@ -8,6 +8,8 @@ from psycopg_pool import ConnectionPool
 
 from app.tracking.domain import (
     AlertEvent,
+    NotificationEvent,
+    NotificationEventStatus,
     PriceSnapshot,
     TrackedItem,
     TrackingBootstrapIdempotencyRecord,
@@ -99,6 +101,29 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS notification_events (
+        notification_id TEXT PRIMARY KEY,
+        idempotency_key TEXT NOT NULL UNIQUE,
+        alert_event_id TEXT NOT NULL REFERENCES alert_events(event_id) ON DELETE CASCADE,
+        item_id TEXT NOT NULL REFERENCES tracked_items(item_id) ON DELETE CASCADE,
+        channel TEXT NOT NULL,
+        payload TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('queued', 'sending', 'sent', 'failed', 'dead')),
+        attempt_count INTEGER NOT NULL CHECK (attempt_count >= 0),
+        max_attempts INTEGER NOT NULL CHECK (max_attempts >= 1),
+        next_attempt_at TIMESTAMPTZ NOT NULL,
+        last_attempt_at TIMESTAMPTZ,
+        sent_at TIMESTAMPTZ,
+        provider_name TEXT,
+        provider_message_id TEXT,
+        last_error TEXT,
+        lease_owner TEXT,
+        lease_until TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL
+    )
+    """,
+    """
     CREATE INDEX IF NOT EXISTS idx_tracked_items_due_active
       ON tracked_items(next_check_at, item_id)
       WHERE status = 'active'
@@ -142,6 +167,18 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
     """
     CREATE INDEX IF NOT EXISTS idx_alert_events_rule_triggered
       ON alert_events(rule_type, triggered_at DESC)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_notification_events_due
+      ON notification_events(status, next_attempt_at)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_notification_events_lease_until
+      ON notification_events(lease_until)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_notification_events_item_created
+      ON notification_events(item_id, created_at DESC)
     """,
 )
 
@@ -519,6 +556,182 @@ class PostgresTrackingRepository:
             ).fetchall()
         return [self._row_to_alert_event(row) for row in rows]
 
+    def enqueue_notification_event(self, event: NotificationEvent) -> bool:
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                """
+                INSERT INTO notification_events (
+                    notification_id,
+                    idempotency_key,
+                    alert_event_id,
+                    item_id,
+                    channel,
+                    payload,
+                    status,
+                    attempt_count,
+                    max_attempts,
+                    next_attempt_at,
+                    last_attempt_at,
+                    sent_at,
+                    provider_name,
+                    provider_message_id,
+                    last_error,
+                    lease_owner,
+                    lease_until,
+                    created_at,
+                    updated_at
+                ) VALUES (
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                )
+                ON CONFLICT(idempotency_key) DO NOTHING
+                RETURNING notification_id
+                """,
+                (
+                    event.notification_id,
+                    event.idempotency_key,
+                    event.alert_event_id,
+                    event.item_id,
+                    event.channel,
+                    event.payload,
+                    event.status,
+                    event.attempt_count,
+                    event.max_attempts,
+                    _parse_timestamp(event.next_attempt_at),
+                    _parse_timestamp(event.last_attempt_at),
+                    _parse_timestamp(event.sent_at),
+                    event.provider_name,
+                    event.provider_message_id,
+                    event.last_error,
+                    event.lease_owner,
+                    _parse_timestamp(event.lease_until),
+                    _parse_timestamp(event.created_at),
+                    _parse_timestamp(event.updated_at),
+                ),
+            ).fetchone()
+        return row is not None
+
+    def claim_due_notification_events(
+        self,
+        *,
+        now: str,
+        lease_owner: str,
+        lease_until: str,
+        limit: int,
+    ) -> list[NotificationEvent]:
+        if limit < 1:
+            return []
+
+        now_dt = _parse_timestamp(now)
+        lease_until_dt = _parse_timestamp(lease_until)
+        with self._pool.connection() as conn:
+            with conn.transaction():
+                rows = conn.execute(
+                    """
+                    SELECT notification_id
+                    FROM notification_events
+                    WHERE status IN ('queued', 'failed', 'sending')
+                      AND next_attempt_at <= %s
+                      AND (lease_until IS NULL OR lease_until <= %s)
+                      AND status != 'dead'
+                      AND status != 'sent'
+                    ORDER BY next_attempt_at ASC, notification_id ASC
+                    FOR UPDATE SKIP LOCKED
+                    LIMIT %s
+                    """,
+                    (now_dt, now_dt, limit),
+                ).fetchall()
+                notification_ids = [str(row["notification_id"]) for row in rows]
+                if not notification_ids:
+                    return []
+
+                conn.execute(
+                    """
+                    UPDATE notification_events
+                    SET status = 'sending',
+                        lease_owner = %s,
+                        lease_until = %s,
+                        last_attempt_at = %s,
+                        updated_at = %s
+                    WHERE notification_id = ANY(%s)
+                    """,
+                    (lease_owner, lease_until_dt, now_dt, now_dt, notification_ids),
+                )
+
+                claimed_rows = conn.execute(
+                    """
+                    SELECT *
+                    FROM notification_events
+                    WHERE notification_id = ANY(%s)
+                    """,
+                    (notification_ids,),
+                ).fetchall()
+
+        by_id = {
+            str(row["notification_id"]): self._row_to_notification_event(row)
+            for row in claimed_rows
+        }
+        return [
+            by_id[notification_id]
+            for notification_id in notification_ids
+            if notification_id in by_id
+        ]
+
+    def finalize_notification_event(
+        self,
+        *,
+        notification_id: str,
+        status: NotificationEventStatus,
+        attempt_count: int,
+        now: str,
+        next_attempt_at: str | None,
+        sent_at: str | None,
+        provider_name: str | None,
+        provider_message_id: str | None,
+        error: str | None,
+    ) -> None:
+        with self._pool.connection() as conn:
+            conn.execute(
+                """
+                UPDATE notification_events
+                SET status = %s,
+                    attempt_count = %s,
+                    next_attempt_at = %s,
+                    sent_at = %s,
+                    provider_name = %s,
+                    provider_message_id = %s,
+                    last_error = %s,
+                    lease_owner = NULL,
+                    lease_until = NULL,
+                    updated_at = %s
+                WHERE notification_id = %s
+                """,
+                (
+                    status,
+                    attempt_count,
+                    _parse_timestamp(next_attempt_at),
+                    _parse_timestamp(sent_at),
+                    provider_name,
+                    provider_message_id,
+                    error,
+                    _parse_timestamp(now),
+                    notification_id,
+                ),
+            )
+
+    def list_notification_events(self, item_id: str, limit: int) -> list[NotificationEvent]:
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM notification_events
+                WHERE item_id = %s
+                ORDER BY created_at DESC
+                LIMIT %s
+                """,
+                (item_id, limit),
+            ).fetchall()
+        return [self._row_to_notification_event(row) for row in rows]
+
     def claim_due_items(
         self,
         *,
@@ -891,6 +1104,30 @@ class PostgresTrackingRepository:
             target_amount=str(row["target_amount"]),
             currency=_as_str(row.get("currency")),
             triggered_at=_format_timestamp(row.get("triggered_at")),
+        )
+
+    @staticmethod
+    def _row_to_notification_event(row: dict[str, object]) -> NotificationEvent:
+        return NotificationEvent(
+            notification_id=str(row["notification_id"]),
+            idempotency_key=str(row["idempotency_key"]),
+            alert_event_id=str(row["alert_event_id"]),
+            item_id=str(row["item_id"]),
+            channel=str(row["channel"]),
+            payload=str(row["payload"]),
+            status=str(row["status"]),
+            attempt_count=int(row["attempt_count"]),
+            max_attempts=int(row["max_attempts"]),
+            next_attempt_at=_format_timestamp(row.get("next_attempt_at")),
+            last_attempt_at=_format_timestamp(row.get("last_attempt_at")),
+            sent_at=_format_timestamp(row.get("sent_at")),
+            provider_name=_as_str(row.get("provider_name")),
+            provider_message_id=_as_str(row.get("provider_message_id")),
+            last_error=_as_str(row.get("last_error")),
+            lease_owner=_as_str(row.get("lease_owner")),
+            lease_until=_format_timestamp(row.get("lease_until")),
+            created_at=_format_timestamp(row.get("created_at")),
+            updated_at=_format_timestamp(row.get("updated_at")),
         )
 
     @staticmethod

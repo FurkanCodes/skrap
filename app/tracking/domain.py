@@ -7,6 +7,7 @@ TrackingStatus = Literal["active", "paused"]
 TrackingMode = Literal["monitor", "alert"]
 TrackingCheckRunStatus = Literal["running", "succeeded", "failed"]
 AlertRuleType = Literal["price_below"]
+NotificationEventStatus = Literal["queued", "sending", "sent", "failed", "dead"]
 
 
 def derive_tracking_mode(target_amount: str | None) -> TrackingMode:
@@ -115,3 +116,28 @@ class AlertEvent:
     target_amount: str
     currency: str | None
     triggered_at: str
+
+
+@dataclass(frozen=True)
+class NotificationEvent:
+    """Outbox row used by notifier workers for reliable alert delivery."""
+
+    notification_id: str
+    idempotency_key: str
+    alert_event_id: str
+    item_id: str
+    channel: str
+    payload: str
+    status: NotificationEventStatus
+    attempt_count: int
+    max_attempts: int
+    next_attempt_at: str
+    last_attempt_at: str | None
+    sent_at: str | None
+    provider_name: str | None
+    provider_message_id: str | None
+    last_error: str | None
+    lease_owner: str | None
+    lease_until: str | None
+    created_at: str
+    updated_at: str

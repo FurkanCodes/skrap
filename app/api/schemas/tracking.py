@@ -2,16 +2,23 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import AnyHttpUrl, BaseModel, Field
+from pydantic import AnyHttpUrl, BaseModel, Field, model_validator
 
 
 class TrackedItemBootstrapRequest(BaseModel):
-    url: AnyHttpUrl
+    url: AnyHttpUrl | None = None
+    scrape_result_ref: str | None = None
     sites: list[str] | None = None
     timeout_seconds: int | None = Field(default=None, ge=1)
     fetch_mode: Literal["auto", "http", "dynamic", "stealth"] = "auto"
     check_interval_minutes: int = Field(default=60, ge=5, le=10080)
     target_amount: str | None = None
+
+    @model_validator(mode="after")
+    def validate_source(self) -> "TrackedItemBootstrapRequest":
+        if self.url is None and not (self.scrape_result_ref or "").strip():
+            raise ValueError("Either 'url' or 'scrape_result_ref' is required")
+        return self
 
 
 class TrackedItemUpdateRequest(BaseModel):

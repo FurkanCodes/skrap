@@ -12,6 +12,7 @@ from app.application.tracking_scheduler_service import (
 from app.scraper import PriceListing, PriceResult
 from app.tracking import (
     AlertEvent,
+    NotificationEvent,
     PriceSnapshot,
     TrackedItem,
     TrackingBootstrapIdempotencyRecord,
@@ -100,6 +101,8 @@ class _InMemoryTrackingRepository:
     idempotency: dict[str, TrackingBootstrapIdempotencyRecord]
     alerts_by_id: dict[str, AlertEvent]
     alerts_by_idempotency_key: dict[str, str]
+    notifications_by_id: dict[str, NotificationEvent]
+    notifications_by_idempotency_key: dict[str, str]
 
     def initialize(self) -> None:
         return None
@@ -156,6 +159,13 @@ class _InMemoryTrackingRepository:
                 continue
             self.alerts_by_idempotency_key.pop(event.idempotency_key, None)
             self.alerts_by_id.pop(event_id, None)
+
+        for notification_id in list(self.notifications_by_id.keys()):
+            notification = self.notifications_by_id[notification_id]
+            if notification.item_id != item_id:
+                continue
+            self.notifications_by_idempotency_key.pop(notification.idempotency_key, None)
+            self.notifications_by_id.pop(notification_id, None)
         return True
 
     def add_snapshot(self, snapshot: PriceSnapshot) -> None:
@@ -193,6 +203,83 @@ class _InMemoryTrackingRepository:
     def list_alert_events(self, item_id: str, limit: int) -> list[AlertEvent]:
         rows = [event for event in self.alerts_by_id.values() if event.item_id == item_id]
         rows.sort(key=lambda event: event.triggered_at, reverse=True)
+        return rows[:limit]
+
+    def enqueue_notification_event(self, event: NotificationEvent) -> bool:
+        existing_id = self.notifications_by_idempotency_key.get(event.idempotency_key)
+        if existing_id is not None:
+            return False
+        self.notifications_by_id[event.notification_id] = event
+        self.notifications_by_idempotency_key[event.idempotency_key] = event.notification_id
+        return True
+
+    def claim_due_notification_events(
+        self,
+        *,
+        now: str,
+        lease_owner: str,
+        lease_until: str,
+        limit: int,
+    ) -> list[NotificationEvent]:
+        if limit < 1:
+            return []
+        candidates = [
+            event
+            for event in self.notifications_by_id.values()
+            if event.status in {"queued", "failed", "sending"}
+            and event.status not in {"sent", "dead"}
+            and event.next_attempt_at <= now
+            and (event.lease_until is None or event.lease_until <= now)
+        ]
+        candidates.sort(key=lambda event: (event.next_attempt_at, event.notification_id))
+        claimed = candidates[:limit]
+        updated: list[NotificationEvent] = []
+        for event in claimed:
+            next_event = replace(
+                event,
+                status="sending",
+                lease_owner=lease_owner,
+                lease_until=lease_until,
+                last_attempt_at=now,
+                updated_at=now,
+            )
+            self.notifications_by_id[event.notification_id] = next_event
+            updated.append(next_event)
+        return updated
+
+    def finalize_notification_event(
+        self,
+        *,
+        notification_id: str,
+        status: str,
+        attempt_count: int,
+        now: str,
+        next_attempt_at: str | None,
+        sent_at: str | None,
+        provider_name: str | None,
+        provider_message_id: str | None,
+        error: str | None,
+    ) -> None:
+        current = self.notifications_by_id.get(notification_id)
+        if current is None:
+            return
+        self.notifications_by_id[notification_id] = replace(
+            current,
+            status=status,
+            attempt_count=attempt_count,
+            next_attempt_at=next_attempt_at or current.next_attempt_at,
+            sent_at=sent_at,
+            provider_name=provider_name,
+            provider_message_id=provider_message_id,
+            last_error=error,
+            lease_owner=None,
+            lease_until=None,
+            updated_at=now,
+        )
+
+    def list_notification_events(self, item_id: str, limit: int) -> list[NotificationEvent]:
+        rows = [event for event in self.notifications_by_id.values() if event.item_id == item_id]
+        rows.sort(key=lambda event: event.created_at, reverse=True)
         return rows[:limit]
 
     def claim_due_items(
@@ -358,6 +445,8 @@ def _build_repo() -> _InMemoryTrackingRepository:
         idempotency={},
         alerts_by_id={},
         alerts_by_idempotency_key={},
+        notifications_by_id={},
+        notifications_by_idempotency_key={},
     )
     return repo
 
@@ -739,6 +828,10 @@ def test_scheduler_emits_alert_event_on_price_below_crossing() -> None:
     assert events[0].previous_amount == "120.00"
     assert events[0].current_amount == "95.00"
     assert events[0].target_amount == "100.00"
+    notifications = repo.list_notification_events(item.item_id, limit=10)
+    assert len(notifications) == 1
+    assert notifications[0].status == "queued"
+    assert notifications[0].alert_event_id == events[0].event_id
 
 
 def test_scheduler_does_not_emit_alert_without_crossing() -> None:

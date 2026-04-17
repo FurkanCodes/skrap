@@ -4,6 +4,8 @@ from typing import Protocol
 
 from app.tracking.domain import (
     AlertEvent,
+    NotificationEvent,
+    NotificationEventStatus,
     PriceSnapshot,
     TrackingBootstrapIdempotencyRecord,
     TrackedItem,
@@ -59,6 +61,38 @@ class TrackingRepository(Protocol):
         ...
 
     def list_alert_events(self, item_id: str, limit: int) -> list[AlertEvent]:
+        ...
+
+    def enqueue_notification_event(self, event: NotificationEvent) -> bool:
+        """Persist notification outbox row idempotently."""
+        ...
+
+    def claim_due_notification_events(
+        self,
+        *,
+        now: str,
+        lease_owner: str,
+        lease_until: str,
+        limit: int,
+    ) -> list[NotificationEvent]:
+        ...
+
+    def finalize_notification_event(
+        self,
+        *,
+        notification_id: str,
+        status: NotificationEventStatus,
+        attempt_count: int,
+        now: str,
+        next_attempt_at: str | None,
+        sent_at: str | None,
+        provider_name: str | None,
+        provider_message_id: str | None,
+        error: str | None,
+    ) -> None:
+        ...
+
+    def list_notification_events(self, item_id: str, limit: int) -> list[NotificationEvent]:
         ...
 
     def claim_due_items(

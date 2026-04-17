@@ -50,6 +50,12 @@ Run periodic tracking checks in a separate process:
 ./.venv/bin/python -m app.jobs.scheduler
 ```
 
+Run notification delivery worker in another process:
+
+```bash
+./.venv/bin/python -m app.jobs.notifier
+```
+
 Useful scheduler env vars:
 
 - `SCHEDULER_POLL_SECONDS` (default: `10`)
@@ -59,6 +65,17 @@ Useful scheduler env vars:
 - `SCHEDULER_JITTER_PERCENT` (default: `10`)
 - `SCHEDULER_ALERT_COOLDOWN_MINUTES` (default: `60`, set `0` to disable cooldown)
 - `SCHEDULER_LEASE_OWNER` (optional explicit worker id)
+
+Notifier env vars:
+
+- `NOTIFIER_POLL_SECONDS` (default: `5`)
+- `NOTIFIER_CLAIM_BATCH_SIZE` (default: `100`)
+- `NOTIFIER_LEASE_SECONDS` (default: `120`)
+- `NOTIFIER_MAX_ATTEMPTS` (default: `5`)
+- `NOTIFIER_BASE_BACKOFF_SECONDS` (default: `30`)
+- `NOTIFIER_BACKOFF_MAX_SECONDS` (default: `3600`)
+- `NOTIFIER_RETRY_JITTER_PERCENT` (default: `10`)
+- `NOTIFIER_LEASE_OWNER` (optional explicit worker id)
 
 Database/pool env vars:
 
@@ -83,6 +100,11 @@ Notes:
 - `--database-url` can be passed explicitly to override env var resolution.
 - With `--truncate`, the script verifies source/target row counts and fails if they differ.
 - Use `--skip-verify` only when you intentionally allow non-equal counts.
+- Migration now includes tracking + alerting tables:
+  - `tracked_items`, `price_snapshots`, `tracking_check_runs`
+  - `tracking_bootstrap_idempotency`, `alert_events`, `notification_events`
+- Full runbook (backup, rollback, validation):
+  - [/Users/furkan/skrap/docs/postgres-migration-runbook.md](/Users/furkan/skrap/docs/postgres-migration-runbook.md)
 
 Scheduler logs include structured cycle + rolling-window metrics:
 
@@ -110,6 +132,20 @@ curl -X POST http://127.0.0.1:8000/api/v1/scrapes \
     "fetch_mode": "auto"
   }'
 ```
+
+`/api/v1/scrapes` now returns:
+
+- `scrape_ref` at batch level
+- `result_ref` for each result row
+
+You can create tracked items without a second scrape by posting:
+
+- `POST /api/v1/tracked-items` with `scrape_result_ref` (no `url` required)
+
+Cache tuning env vars:
+
+- `SCRAPE_RESULT_CACHE_TTL_SECONDS` (default: `900`)
+- `SCRAPE_RESULT_CACHE_MAX_BATCHES` (default: `500`)
 
 ## Scraper Architecture
 

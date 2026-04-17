@@ -5,7 +5,7 @@ from dataclasses import asdict
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.concurrency import run_in_threadpool
 
-from app.api.dependencies import get_app_settings, get_tracking_service
+from app.api.dependencies import get_app_settings, get_scrape_result_cache, get_tracking_service
 from app.api.schemas.tracking import (
     PriceSnapshotResponse,
     TrackedItemBootstrapRequest,
@@ -23,6 +23,7 @@ from app.application.tracking_service import (
     TrackingServiceError,
     TrackingUpdateInput,
 )
+from app.application.scrape_result_cache import ScrapeResultCache
 from app.core.config import Settings
 from app.tracking import TrackedItem, derive_tracking_mode
 
@@ -67,6 +68,7 @@ async def post_tracked_item_bootstrap(
     request: Request,
     settings: Settings = Depends(get_app_settings),
     service: TrackingService = Depends(get_tracking_service),
+    scrape_result_cache: ScrapeResultCache = Depends(get_scrape_result_cache),
 ) -> TrackedItemBootstrapResponse:
     """Create or refresh one tracked item from a product URL.
 
@@ -86,15 +88,31 @@ async def post_tracked_item_bootstrap(
     selected_sites = _normalize_selected_sites(payload.sites, set(service.list_sites()))
     request_id = str(getattr(request.state, "request_id", ""))
     idempotency_key = request.headers.get("Idempotency-Key", "").strip()
+    scrape_result_ref = (payload.scrape_result_ref or "").strip() or None
+    pre_fetched_result = None
+    source_url = str(payload.url) if payload.url is not None else ""
+    if scrape_result_ref is not None:
+        pre_fetched_result = await run_in_threadpool(
+            scrape_result_cache.get_result,
+            scrape_result_ref,
+        )
+        if pre_fetched_result is None:
+            raise HTTPException(
+                status_code=422,
+                detail="Invalid or expired scrape_result_ref",
+            )
+        source_url = pre_fetched_result.url
 
     bootstrap_input = TrackingBootstrapInput(
         request_id=request_id,
-        url=str(payload.url),
+        url=source_url,
         timeout_seconds=timeout_seconds,
         selected_sites=selected_sites,
         fetch_mode=payload.fetch_mode,
         check_interval_minutes=payload.check_interval_minutes,
         target_amount=payload.target_amount,
+        scrape_result_ref=scrape_result_ref,
+        pre_fetched_result=pre_fetched_result,
     )
 
     try:

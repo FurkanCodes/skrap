@@ -29,6 +29,7 @@ class PriceListingResponse(BaseModel):
 
 
 class PriceResultResponse(BaseModel):
+    result_ref: str | None = None
     url: str
     success: bool
     product_id: str | None
@@ -61,6 +62,7 @@ class ScrapeBatchRequest(BaseModel):
 
 class ScrapeBatchResponse(BaseModel):
     request_id: str
+    scrape_ref: str | None = None
     total_urls: int
     success_count: int
     failure_count: int

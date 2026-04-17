@@ -59,6 +59,8 @@ class Settings:
     scrape_timeout_max: int
     scrape_max_urls: int
     scrape_concurrency: int
+    scrape_result_cache_ttl_seconds: int
+    scrape_result_cache_max_batches: int
     tracking_database_url: str
     tracking_db_pool_min_size: int
     tracking_db_pool_max_size: int
@@ -72,6 +74,13 @@ class Settings:
     scheduler_lease_seconds: int
     scheduler_jitter_percent: int
     scheduler_alert_cooldown_minutes: int
+    notifier_poll_seconds: int
+    notifier_claim_batch_size: int
+    notifier_lease_seconds: int
+    notifier_max_attempts: int
+    notifier_base_backoff_seconds: int
+    notifier_backoff_max_seconds: int
+    notifier_retry_jitter_percent: int
 
 
 @lru_cache
@@ -90,6 +99,8 @@ def get_settings() -> Settings:
         scrape_timeout_max=_parse_int_env("SCRAPE_TIMEOUT_MAX", 120),
         scrape_max_urls=_parse_int_env("SCRAPE_MAX_URLS", 50),
         scrape_concurrency=_parse_int_env("SCRAPE_CONCURRENCY", 5),
+        scrape_result_cache_ttl_seconds=_parse_int_env("SCRAPE_RESULT_CACHE_TTL_SECONDS", 900),
+        scrape_result_cache_max_batches=_parse_int_env("SCRAPE_RESULT_CACHE_MAX_BATCHES", 500),
         tracking_database_url=tracking_database_url,
         tracking_db_pool_min_size=_parse_int_env("TRACKING_DB_POOL_MIN_SIZE", 1),
         tracking_db_pool_max_size=_parse_int_env("TRACKING_DB_POOL_MAX_SIZE", 10),
@@ -111,6 +122,13 @@ def get_settings() -> Settings:
         scheduler_alert_cooldown_minutes=_parse_int_env(
             "SCHEDULER_ALERT_COOLDOWN_MINUTES", 60
         ),
+        notifier_poll_seconds=_parse_int_env("NOTIFIER_POLL_SECONDS", 5),
+        notifier_claim_batch_size=_parse_int_env("NOTIFIER_CLAIM_BATCH_SIZE", 100),
+        notifier_lease_seconds=_parse_int_env("NOTIFIER_LEASE_SECONDS", 120),
+        notifier_max_attempts=_parse_int_env("NOTIFIER_MAX_ATTEMPTS", 5),
+        notifier_base_backoff_seconds=_parse_int_env("NOTIFIER_BASE_BACKOFF_SECONDS", 30),
+        notifier_backoff_max_seconds=_parse_int_env("NOTIFIER_BACKOFF_MAX_SECONDS", 3600),
+        notifier_retry_jitter_percent=_parse_int_env("NOTIFIER_RETRY_JITTER_PERCENT", 10),
     )
 
     if settings.scrape_timeout_min < 1:
@@ -129,6 +147,10 @@ def get_settings() -> Settings:
         raise RuntimeError("SCRAPE_MAX_URLS must be >= 1")
     if settings.scrape_concurrency < 1:
         raise RuntimeError("SCRAPE_CONCURRENCY must be >= 1")
+    if settings.scrape_result_cache_ttl_seconds < 60:
+        raise RuntimeError("SCRAPE_RESULT_CACHE_TTL_SECONDS must be >= 60")
+    if settings.scrape_result_cache_max_batches < 1:
+        raise RuntimeError("SCRAPE_RESULT_CACHE_MAX_BATCHES must be >= 1")
     if settings.tracking_db_pool_min_size < 1:
         raise RuntimeError("TRACKING_DB_POOL_MIN_SIZE must be >= 1")
     if settings.tracking_db_pool_max_size < settings.tracking_db_pool_min_size:
@@ -163,5 +185,21 @@ def get_settings() -> Settings:
         raise RuntimeError("SCHEDULER_JITTER_PERCENT must be between 0 and 50")
     if settings.scheduler_alert_cooldown_minutes < 0:
         raise RuntimeError("SCHEDULER_ALERT_COOLDOWN_MINUTES must be >= 0")
+    if settings.notifier_poll_seconds < 1:
+        raise RuntimeError("NOTIFIER_POLL_SECONDS must be >= 1")
+    if settings.notifier_claim_batch_size < 1:
+        raise RuntimeError("NOTIFIER_CLAIM_BATCH_SIZE must be >= 1")
+    if settings.notifier_lease_seconds < 1:
+        raise RuntimeError("NOTIFIER_LEASE_SECONDS must be >= 1")
+    if settings.notifier_max_attempts < 1:
+        raise RuntimeError("NOTIFIER_MAX_ATTEMPTS must be >= 1")
+    if settings.notifier_base_backoff_seconds < 1:
+        raise RuntimeError("NOTIFIER_BASE_BACKOFF_SECONDS must be >= 1")
+    if settings.notifier_backoff_max_seconds < settings.notifier_base_backoff_seconds:
+        raise RuntimeError(
+            "NOTIFIER_BACKOFF_MAX_SECONDS must be >= NOTIFIER_BASE_BACKOFF_SECONDS"
+        )
+    if settings.notifier_retry_jitter_percent < 0 or settings.notifier_retry_jitter_percent > 50:
+        raise RuntimeError("NOTIFIER_RETRY_JITTER_PERCENT must be between 0 and 50")
 
     return settings

@@ -74,6 +74,41 @@ _IDEMPOTENCY_COLUMNS = (
     "updated_at",
 )
 
+_ALERT_EVENT_COLUMNS = (
+    "event_id",
+    "idempotency_key",
+    "item_id",
+    "snapshot_id",
+    "rule_type",
+    "previous_amount",
+    "current_amount",
+    "target_amount",
+    "currency",
+    "triggered_at",
+)
+
+_NOTIFICATION_EVENT_COLUMNS = (
+    "notification_id",
+    "idempotency_key",
+    "alert_event_id",
+    "item_id",
+    "channel",
+    "payload",
+    "status",
+    "attempt_count",
+    "max_attempts",
+    "next_attempt_at",
+    "last_attempt_at",
+    "sent_at",
+    "provider_name",
+    "provider_message_id",
+    "last_error",
+    "lease_owner",
+    "lease_until",
+    "created_at",
+    "updated_at",
+)
+
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Migrate tracking data from SQLite to Postgres")
@@ -142,6 +177,8 @@ def _load_sqlite(sqlite_path: Path) -> tuple[
     list[dict[str, object]],
     list[dict[str, object]],
     list[dict[str, object]],
+    list[dict[str, object]],
+    list[dict[str, object]],
 ]:
     conn = sqlite3.connect(str(sqlite_path))
     conn.row_factory = sqlite3.Row
@@ -154,10 +191,23 @@ def _load_sqlite(sqlite_path: Path) -> tuple[
             "tracking_bootstrap_idempotency",
             _IDEMPOTENCY_COLUMNS,
         )
+        alert_events = _read_rows(conn, "alert_events", _ALERT_EVENT_COLUMNS)
+        notification_events = _read_rows(
+            conn,
+            "notification_events",
+            _NOTIFICATION_EVENT_COLUMNS,
+        )
     finally:
         conn.close()
 
-    return tracked_items, snapshots, check_runs, idempotency
+    return (
+        tracked_items,
+        snapshots,
+        check_runs,
+        idempotency,
+        alert_events,
+        notification_events,
+    )
 
 
 def _dedupe_snapshots(rows: list[dict[str, object]]) -> list[dict[str, object]]:
@@ -243,12 +293,16 @@ def _source_counts(
     snapshots: list[dict[str, object]],
     check_runs: list[dict[str, object]],
     idempotency: list[dict[str, object]],
+    alert_events: list[dict[str, object]],
+    notification_events: list[dict[str, object]],
 ) -> dict[str, int]:
     return {
         "tracked_items": len(tracked_items),
         "price_snapshots": len(snapshots),
         "tracking_check_runs": len(check_runs),
         "tracking_bootstrap_idempotency": len(idempotency),
+        "alert_events": len(alert_events),
+        "notification_events": len(notification_events),
     }
 
 
@@ -267,6 +321,12 @@ def _target_counts(database_url: str) -> dict[str, int]:
             "tracking_bootstrap_idempotency": int(
                 conn.execute("SELECT COUNT(*) FROM tracking_bootstrap_idempotency").fetchone()[0]
             ),
+            "alert_events": int(
+                conn.execute("SELECT COUNT(*) FROM alert_events").fetchone()[0]
+            ),
+            "notification_events": int(
+                conn.execute("SELECT COUNT(*) FROM notification_events").fetchone()[0]
+            ),
         }
 
 
@@ -277,7 +337,20 @@ def _print_counts(label: str, counts: dict[str, int]) -> None:
         f" snapshots={counts['price_snapshots']}"
         f" check_runs={counts['tracking_check_runs']}"
         f" idempotency={counts['tracking_bootstrap_idempotency']}"
+        f" alert_events={counts['alert_events']}"
+        f" notification_events={counts['notification_events']}"
     )
+
+
+def _executemany(
+    conn: psycopg.Connection,
+    sql: str,
+    params: list[dict[str, object]],
+) -> None:
+    if not params:
+        return
+    with conn.cursor() as cursor:
+        cursor.executemany(sql, params)
 
 
 def _migrate(
@@ -288,6 +361,8 @@ def _migrate(
     snapshots: list[dict[str, object]],
     check_runs: list[dict[str, object]],
     idempotency: list[dict[str, object]],
+    alert_events: list[dict[str, object]],
+    notification_events: list[dict[str, object]],
 ) -> None:
     with psycopg.connect(database_url) as conn:
         with conn.transaction():
@@ -295,6 +370,8 @@ def _migrate(
                 conn.execute(
                     """
                     TRUNCATE TABLE
+                        notification_events,
+                        alert_events,
                         tracking_bootstrap_idempotency,
                         tracking_check_runs,
                         price_snapshots,
@@ -304,7 +381,8 @@ def _migrate(
                 )
 
             if tracked_items:
-                conn.executemany(
+                _executemany(
+                    conn,
                     """
                     INSERT INTO tracked_items (
                         item_id,
@@ -409,7 +487,8 @@ def _migrate(
                 )
 
             if snapshots:
-                conn.executemany(
+                _executemany(
+                    conn,
                     """
                     INSERT INTO price_snapshots (
                         snapshot_id,
@@ -448,7 +527,8 @@ def _migrate(
                 )
 
             if check_runs:
-                conn.executemany(
+                _executemany(
+                    conn,
                     """
                     INSERT INTO tracking_check_runs (
                         run_id,
@@ -486,7 +566,8 @@ def _migrate(
                 )
 
             if idempotency:
-                conn.executemany(
+                _executemany(
+                    conn,
                     """
                     INSERT INTO tracking_bootstrap_idempotency (
                         idempotency_key,
@@ -517,6 +598,109 @@ def _migrate(
                     ],
                 )
 
+            if alert_events:
+                _executemany(
+                    conn,
+                    """
+                    INSERT INTO alert_events (
+                        event_id,
+                        idempotency_key,
+                        item_id,
+                        snapshot_id,
+                        rule_type,
+                        previous_amount,
+                        current_amount,
+                        target_amount,
+                        currency,
+                        triggered_at
+                    ) VALUES (
+                        %(event_id)s,
+                        %(idempotency_key)s,
+                        %(item_id)s,
+                        %(snapshot_id)s,
+                        %(rule_type)s,
+                        %(previous_amount)s,
+                        %(current_amount)s,
+                        %(target_amount)s,
+                        %(currency)s,
+                        %(triggered_at)s
+                    )
+                    ON CONFLICT (idempotency_key) DO NOTHING
+                    """,
+                    [
+                        {
+                            **row,
+                            "triggered_at": _parse_timestamp(row["triggered_at"]),
+                        }
+                        for row in alert_events
+                    ],
+                )
+
+            if notification_events:
+                _executemany(
+                    conn,
+                    """
+                    INSERT INTO notification_events (
+                        notification_id,
+                        idempotency_key,
+                        alert_event_id,
+                        item_id,
+                        channel,
+                        payload,
+                        status,
+                        attempt_count,
+                        max_attempts,
+                        next_attempt_at,
+                        last_attempt_at,
+                        sent_at,
+                        provider_name,
+                        provider_message_id,
+                        last_error,
+                        lease_owner,
+                        lease_until,
+                        created_at,
+                        updated_at
+                    ) VALUES (
+                        %(notification_id)s,
+                        %(idempotency_key)s,
+                        %(alert_event_id)s,
+                        %(item_id)s,
+                        %(channel)s,
+                        %(payload)s,
+                        %(status)s,
+                        %(attempt_count)s,
+                        %(max_attempts)s,
+                        %(next_attempt_at)s,
+                        %(last_attempt_at)s,
+                        %(sent_at)s,
+                        %(provider_name)s,
+                        %(provider_message_id)s,
+                        %(last_error)s,
+                        %(lease_owner)s,
+                        %(lease_until)s,
+                        %(created_at)s,
+                        %(updated_at)s
+                    )
+                    ON CONFLICT (idempotency_key) DO NOTHING
+                    """,
+                    [
+                        {
+                            **row,
+                            "attempt_count": int(row["attempt_count"] or 0),
+                            "max_attempts": int(row["max_attempts"] or 1),
+                            "next_attempt_at": _parse_timestamp(
+                                row["next_attempt_at"] or row["created_at"]
+                            ),
+                            "last_attempt_at": _parse_timestamp(row["last_attempt_at"]),
+                            "sent_at": _parse_timestamp(row["sent_at"]),
+                            "lease_until": _parse_timestamp(row["lease_until"]),
+                            "created_at": _parse_timestamp(row["created_at"]),
+                            "updated_at": _parse_timestamp(row["updated_at"]),
+                        }
+                        for row in notification_events
+                    ],
+                )
+
 
 def main() -> None:
     args = _parse_args()
@@ -538,7 +722,14 @@ def main() -> None:
     initializer.initialize()
     initializer.close()
 
-    tracked_items, snapshots, check_runs, idempotency = _load_sqlite(sqlite_path)
+    (
+        tracked_items,
+        snapshots,
+        check_runs,
+        idempotency,
+        alert_events,
+        notification_events,
+    ) = _load_sqlite(sqlite_path)
     deduped_snapshots = _dedupe_snapshots(snapshots)
     deduped_check_runs = _dedupe_check_runs(check_runs)
     source = _source_counts(
@@ -546,6 +737,8 @@ def main() -> None:
         snapshots=deduped_snapshots,
         check_runs=deduped_check_runs,
         idempotency=idempotency,
+        alert_events=alert_events,
+        notification_events=notification_events,
     )
     _print_counts("source_counts", source)
 
@@ -556,6 +749,8 @@ def main() -> None:
         snapshots=deduped_snapshots,
         check_runs=deduped_check_runs,
         idempotency=idempotency,
+        alert_events=alert_events,
+        notification_events=notification_events,
     )
 
     target = _target_counts(database_url)

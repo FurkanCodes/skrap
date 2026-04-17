@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 
 from fastapi.testclient import TestClient
 
-from app.api.dependencies import get_tracking_service
+from app.api.dependencies import get_scrape_result_cache, get_tracking_service
 from app.application.tracking_service import (
     TrackingBootstrapError,
     TrackingBootstrapInput,
@@ -14,6 +14,7 @@ from app.application.tracking_service import (
     TrackingUpdateInput,
 )
 from app.main import app
+from app.scraper import PriceResult
 from app.tracking.domain import PriceSnapshot, TrackedItem
 
 
@@ -26,6 +27,7 @@ class FakeTrackingService:
     items: dict[str, TrackedItem]
     snapshots: dict[str, list[PriceSnapshot]]
     bootstrap_calls: int = 0
+    last_bootstrap_payload: TrackingBootstrapInput | None = None
 
     def list_sites(self) -> dict[str, str]:
         return {
@@ -36,6 +38,7 @@ class FakeTrackingService:
 
     def bootstrap(self, payload: TrackingBootstrapInput) -> TrackedItem:
         self.bootstrap_calls += 1
+        self.last_bootstrap_payload = payload
         if "fail" in payload.url:
             raise TrackingBootstrapError("bootstrap failed: price_not_found")
 
@@ -149,8 +152,21 @@ class FakeTrackingService:
         return existed
 
 
-def _build_client(fake_tracking_service: FakeTrackingService) -> TestClient:
+@dataclass
+class FakeScrapeResultCache:
+    result_by_ref: dict[str, PriceResult]
+
+    def get_result(self, result_ref: str) -> PriceResult | None:
+        return self.result_by_ref.get(result_ref)
+
+
+def _build_client(
+    fake_tracking_service: FakeTrackingService,
+    fake_scrape_cache: FakeScrapeResultCache | None = None,
+) -> TestClient:
     app.dependency_overrides[get_tracking_service] = lambda: fake_tracking_service
+    if fake_scrape_cache is not None:
+        app.dependency_overrides[get_scrape_result_cache] = lambda: fake_scrape_cache
     return TestClient(app)
 
 
@@ -189,6 +205,58 @@ def test_tracked_items_bootstrap_creates_item() -> None:
     assert "last_check_finished_at" in body["item"]
 
 
+def test_tracked_items_bootstrap_from_scrape_result_ref_without_url() -> None:
+    service = FakeTrackingService(items={}, snapshots={})
+    cached_result = PriceResult(
+        url="https://example.com/products/from-cache",
+        success=True,
+        product_id="prd_cached",
+        site_key="generic",
+        adapter_key="generic",
+        amount="49.99",
+        currency="USD",
+        raw_text="$49.99",
+        source="test:cache",
+    )
+    cache = FakeScrapeResultCache(result_by_ref={"result-ref-1": cached_result})
+    client = _build_client(service, fake_scrape_cache=cache)
+
+    response = client.post(
+        "/api/v1/tracked-items",
+        json={
+            "scrape_result_ref": "result-ref-1",
+            "check_interval_minutes": 30,
+            "target_amount": "45.00",
+        },
+    )
+    _clear_overrides()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["item"]["source_url"] == "https://example.com/products/from-cache"
+    assert service.bootstrap_calls == 1
+    assert service.last_bootstrap_payload is not None
+    assert service.last_bootstrap_payload.scrape_result_ref == "result-ref-1"
+    assert service.last_bootstrap_payload.pre_fetched_result is not None
+
+
+def test_tracked_items_bootstrap_rejects_expired_scrape_result_ref() -> None:
+    service = FakeTrackingService(items={}, snapshots={})
+    cache = FakeScrapeResultCache(result_by_ref={})
+    client = _build_client(service, fake_scrape_cache=cache)
+
+    response = client.post(
+        "/api/v1/tracked-items",
+        json={
+            "scrape_result_ref": "missing-result-ref",
+        },
+    )
+    _clear_overrides()
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "Invalid or expired scrape_result_ref"
+
+
 def test_tracked_items_bootstrap_without_target_is_monitor_mode() -> None:
     service = FakeTrackingService(items={}, snapshots={})
     client = _build_client(service)
@@ -207,6 +275,21 @@ def test_tracked_items_bootstrap_without_target_is_monitor_mode() -> None:
     assert body["item"]["target_amount"] is None
     assert body["item"]["tracking_mode"] == "monitor"
     assert body["item"]["alerts_enabled"] is False
+
+
+def test_tracked_items_bootstrap_requires_url_or_scrape_result_ref() -> None:
+    service = FakeTrackingService(items={}, snapshots={})
+    client = _build_client(service)
+
+    response = client.post(
+        "/api/v1/tracked-items",
+        json={
+            "sites": ["generic"],
+        },
+    )
+    _clear_overrides()
+
+    assert response.status_code == 422
 
 
 def test_tracked_items_bootstrap_rejects_unknown_site_key() -> None:

@@ -7,6 +7,7 @@ import hashlib
 import json
 
 from app.application.scrape_service import ScrapeBatchInput, ScrapeBatchService
+from app.scraper import PriceResult
 from app.tracking import PriceSnapshot, TrackedItem, TrackingRepository, TrackingStatus
 
 
@@ -29,6 +30,8 @@ class TrackingBootstrapInput:
     fetch_mode: str
     check_interval_minutes: int
     target_amount: str | None
+    scrape_result_ref: str | None = None
+    pre_fetched_result: PriceResult | None = None
 
 
 @dataclass(frozen=True)
@@ -107,22 +110,22 @@ class TrackingService:
         price, the tracked item is not created.
         """
         interval = self._normalize_interval(payload.check_interval_minutes)
-
-        # Phase 1: run the same extractor pipeline used by /api/v1/scrapes.
-        scrape_output = self._scrape_service.scrape(
-            ScrapeBatchInput(
-                request_id=payload.request_id,
-                urls=[payload.url],
-                timeout_seconds=payload.timeout_seconds,
-                selected_sites=payload.selected_sites,
-                fetch_mode=payload.fetch_mode,
+        result = payload.pre_fetched_result
+        if result is None:
+            # Phase 1: run the same extractor pipeline used by /api/v1/scrapes.
+            scrape_output = self._scrape_service.scrape(
+                ScrapeBatchInput(
+                    request_id=payload.request_id,
+                    urls=[payload.url],
+                    timeout_seconds=payload.timeout_seconds,
+                    selected_sites=payload.selected_sites,
+                    fetch_mode=payload.fetch_mode,
+                )
             )
-        )
+            if not scrape_output.results:
+                raise TrackingBootstrapError("bootstrap failed: no_result")
+            result = scrape_output.results[0]
 
-        if not scrape_output.results:
-            raise TrackingBootstrapError("bootstrap failed: no_result")
-
-        result = scrape_output.results[0]
         if not result.success:
             raise TrackingBootstrapError(
                 f"bootstrap failed: {result.error or 'price_not_found'}"
@@ -130,7 +133,8 @@ class TrackingService:
 
         # Phase 2: upsert one tracked item per source URL.
         checked_at = _utcnow_iso()
-        existing = self._repository.get_item_by_source_url(payload.url)
+        source_url = result.url
+        existing = self._repository.get_item_by_source_url(source_url)
         item_id = existing.item_id if existing is not None else _new_item_id()
         created_at = existing.created_at if existing is not None else checked_at
 
@@ -142,8 +146,8 @@ class TrackingService:
 
         item = TrackedItem(
             item_id=item_id,
-            source_url=payload.url,
-            canonical_url=result.canonical_url,
+            source_url=source_url,
+            canonical_url=result.canonical_url or source_url,
             product_id=result.product_id,
             site_key=result.site_key,
             adapter_key=result.adapter_key,
@@ -296,6 +300,7 @@ def _build_bootstrap_request_hash(payload: TrackingBootstrapInput) -> str:
     )
     normalized = {
         "url": payload.url,
+        "scrape_result_ref": payload.scrape_result_ref,
         "timeout_seconds": payload.timeout_seconds,
         "selected_sites": selected_sites,
         "fetch_mode": payload.fetch_mode,

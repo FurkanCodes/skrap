@@ -7,11 +7,12 @@ from collections import defaultdict
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
+import json
 from typing import Protocol
 
 from app.application.scrape_service import ScrapeBatchInput, ScrapeBatchOutput
 from app.scraper import PriceResult
-from app.tracking import AlertEvent, PriceSnapshot, TrackedItem, TrackingRepository
+from app.tracking import AlertEvent, NotificationEvent, PriceSnapshot, TrackedItem, TrackingRepository
 
 
 class TrackingSchedulerError(RuntimeError):
@@ -77,6 +78,7 @@ class TrackingSchedulerService:
         lease_owner: str,
         fetch_mode: str = "auto",
         alert_cooldown_minutes: int = 60,
+        notification_max_attempts: int = 5,
     ) -> None:
         self._repository = repository
         self._scrape_runner = scrape_runner
@@ -88,6 +90,7 @@ class TrackingSchedulerService:
         self._lease_owner = lease_owner
         self._fetch_mode = fetch_mode
         self._alert_cooldown_minutes = max(0, alert_cooldown_minutes)
+        self._notification_max_attempts = max(1, notification_max_attempts)
 
     def run_once(self) -> SchedulerCycleResult:
         started = time.perf_counter()
@@ -362,7 +365,10 @@ class TrackingSchedulerService:
             currency=snapshot.currency or item_before.currency,
             triggered_at=snapshot.checked_at,
         )
-        self._repository.create_alert_event(event)
+        created = self._repository.create_alert_event(event)
+        if not created:
+            return
+        self._enqueue_notification_event(event)
 
     def _is_in_cooldown(self, *, item_id: str, rule_type: str, now: str) -> bool:
         if self._alert_cooldown_minutes <= 0:
@@ -378,6 +384,45 @@ class TrackingSchedulerService:
         last_dt = datetime.fromisoformat(last_event.triggered_at.replace("Z", "+00:00"))
         elapsed = now_dt - last_dt
         return elapsed < timedelta(minutes=self._alert_cooldown_minutes)
+
+    def _enqueue_notification_event(self, event: AlertEvent) -> None:
+        now = event.triggered_at
+        payload = {
+            "alert_event_id": event.event_id,
+            "item_id": event.item_id,
+            "snapshot_id": event.snapshot_id,
+            "rule_type": event.rule_type,
+            "previous_amount": event.previous_amount,
+            "current_amount": event.current_amount,
+            "target_amount": event.target_amount,
+            "currency": event.currency,
+            "triggered_at": event.triggered_at,
+        }
+        notification = NotificationEvent(
+            notification_id=_new_notification_event_id(),
+            idempotency_key=_build_notification_idempotency_key(
+                alert_event_id=event.event_id,
+                channel="log",
+            ),
+            alert_event_id=event.event_id,
+            item_id=event.item_id,
+            channel="log",
+            payload=json.dumps(payload, separators=(",", ":"), sort_keys=True),
+            status="queued",
+            attempt_count=0,
+            max_attempts=self._notification_max_attempts,
+            next_attempt_at=now,
+            last_attempt_at=None,
+            sent_at=None,
+            provider_name=None,
+            provider_message_id=None,
+            last_error=None,
+            lease_owner=None,
+            lease_until=None,
+            created_at=now,
+            updated_at=now,
+        )
+        self._repository.enqueue_notification_event(notification)
 
     def _mark_context_failure(self, context: _ItemRunContext, error: str) -> None:
         finished_at = _to_iso(_utcnow())
@@ -478,6 +523,10 @@ def _new_alert_event_id() -> str:
     return f"aev_{uuid.uuid4().hex[:20]}"
 
 
+def _new_notification_event_id() -> str:
+    return f"nev_{uuid.uuid4().hex[:20]}"
+
+
 def _utcnow() -> datetime:
     return datetime.now(tz=UTC)
 
@@ -540,6 +589,10 @@ def _build_job_key(item_id: str, scheduled_for: str) -> str:
 
 def _build_alert_idempotency_key(*, item_id: str, rule_type: str, snapshot_id: str) -> str:
     return f"{item_id}:{rule_type}:{snapshot_id}"
+
+
+def _build_notification_idempotency_key(*, alert_event_id: str, channel: str) -> str:
+    return f"{alert_event_id}:{channel}"
 
 
 def _parse_decimal(value: str | None) -> Decimal | None:

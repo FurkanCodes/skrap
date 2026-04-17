@@ -205,9 +205,12 @@ def test_scrapes_endpoint_returns_batch_summary_and_deduped_urls() -> None:
     assert response.status_code == 200
     body = response.json()
     assert body["total_urls"] == 2
+    assert body["scrape_ref"]
     assert body["success_count"] == 1
     assert body["failure_count"] == 1
     assert len(body["results"]) == 2
+    assert body["results"][0]["result_ref"]
+    assert body["results"][1]["result_ref"]
 
     assert fake_service.last_input is not None
     assert fake_service.last_input.urls == [

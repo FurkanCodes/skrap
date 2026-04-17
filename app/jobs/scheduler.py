@@ -131,6 +131,7 @@ def _build_scheduler_service() -> tuple[TrackingSchedulerService, int]:
         lease_owner=_resolve_lease_owner(),
         fetch_mode="auto",
         alert_cooldown_minutes=settings.scheduler_alert_cooldown_minutes,
+        notification_max_attempts=settings.notifier_max_attempts,
     )
     return scheduler_service, settings.scheduler_poll_seconds
 
