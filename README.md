@@ -76,7 +76,7 @@ Key implementation detail:
 Create `.env` in repo root (same folder as `README.md`):
 
 ```env
-TRACKING_DATABASE_URL=postgresql://postgres.<project-ref>:<password>@aws-0-<region>.pooler.supabase.com:6543/postgres?sslmode=require
+TRACKING_DATABASE_URL=
 TRACKING_DB_POOL_MIN_SIZE=1
 TRACKING_DB_POOL_MAX_SIZE=10
 ```
