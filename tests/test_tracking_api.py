@@ -10,6 +10,7 @@ from app.application.tracking_service import (
     TrackingBootstrapError,
     TrackingBootstrapInput,
     TrackingDetailOutput,
+    TrackingServiceError,
     TrackingUpdateInput,
 )
 from app.main import app
@@ -24,6 +25,7 @@ def _now_iso() -> str:
 class FakeTrackingService:
     items: dict[str, TrackedItem]
     snapshots: dict[str, list[PriceSnapshot]]
+    bootstrap_calls: int = 0
 
     def list_sites(self) -> dict[str, str]:
         return {
@@ -33,6 +35,7 @@ class FakeTrackingService:
         }
 
     def bootstrap(self, payload: TrackingBootstrapInput) -> TrackedItem:
+        self.bootstrap_calls += 1
         if "fail" in payload.url:
             raise TrackingBootstrapError("bootstrap failed: price_not_found")
 
@@ -77,6 +80,18 @@ class FakeTrackingService:
             )
         ]
         return item
+
+    def bootstrap_idempotent(
+        self,
+        *,
+        payload: TrackingBootstrapInput,
+        idempotency_key: str,
+    ) -> TrackedItem:
+        if idempotency_key == "conflict":
+            raise TrackingServiceError(
+                "Idempotency-Key reuse with different payload is not allowed"
+            )
+        return self.bootstrap(payload)
 
     def list_items(self) -> list[TrackedItem]:
         return list(self.items.values())
@@ -168,6 +183,10 @@ def test_tracked_items_bootstrap_creates_item() -> None:
     assert body["item"]["target_amount"] == "89.99"
     assert body["item"]["tracking_mode"] == "alert"
     assert body["item"]["alerts_enabled"] is True
+    assert "next_check_at" in body["item"]
+    assert "lease_until" in body["item"]
+    assert "last_check_started_at" in body["item"]
+    assert "last_check_finished_at" in body["item"]
 
 
 def test_tracked_items_bootstrap_without_target_is_monitor_mode() -> None:
@@ -271,6 +290,7 @@ def test_tracked_items_list_detail_patch_delete_flow() -> None:
     assert list_response.json()["items"][0]["item_id"] == "trk_existing"
     assert list_response.json()["items"][0]["tracking_mode"] == "monitor"
     assert list_response.json()["items"][0]["alerts_enabled"] is False
+    assert "next_check_at" in list_response.json()["items"][0]
 
     detail_response = client.get(f"/api/v1/tracked-items/{existing.item_id}")
     assert detail_response.status_code == 200
@@ -297,3 +317,39 @@ def test_tracked_items_list_detail_patch_delete_flow() -> None:
 
     assert missing_response.status_code == 404
     assert missing_response.json()["detail"] == "tracked item not found"
+
+
+def test_tracked_items_bootstrap_accepts_idempotency_key_header() -> None:
+    service = FakeTrackingService(items={}, snapshots={})
+    client = _build_client(service)
+
+    response = client.post(
+        "/api/v1/tracked-items",
+        headers={"Idempotency-Key": "boot-1"},
+        json={
+            "url": "https://example.com/products/test-idempo",
+            "sites": ["generic"],
+        },
+    )
+    _clear_overrides()
+
+    assert response.status_code == 200
+    assert service.bootstrap_calls == 1
+
+
+def test_tracked_items_bootstrap_idempotency_conflict_returns_409() -> None:
+    service = FakeTrackingService(items={}, snapshots={})
+    client = _build_client(service)
+
+    response = client.post(
+        "/api/v1/tracked-items",
+        headers={"Idempotency-Key": "conflict"},
+        json={
+            "url": "https://example.com/products/test-idempo-conflict",
+            "sites": ["generic"],
+        },
+    )
+    _clear_overrides()
+
+    assert response.status_code == 409
+    assert "Idempotency-Key reuse with different payload" in response.json()["detail"]

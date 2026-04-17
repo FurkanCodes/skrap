@@ -85,23 +85,32 @@ async def post_tracked_item_bootstrap(
 
     selected_sites = _normalize_selected_sites(payload.sites, set(service.list_sites()))
     request_id = str(getattr(request.state, "request_id", ""))
+    idempotency_key = request.headers.get("Idempotency-Key", "").strip()
+
+    bootstrap_input = TrackingBootstrapInput(
+        request_id=request_id,
+        url=str(payload.url),
+        timeout_seconds=timeout_seconds,
+        selected_sites=selected_sites,
+        fetch_mode=payload.fetch_mode,
+        check_interval_minutes=payload.check_interval_minutes,
+        target_amount=payload.target_amount,
+    )
 
     try:
-        item = await run_in_threadpool(
-            service.bootstrap,
-            TrackingBootstrapInput(
-                request_id=request_id,
-                url=str(payload.url),
-                timeout_seconds=timeout_seconds,
-                selected_sites=selected_sites,
-                fetch_mode=payload.fetch_mode,
-                check_interval_minutes=payload.check_interval_minutes,
-                target_amount=payload.target_amount,
-            ),
-        )
+        if idempotency_key:
+            item = await run_in_threadpool(
+                service.bootstrap_idempotent,
+                payload=bootstrap_input,
+                idempotency_key=idempotency_key,
+            )
+        else:
+            item = await run_in_threadpool(service.bootstrap, bootstrap_input)
     except TrackingBootstrapError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except TrackingServiceError as exc:
+        if "Idempotency-Key reuse with different payload" in str(exc):
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     return TrackedItemBootstrapResponse(

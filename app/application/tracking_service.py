@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+import hashlib
+import json
 
 from app.application.scrape_service import ScrapeBatchInput, ScrapeBatchService
 from app.tracking import PriceSnapshot, TrackedItem, TrackingRepository, TrackingStatus
@@ -162,6 +164,11 @@ class TrackingService:
             created_at=created_at,
             updated_at=checked_at,
             last_checked_at=checked_at,
+            next_check_at=_add_minutes_iso(checked_at, interval),
+            lease_owner=None,
+            lease_until=None,
+            last_check_started_at=None,
+            last_check_finished_at=checked_at,
         )
 
         saved = self._repository.save_item(item)
@@ -181,6 +188,34 @@ class TrackingService:
         )
         return saved
 
+    def bootstrap_idempotent(
+        self,
+        *,
+        payload: TrackingBootstrapInput,
+        idempotency_key: str,
+    ) -> TrackedItem:
+        """Bootstrap with idempotency semantics for safe client retries."""
+        request_hash = _build_bootstrap_request_hash(payload)
+        existing = self._repository.get_bootstrap_idempotency_record(idempotency_key)
+        if existing is not None:
+            if existing.request_hash != request_hash:
+                raise TrackingServiceError(
+                    "Idempotency-Key reuse with different payload is not allowed"
+                )
+            if existing.item_id:
+                item = self._repository.get_item(existing.item_id)
+                if item is not None:
+                    return item
+
+        item = self.bootstrap(payload)
+        self._repository.save_bootstrap_idempotency_record(
+            idempotency_key=idempotency_key,
+            request_hash=request_hash,
+            item_id=item.item_id,
+            now=_utcnow_iso(),
+        )
+        return item
+
     def update_item(self, payload: TrackingUpdateInput) -> TrackedItem | None:
         """Patch mutable tracking config without executing a scrape."""
         current = self._repository.get_item(payload.item_id)
@@ -197,12 +232,18 @@ class TrackingService:
         if payload.target_amount_provided:
             target_amount = _normalize_target_amount(payload.target_amount)
 
+        updated_at = _utcnow_iso()
         updated = replace(
             current,
             status=payload.status or current.status,
             check_interval_minutes=interval,
             target_amount=target_amount,
-            updated_at=_utcnow_iso(),
+            updated_at=updated_at,
+            next_check_at=(
+                _add_minutes_iso(updated_at, interval)
+                if (payload.check_interval_minutes is not None or current.next_check_at is None)
+                else current.next_check_at
+            ),
         )
         return self._repository.save_item(updated)
 
@@ -241,3 +282,25 @@ def _normalize_target_amount(value: str | None) -> str | None:
         return None
     normalized = value.strip()
     return normalized or None
+
+def _add_minutes_iso(timestamp: str, minutes: int) -> str:
+    dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+    return (dt + timedelta(minutes=minutes)).isoformat().replace("+00:00", "Z")
+
+
+def _build_bootstrap_request_hash(payload: TrackingBootstrapInput) -> str:
+    selected_sites = (
+        sorted(payload.selected_sites)
+        if payload.selected_sites is not None
+        else None
+    )
+    normalized = {
+        "url": payload.url,
+        "timeout_seconds": payload.timeout_seconds,
+        "selected_sites": selected_sites,
+        "fetch_mode": payload.fetch_mode,
+        "check_interval_minutes": payload.check_interval_minutes,
+        "target_amount": _normalize_target_amount(payload.target_amount),
+    }
+    serialized = json.dumps(normalized, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()

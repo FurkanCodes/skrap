@@ -5,6 +5,7 @@ from typing import Literal
 
 TrackingStatus = Literal["active", "paused"]
 TrackingMode = Literal["monitor", "alert"]
+TrackingCheckRunStatus = Literal["running", "succeeded", "failed"]
 
 
 def derive_tracking_mode(target_amount: str | None) -> TrackingMode:
@@ -41,6 +42,11 @@ class TrackedItem:
     created_at: str
     updated_at: str
     last_checked_at: str | None
+    next_check_at: str | None = None
+    lease_owner: str | None = None
+    lease_until: str | None = None
+    last_check_started_at: str | None = None
+    last_check_finished_at: str | None = None
 
     @property
     def tracking_mode(self) -> TrackingMode:
@@ -66,3 +72,27 @@ class PriceSnapshot:
     raw_text: str | None
     source: str | None
     error: str | None
+
+@dataclass(frozen=True)
+class TrackingCheckRun:
+    """Auditable record of one scheduled tracking check attempt."""
+
+    run_id: str
+    item_id: str
+    scheduled_for: str
+    started_at: str
+    finished_at: str | None
+    status: TrackingCheckRunStatus
+    attempt: int
+    error: str | None
+
+
+@dataclass(frozen=True)
+class TrackingBootstrapIdempotencyRecord:
+    """Stored idempotency result for tracked-item bootstrap requests."""
+
+    idempotency_key: str
+    request_hash: str
+    item_id: str | None
+    created_at: str
+    updated_at: str

@@ -58,6 +58,10 @@ class TrackedItemResponse(BaseModel):
     created_at: str
     updated_at: str
     last_checked_at: str | None
+    next_check_at: str | None = None
+    lease_until: str | None = None
+    last_check_started_at: str | None = None
+    last_check_finished_at: str | None = None
 
 
 class TrackedItemListResponse(BaseModel):

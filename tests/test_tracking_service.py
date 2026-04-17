@@ -13,13 +13,18 @@ from app.application.tracking_service import (
     TrackingUpdateInput,
 )
 from app.scraper import PriceListing, PriceResult
-from app.tracking import PriceSnapshot, TrackedItem
+from app.tracking import (
+    PriceSnapshot,
+    TrackedItem,
+    TrackingBootstrapIdempotencyRecord,
+)
 
 
 @dataclass
 class _FakeRepository:
     items: dict[str, TrackedItem]
     snapshots: list[PriceSnapshot]
+    idempotency_records: dict[str, TrackingBootstrapIdempotencyRecord]
 
     def initialize(self) -> None:
         pass
@@ -52,6 +57,28 @@ class _FakeRepository:
         snapshots = [snapshot for snapshot in self.snapshots if snapshot.item_id == item_id]
         return snapshots[:limit]
 
+    def get_bootstrap_idempotency_record(
+        self,
+        idempotency_key: str,
+    ) -> TrackingBootstrapIdempotencyRecord | None:
+        return self.idempotency_records.get(idempotency_key)
+
+    def save_bootstrap_idempotency_record(
+        self,
+        *,
+        idempotency_key: str,
+        request_hash: str,
+        item_id: str,
+        now: str,
+    ) -> None:
+        self.idempotency_records[idempotency_key] = TrackingBootstrapIdempotencyRecord(
+            idempotency_key=idempotency_key,
+            request_hash=request_hash,
+            item_id=item_id,
+            created_at=now,
+            updated_at=now,
+        )
+
 
 @dataclass
 class _FakeScrapeService:
@@ -71,7 +98,7 @@ class _FakeScrapeService:
 
 
 def _build_service(result: PriceResult) -> tuple[TrackingService, _FakeRepository]:
-    repository = _FakeRepository(items={}, snapshots=[])
+    repository = _FakeRepository(items={}, snapshots=[], idempotency_records={})
     service = TrackingService(
         repository=repository,
         scrape_service=_FakeScrapeService(result=result),
@@ -253,3 +280,52 @@ def test_update_item_rejects_interval_outside_bounds() -> None:
                 target_amount_provided=False,
             )
         )
+
+
+def test_bootstrap_idempotent_reuses_saved_item() -> None:
+    service, repository = _build_service(_success_result("https://example.com/p/idempo"))
+    payload = TrackingBootstrapInput(
+        request_id="req_idempo_1",
+        url="https://example.com/p/idempo",
+        timeout_seconds=20,
+        selected_sites={"generic"},
+        fetch_mode="auto",
+        check_interval_minutes=60,
+        target_amount="9.00",
+    )
+
+    first = service.bootstrap_idempotent(payload=payload, idempotency_key="idem-1")
+    snapshots_after_first = len(repository.snapshots)
+    second = service.bootstrap_idempotent(payload=payload, idempotency_key="idem-1")
+
+    assert first.item_id == second.item_id
+    assert len(repository.snapshots) == snapshots_after_first
+
+
+def test_bootstrap_idempotent_rejects_payload_mismatch() -> None:
+    service, _ = _build_service(_success_result("https://example.com/p/mismatch"))
+    base_payload = TrackingBootstrapInput(
+        request_id="req_idempo_2",
+        url="https://example.com/p/mismatch",
+        timeout_seconds=20,
+        selected_sites={"generic"},
+        fetch_mode="auto",
+        check_interval_minutes=60,
+        target_amount=None,
+    )
+    changed_payload = TrackingBootstrapInput(
+        request_id="req_idempo_3",
+        url="https://example.com/p/mismatch",
+        timeout_seconds=25,
+        selected_sites={"generic"},
+        fetch_mode="auto",
+        check_interval_minutes=60,
+        target_amount=None,
+    )
+
+    service.bootstrap_idempotent(payload=base_payload, idempotency_key="idem-2")
+    with pytest.raises(
+        TrackingServiceError,
+        match="Idempotency-Key reuse with different payload",
+    ):
+        service.bootstrap_idempotent(payload=changed_payload, idempotency_key="idem-2")

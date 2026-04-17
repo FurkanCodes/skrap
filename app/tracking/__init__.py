@@ -1,9 +1,21 @@
-from .domain import PriceSnapshot, TrackedItem, TrackingMode, TrackingStatus, derive_tracking_mode
+from .domain import (
+    PriceSnapshot,
+    TrackingBootstrapIdempotencyRecord,
+    TrackedItem,
+    TrackingCheckRun,
+    TrackingCheckRunStatus,
+    TrackingMode,
+    TrackingStatus,
+    derive_tracking_mode,
+)
 from .repository import TrackingRepository
 
 __all__ = [
     "PriceSnapshot",
+    "TrackingBootstrapIdempotencyRecord",
     "TrackedItem",
+    "TrackingCheckRun",
+    "TrackingCheckRunStatus",
     "TrackingMode",
     "TrackingRepository",
     "TrackingStatus",

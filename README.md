@@ -36,6 +36,27 @@ Docs:
 - `PATCH /api/v1/tracked-items/{item_id}`
 - `DELETE /api/v1/tracked-items/{item_id}`
 
+Tracked-item bootstrap supports optional idempotent retries via request header:
+
+- `Idempotency-Key: <client-generated-unique-key>`
+
+## Periodic Scheduler (Phase 1)
+
+Run periodic tracking checks in a separate process:
+
+```bash
+./.venv/bin/python -m app.jobs.scheduler
+```
+
+Useful scheduler env vars:
+
+- `SCHEDULER_POLL_SECONDS` (default: `10`)
+- `SCHEDULER_CLAIM_BATCH_SIZE` (default: `250`)
+- `SCHEDULER_MAX_INFLIGHT` (default: `64`)
+- `SCHEDULER_LEASE_SECONDS` (default: `180`)
+- `SCHEDULER_JITTER_PERCENT` (default: `10`)
+- `SCHEDULER_LEASE_OWNER` (optional explicit worker id)
+
 Example scrape request:
 
 ```bash
@@ -66,3 +87,8 @@ The scraper internals are under `app/scraper`:
 - Adapter flow: domain -> site adapter (`akakce` / `newegg`) -> optional generic fallback.
 - Auto fetch flow: HTTP `Fetcher` first, then browser fetchers (`DynamicFetcher`/`StealthyFetcher`) when JS/protection signals are detected.
 - Generic extraction order: JSON-LD listings -> DOM listings -> `find/find_all` fallback -> meta tags -> page-text fallback.
+
+## Backend Design Doc
+
+- Delivery-framework architecture and roadmap:
+  - `/Users/furkan/skrap/docs/backend-architecture-delivery.md`
