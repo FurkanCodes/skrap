@@ -43,7 +43,9 @@ class Settings:
     scrape_timeout_max: int
     scrape_max_urls: int
     scrape_concurrency: int
-    tracking_db_path: str
+    tracking_database_url: str
+    tracking_db_pool_min_size: int
+    tracking_db_pool_max_size: int
     tracking_interval_default_minutes: int
     tracking_interval_min_minutes: int
     tracking_interval_max_minutes: int
@@ -57,6 +59,12 @@ class Settings:
 
 @lru_cache
 def get_settings() -> Settings:
+    tracking_database_url = (
+        _parse_str_env("TRACKING_DATABASE_URL", "")
+        or _parse_str_env("SUPABASE_DB_URL", "")
+        or _parse_str_env("DATABASE_URL", "")
+        or "postgresql://postgres:postgres@127.0.0.1:5432/postgres"
+    )
     settings = Settings(
         api_prefix=os.getenv("API_PREFIX", "/api/v1"),
         cors_allow_origins=_parse_origins(os.getenv("CORS_ALLOW_ORIGINS", "*")),
@@ -65,7 +73,9 @@ def get_settings() -> Settings:
         scrape_timeout_max=_parse_int_env("SCRAPE_TIMEOUT_MAX", 120),
         scrape_max_urls=_parse_int_env("SCRAPE_MAX_URLS", 50),
         scrape_concurrency=_parse_int_env("SCRAPE_CONCURRENCY", 5),
-        tracking_db_path=_parse_str_env("TRACKING_DB_PATH", "./data/tracking.sqlite3"),
+        tracking_database_url=tracking_database_url,
+        tracking_db_pool_min_size=_parse_int_env("TRACKING_DB_POOL_MIN_SIZE", 1),
+        tracking_db_pool_max_size=_parse_int_env("TRACKING_DB_POOL_MAX_SIZE", 10),
         tracking_interval_default_minutes=_parse_int_env(
             "TRACKING_INTERVAL_DEFAULT_MINUTES", 60
         ),
@@ -99,6 +109,12 @@ def get_settings() -> Settings:
         raise RuntimeError("SCRAPE_MAX_URLS must be >= 1")
     if settings.scrape_concurrency < 1:
         raise RuntimeError("SCRAPE_CONCURRENCY must be >= 1")
+    if settings.tracking_db_pool_min_size < 1:
+        raise RuntimeError("TRACKING_DB_POOL_MIN_SIZE must be >= 1")
+    if settings.tracking_db_pool_max_size < settings.tracking_db_pool_min_size:
+        raise RuntimeError(
+            "TRACKING_DB_POOL_MAX_SIZE must be >= TRACKING_DB_POOL_MIN_SIZE"
+        )
     if settings.tracking_interval_min_minutes < 1:
         raise RuntimeError("TRACKING_INTERVAL_MIN_MINUTES must be >= 1")
     if settings.tracking_interval_max_minutes < settings.tracking_interval_min_minutes:

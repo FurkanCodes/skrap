@@ -17,6 +17,7 @@ Install dependencies:
 Start the server:
 
 ```bash
+export TRACKING_DATABASE_URL="postgresql://postgres.<project-ref>:<password>@aws-0-<region>.pooler.supabase.com:6543/postgres?sslmode=require"
 ./.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
 ```
 
@@ -45,6 +46,7 @@ Tracked-item bootstrap supports optional idempotent retries via request header:
 Run periodic tracking checks in a separate process:
 
 ```bash
+export TRACKING_DATABASE_URL="postgresql://postgres.<project-ref>:<password>@aws-0-<region>.pooler.supabase.com:6543/postgres?sslmode=require"
 ./.venv/bin/python -m app.jobs.scheduler
 ```
 
@@ -56,6 +58,44 @@ Useful scheduler env vars:
 - `SCHEDULER_LEASE_SECONDS` (default: `180`)
 - `SCHEDULER_JITTER_PERCENT` (default: `10`)
 - `SCHEDULER_LEASE_OWNER` (optional explicit worker id)
+
+Database/pool env vars:
+
+- `TRACKING_DATABASE_URL` (preferred, Supabase Postgres pooler URL)
+- `SUPABASE_DB_URL` / `DATABASE_URL` (fallback aliases)
+- `TRACKING_DB_POOL_MIN_SIZE` (default: `1`)
+- `TRACKING_DB_POOL_MAX_SIZE` (default: `10`)
+
+## SQLite -> Supabase Migration
+
+If you already have local SQLite tracking data, migrate it once:
+
+```bash
+export TRACKING_DATABASE_URL="postgresql://postgres.<project-ref>:<password>@aws-0-<region>.pooler.supabase.com:6543/postgres?sslmode=require"
+./.venv/bin/python -m app.jobs.migrate_sqlite_to_postgres \
+  --sqlite-path ./data/tracking.sqlite3 \
+  --truncate
+```
+
+Notes:
+
+- `--database-url` can be passed explicitly to override env var resolution.
+- With `--truncate`, the script verifies source/target row counts and fails if they differ.
+- Use `--skip-verify` only when you intentionally allow non-equal counts.
+
+Scheduler logs include structured cycle + rolling-window metrics:
+
+- cycle counts (`claimed`, `processed`, `skipped`, `success`, `failure`)
+- due-lag percentiles (`cycle_due_lag_p50/p95/p99`)
+- one-hour rolling due-lag p95 (`window_due_lag_p95`)
+- per-site success/failure counters
+- failure class counters (`price_not_found`, `timeout`, `blocked`, `duplicate_job`, etc.)
+
+Scheduler dedupe semantics:
+
+- job execution idempotency key = `item_id + scheduled_for`
+- duplicate jobs for the same key are skipped
+- snapshot writes are deduped per `(item_id, scheduled_for)`
 
 Example scrape request:
 

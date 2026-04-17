@@ -72,6 +72,7 @@ class PriceSnapshot:
     raw_text: str | None
     source: str | None
     error: str | None
+    scheduled_for: str | None = None
 
 @dataclass(frozen=True)
 class TrackingCheckRun:
@@ -85,6 +86,7 @@ class TrackingCheckRun:
     status: TrackingCheckRunStatus
     attempt: int
     error: str | None
+    job_key: str | None = None
 
 
 @dataclass(frozen=True)

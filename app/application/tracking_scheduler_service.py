@@ -3,7 +3,8 @@ from __future__ import annotations
 import random
 import time
 import uuid
-from dataclasses import dataclass, replace
+from collections import defaultdict
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
@@ -27,9 +28,18 @@ class ScrapeRunner(Protocol):
 class SchedulerCycleResult:
     claimed_count: int
     processed_count: int
+    skipped_count: int
     success_count: int
     failure_count: int
     duration_seconds: float
+    fetch_mode: str = "auto"
+    due_lag_seconds: tuple[float, ...] = ()
+    due_lag_seconds_p50: float | None = None
+    due_lag_seconds_p95: float | None = None
+    due_lag_seconds_p99: float | None = None
+    site_success_counts: dict[str, int] = field(default_factory=dict)
+    site_failure_counts: dict[str, int] = field(default_factory=dict)
+    failure_class_counts: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -38,6 +48,8 @@ class _ItemRunContext:
 
     item: TrackedItem
     run_id: str
+    scheduled_for: str
+    job_key: str
     started_at: str
 
 
@@ -88,18 +100,29 @@ class TrackingSchedulerService:
             return SchedulerCycleResult(
                 claimed_count=0,
                 processed_count=0,
+                skipped_count=0,
                 success_count=0,
                 failure_count=0,
                 duration_seconds=duration,
+                fetch_mode=self._fetch_mode,
             )
 
-        contexts, pre_scrape_failures = self._start_runs(claimed)
+        due_lag_seconds = tuple(_compute_due_lag_seconds(now, item.next_check_at) for item in claimed)
+        contexts, pre_scrape_failures, skipped_count = self._start_runs(claimed)
+        site_success_counts: defaultdict[str, int] = defaultdict(int)
+        site_failure_counts: defaultdict[str, int] = defaultdict(int)
+        failure_class_counts: defaultdict[str, int] = defaultdict(int)
+        if pre_scrape_failures > 0:
+            failure_class_counts["start_run_error"] += pre_scrape_failures
+        if skipped_count > 0:
+            failure_class_counts["duplicate_job"] += skipped_count
 
         success_count = 0
         failure_count = pre_scrape_failures
         for chunk in _chunked(contexts, self._max_inflight):
             batch_results = self._scrape_chunk(chunk)
             for context in chunk:
+                site_key = _normalize_site_key(context.item.site_key)
                 scrape_result = batch_results.get(
                     context.item.source_url,
                     PriceResult(url=context.item.source_url, success=False, error="no_result"),
@@ -107,46 +130,69 @@ class TrackingSchedulerService:
                 try:
                     if self._finalize_result(context, scrape_result):
                         success_count += 1
+                        site_success_counts[site_key] += 1
                     else:
                         failure_count += 1
+                        site_failure_counts[site_key] += 1
+                        failure_class_counts[_classify_error(scrape_result.error)] += 1
                 except Exception as exc:
                     failure_count += 1
+                    site_failure_counts[site_key] += 1
+                    failure_class_counts["finalize_error"] += 1
                     self._mark_context_failure(context, str(exc))
 
         duration = max(0.0, time.perf_counter() - started)
         return SchedulerCycleResult(
             claimed_count=len(claimed),
             processed_count=success_count + failure_count,
+            skipped_count=skipped_count,
             success_count=success_count,
             failure_count=failure_count,
             duration_seconds=duration,
+            fetch_mode=self._fetch_mode,
+            due_lag_seconds=due_lag_seconds,
+            due_lag_seconds_p50=_percentile(due_lag_seconds, 50),
+            due_lag_seconds_p95=_percentile(due_lag_seconds, 95),
+            due_lag_seconds_p99=_percentile(due_lag_seconds, 99),
+            site_success_counts=dict(site_success_counts),
+            site_failure_counts=dict(site_failure_counts),
+            failure_class_counts=dict(failure_class_counts),
         )
 
-    def _start_runs(self, items: list[TrackedItem]) -> tuple[list[_ItemRunContext], int]:
+    def _start_runs(self, items: list[TrackedItem]) -> tuple[list[_ItemRunContext], int, int]:
         contexts: list[_ItemRunContext] = []
         failures = 0
+        skipped = 0
         for item in items:
             run_id = _new_run_id()
             started_at = _to_iso(_utcnow())
             scheduled_for = item.next_check_at or started_at
+            job_key = _build_job_key(item.item_id, scheduled_for)
             try:
-                self._repository.start_check_run(
+                run = self._repository.start_check_run(
                     run_id=run_id,
                     item_id=item.item_id,
                     scheduled_for=scheduled_for,
+                    job_key=job_key,
                     started_at=started_at,
                 )
+                if run.run_id != run_id:
+                    skipped += 1
+                    self._release_lease_only(item=item, started_at=started_at)
+                    continue
                 contexts.append(
                     _ItemRunContext(
                         item=item,
                         run_id=run_id,
+                        scheduled_for=scheduled_for,
+                        job_key=job_key,
                         started_at=started_at,
                     )
                 )
             except Exception:
                 failures += 1
                 self._release_item_without_run(item=item, started_at=started_at)
-        return contexts, failures
+        return contexts, failures, skipped
 
     def _scrape_chunk(self, chunk: list[_ItemRunContext]) -> dict[str, PriceResult]:
         results_by_url: dict[str, PriceResult] = {}
@@ -220,6 +266,7 @@ class TrackingSchedulerService:
                 raw_text=scrape_result.raw_text,
                 source=scrape_result.source,
                 error=None,
+                scheduled_for=context.scheduled_for,
             )
             self._repository.save_item_and_snapshot(updated_item, snapshot)
             self._repository.finish_check_run(
@@ -251,6 +298,7 @@ class TrackingSchedulerService:
             raw_text=scrape_result.raw_text,
             source=scrape_result.source,
             error=error,
+            scheduled_for=context.scheduled_for,
         )
         self._repository.save_item_and_snapshot(updated_item, snapshot)
         self._repository.finish_check_run(
@@ -308,6 +356,27 @@ class TrackingSchedulerService:
             # Lease expiry still protects against permanent lock if this write fails.
             pass
 
+    def _release_lease_only(
+        self,
+        *,
+        item: TrackedItem,
+        started_at: str,
+    ) -> None:
+        now = _to_iso(_utcnow())
+        try:
+            self._repository.save_item(
+                replace(
+                    item,
+                    lease_owner=None,
+                    lease_until=None,
+                    last_check_started_at=started_at,
+                    last_check_finished_at=now,
+                    updated_at=now,
+                )
+            )
+        except Exception:
+            pass
+
 
 def compute_next_check_at(
     *,
@@ -347,3 +416,49 @@ def _chunked(values: list[_ItemRunContext], size: int) -> list[list[_ItemRunCont
     if size <= 0:
         return [values]
     return [values[index : index + size] for index in range(0, len(values), size)]
+
+
+def _normalize_site_key(site_key: str | None) -> str:
+    normalized = (site_key or "").strip().lower()
+    return normalized or "unknown"
+
+
+def _compute_due_lag_seconds(now: datetime, next_check_at: str | None) -> float:
+    if not next_check_at:
+        return 0.0
+    scheduled = datetime.fromisoformat(next_check_at.replace("Z", "+00:00"))
+    return max(0.0, (now - scheduled).total_seconds())
+
+
+def _percentile(values: tuple[float, ...], percentile: int) -> float | None:
+    if not values:
+        return None
+    if percentile <= 0:
+        return min(values)
+    if percentile >= 100:
+        return max(values)
+    ordered = sorted(values)
+    index = int(round((percentile / 100.0) * (len(ordered) - 1)))
+    index = max(0, min(index, len(ordered) - 1))
+    return float(ordered[index])
+
+
+def _classify_error(error: str | None) -> str:
+    if not error:
+        return "unknown"
+    normalized = error.strip().lower()
+    if "protection" in normalized or "blocked" in normalized or "cloudflare" in normalized:
+        return "blocked"
+    if "timeout" in normalized:
+        return "timeout"
+    if "price_not_found" in normalized or "no_result" in normalized:
+        return "price_not_found"
+    if "network" in normalized or "connection" in normalized:
+        return "network"
+    if normalized.startswith("internal_error"):
+        return "internal_error"
+    return "other"
+
+
+def _build_job_key(item_id: str, scheduled_for: str) -> str:
+    return f"{item_id}:{scheduled_for}"

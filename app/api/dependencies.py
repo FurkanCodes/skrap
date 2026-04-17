@@ -8,8 +8,8 @@ from app.application.discovery_service import DiscoveryBatchService
 from app.application.scrape_service import ScrapeBatchService
 from app.application.tracking_service import TrackingService
 from app.core.config import Settings, get_settings
+from app.infrastructure.postgres_tracking_repository import PostgresTrackingRepository
 from app.infrastructure.scraper_gateway import ScraplingGateway
-from app.infrastructure.sqlite_tracking_repository import SQLiteTrackingRepository
 
 
 def get_app_settings() -> Settings:
@@ -47,15 +47,21 @@ def get_discovery_service(
 @lru_cache
 def _get_tracking_service_cached(
     scrape_concurrency: int,
-    db_path: str,
+    database_url: str,
+    db_pool_min_size: int,
+    db_pool_max_size: int,
     default_interval_minutes: int,
     min_interval_minutes: int,
     max_interval_minutes: int,
     snapshot_default_limit: int,
 ) -> TrackingService:
     # Keep one initialized repository/service per process config.
-    # This avoids reopening SQLite connections on every request.
-    repository = SQLiteTrackingRepository(db_path=db_path)
+    # This avoids reopening database pools on every request.
+    repository = PostgresTrackingRepository(
+        database_url=database_url,
+        min_pool_size=db_pool_min_size,
+        max_pool_size=db_pool_max_size,
+    )
     repository.initialize()
 
     scrape_service = _get_scrape_service_cached(scrape_concurrency)
@@ -74,7 +80,9 @@ def get_tracking_service(
 ) -> TrackingService:
     return _get_tracking_service_cached(
         scrape_concurrency=settings.scrape_concurrency,
-        db_path=settings.tracking_db_path,
+        database_url=settings.tracking_database_url,
+        db_pool_min_size=settings.tracking_db_pool_min_size,
+        db_pool_max_size=settings.tracking_db_pool_max_size,
         default_interval_minutes=settings.tracking_interval_default_minutes,
         min_interval_minutes=settings.tracking_interval_min_minutes,
         max_interval_minutes=settings.tracking_interval_max_minutes,

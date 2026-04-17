@@ -57,6 +57,7 @@ class TrackingRepository(Protocol):
         run_id: str,
         item_id: str,
         scheduled_for: str,
+        job_key: str,
         started_at: str,
     ) -> TrackingCheckRun:
         ...

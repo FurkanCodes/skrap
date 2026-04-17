@@ -1,17 +1,22 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 
 from app.application.scrape_service import ScrapeBatchOutput
 from app.application.tracking_scheduler_service import (
     TrackingSchedulerService,
     compute_next_check_at,
 )
-from app.infrastructure.sqlite_tracking_repository import SQLiteTrackingRepository
 from app.scraper import PriceListing, PriceResult
-from app.tracking import TrackedItem
+from app.tracking import (
+    PriceSnapshot,
+    TrackedItem,
+    TrackingBootstrapIdempotencyRecord,
+    TrackingCheckRun,
+    TrackingCheckRunStatus,
+)
 
 
 def _iso(dt: datetime) -> str:
@@ -83,14 +88,240 @@ class _FakeScrapeRunner:
         )
 
 
-def _build_repo(tmp_path: Path) -> SQLiteTrackingRepository:
-    repo = SQLiteTrackingRepository(str(tmp_path / "tracking.sqlite3"))
-    repo.initialize()
+@dataclass
+class _InMemoryTrackingRepository:
+    items_by_id: dict[str, TrackedItem]
+    source_to_item_id: dict[str, str]
+    snapshots_by_id: dict[str, PriceSnapshot]
+    runs_by_id: dict[str, TrackingCheckRun]
+    runs_by_job_key: dict[str, str]
+    idempotency: dict[str, TrackingBootstrapIdempotencyRecord]
+
+    def initialize(self) -> None:
+        return None
+
+    def list_items(self) -> list[TrackedItem]:
+        return sorted(
+            self.items_by_id.values(),
+            key=lambda item: item.updated_at,
+            reverse=True,
+        )
+
+    def get_item(self, item_id: str) -> TrackedItem | None:
+        return self.items_by_id.get(item_id)
+
+    def get_item_by_source_url(self, source_url: str) -> TrackedItem | None:
+        item_id = self.source_to_item_id.get(source_url)
+        if item_id is None:
+            return None
+        return self.items_by_id.get(item_id)
+
+    def save_item(self, item: TrackedItem) -> TrackedItem:
+        current_item_id = self.source_to_item_id.get(item.source_url)
+        if current_item_id is not None and current_item_id != item.item_id:
+            self.items_by_id.pop(current_item_id, None)
+        self.items_by_id[item.item_id] = item
+        self.source_to_item_id[item.source_url] = item.item_id
+        return item
+
+    def save_item_and_snapshot(self, item: TrackedItem, snapshot: PriceSnapshot) -> TrackedItem:
+        saved = self.save_item(item)
+        self._upsert_snapshot(snapshot)
+        return saved
+
+    def delete_item(self, item_id: str) -> bool:
+        item = self.items_by_id.pop(item_id, None)
+        if item is None:
+            return False
+        self.source_to_item_id.pop(item.source_url, None)
+
+        for snapshot_id in list(self.snapshots_by_id.keys()):
+            if self.snapshots_by_id[snapshot_id].item_id == item_id:
+                self.snapshots_by_id.pop(snapshot_id, None)
+
+        for run_id in list(self.runs_by_id.keys()):
+            run = self.runs_by_id[run_id]
+            if run.item_id != item_id:
+                continue
+            self.runs_by_job_key.pop(run.job_key or "", None)
+            self.runs_by_id.pop(run_id, None)
+        return True
+
+    def add_snapshot(self, snapshot: PriceSnapshot) -> None:
+        self._upsert_snapshot(snapshot)
+
+    def list_snapshots(self, item_id: str, limit: int) -> list[PriceSnapshot]:
+        rows = [snapshot for snapshot in self.snapshots_by_id.values() if snapshot.item_id == item_id]
+        rows.sort(key=lambda snapshot: snapshot.checked_at, reverse=True)
+        return rows[:limit]
+
+    def claim_due_items(
+        self,
+        *,
+        now: str,
+        lease_owner: str,
+        lease_until: str,
+        limit: int,
+    ) -> list[TrackedItem]:
+        if limit < 1:
+            return []
+
+        candidates = [
+            item
+            for item in self.items_by_id.values()
+            if item.status == "active"
+            and (item.next_check_at is None or item.next_check_at <= now)
+            and (item.lease_until is None or item.lease_until <= now)
+        ]
+        candidates.sort(key=lambda item: (item.next_check_at or item.updated_at or item.created_at, item.item_id))
+        claimed = candidates[:limit]
+
+        updated: list[TrackedItem] = []
+        for item in claimed:
+            next_item = replace(
+                item,
+                lease_owner=lease_owner,
+                lease_until=lease_until,
+                last_check_started_at=now,
+                updated_at=now,
+            )
+            self.save_item(next_item)
+            updated.append(next_item)
+        return updated
+
+    def start_check_run(
+        self,
+        *,
+        run_id: str,
+        item_id: str,
+        scheduled_for: str,
+        job_key: str,
+        started_at: str,
+    ) -> TrackingCheckRun:
+        existing_run_id = self.runs_by_job_key.get(job_key)
+        if existing_run_id is not None:
+            return self.runs_by_id[existing_run_id]
+
+        max_attempt = max(
+            (
+                run.attempt
+                for run in self.runs_by_id.values()
+                if run.item_id == item_id and run.scheduled_for == scheduled_for
+            ),
+            default=0,
+        )
+        run = TrackingCheckRun(
+            run_id=run_id,
+            item_id=item_id,
+            scheduled_for=scheduled_for,
+            started_at=started_at,
+            finished_at=None,
+            status="running",
+            attempt=max_attempt + 1,
+            error=None,
+            job_key=job_key,
+        )
+        self.runs_by_id[run_id] = run
+        self.runs_by_job_key[job_key] = run_id
+        return run
+
+    def finish_check_run(
+        self,
+        *,
+        run_id: str,
+        status: TrackingCheckRunStatus,
+        finished_at: str,
+        error: str | None,
+    ) -> None:
+        run = self.runs_by_id.get(run_id)
+        if run is None:
+            return
+        self.runs_by_id[run_id] = replace(
+            run,
+            status=status,
+            finished_at=finished_at,
+            error=error,
+        )
+
+    def list_check_runs(self, item_id: str, limit: int) -> list[TrackingCheckRun]:
+        rows = [run for run in self.runs_by_id.values() if run.item_id == item_id]
+        rows.sort(key=lambda run: run.started_at, reverse=True)
+        return rows[:limit]
+
+    def get_bootstrap_idempotency_record(
+        self,
+        idempotency_key: str,
+    ) -> TrackingBootstrapIdempotencyRecord | None:
+        return self.idempotency.get(idempotency_key)
+
+    def save_bootstrap_idempotency_record(
+        self,
+        *,
+        idempotency_key: str,
+        request_hash: str,
+        item_id: str,
+        now: str,
+    ) -> None:
+        existing = self.idempotency.get(idempotency_key)
+        created_at = existing.created_at if existing is not None else now
+        self.idempotency[idempotency_key] = TrackingBootstrapIdempotencyRecord(
+            idempotency_key=idempotency_key,
+            request_hash=request_hash,
+            item_id=item_id,
+            created_at=created_at,
+            updated_at=now,
+        )
+
+    def _upsert_snapshot(self, snapshot: PriceSnapshot) -> None:
+        conflict_id = None
+        if snapshot.scheduled_for is not None:
+            for current_snapshot in self.snapshots_by_id.values():
+                if (
+                    current_snapshot.item_id == snapshot.item_id
+                    and current_snapshot.scheduled_for == snapshot.scheduled_for
+                ):
+                    conflict_id = current_snapshot.snapshot_id
+                    break
+
+        if conflict_id is None:
+            self.snapshots_by_id[snapshot.snapshot_id] = snapshot
+            return
+
+        existing = self.snapshots_by_id[conflict_id]
+        success = existing.success or snapshot.success
+        can_replace_values = snapshot.success or (not existing.success)
+        self.snapshots_by_id[conflict_id] = PriceSnapshot(
+            snapshot_id=existing.snapshot_id,
+            item_id=existing.item_id,
+            checked_at=snapshot.checked_at,
+            scheduled_for=existing.scheduled_for,
+            success=success,
+            amount=snapshot.amount if can_replace_values else existing.amount,
+            currency=snapshot.currency if can_replace_values else existing.currency,
+            raw_text=snapshot.raw_text if can_replace_values else existing.raw_text,
+            source=snapshot.source if can_replace_values else existing.source,
+            error=(
+                None
+                if snapshot.success
+                else (existing.error if existing.success else snapshot.error)
+            ),
+        )
+
+
+def _build_repo() -> _InMemoryTrackingRepository:
+    repo = _InMemoryTrackingRepository(
+        items_by_id={},
+        source_to_item_id={},
+        snapshots_by_id={},
+        runs_by_id={},
+        runs_by_job_key={},
+        idempotency={},
+    )
     return repo
 
 
-def test_claim_due_items_filters_status_and_due_time(tmp_path: Path) -> None:
-    repo = _build_repo(tmp_path)
+def test_claim_due_items_filters_status_and_due_time() -> None:
+    repo = _build_repo()
     now = datetime.now(tz=UTC)
 
     due_time = _iso(now - timedelta(minutes=5))
@@ -141,8 +372,8 @@ def test_claim_due_items_filters_status_and_due_time(tmp_path: Path) -> None:
     assert claimed_ids == {"trk_due", "trk_immediate"}
 
 
-def test_claim_due_items_reclaims_after_lease_expiry(tmp_path: Path) -> None:
-    repo = _build_repo(tmp_path)
+def test_claim_due_items_reclaims_after_lease_expiry() -> None:
+    repo = _build_repo()
     now = datetime.now(tz=UTC)
     item = _item(
         item_id="trk_lease",
@@ -194,8 +425,8 @@ def test_compute_next_check_at_applies_bounded_jitter() -> None:
     assert max(values) <= 3960  # +10%
 
 
-def test_scheduler_run_once_persists_success_snapshot_and_next_check(tmp_path: Path) -> None:
-    repo = _build_repo(tmp_path)
+def test_scheduler_run_once_persists_success_snapshot_and_next_check() -> None:
+    repo = _build_repo()
     now = datetime.now(tz=UTC)
     item = _item(
         item_id="trk_success",
@@ -245,6 +476,9 @@ def test_scheduler_run_once_persists_success_snapshot_and_next_check(tmp_path: P
     assert outcome.processed_count == 1
     assert outcome.success_count == 1
     assert outcome.failure_count == 0
+    assert outcome.fetch_mode == "auto"
+    assert outcome.due_lag_seconds_p95 is not None
+    assert outcome.site_success_counts.get("generic") == 1
 
     updated = repo.get_item(item.item_id)
     assert updated is not None
@@ -263,8 +497,8 @@ def test_scheduler_run_once_persists_success_snapshot_and_next_check(tmp_path: P
     assert runs[0].status == "succeeded"
 
 
-def test_scheduler_run_once_failure_keeps_last_good_price(tmp_path: Path) -> None:
-    repo = _build_repo(tmp_path)
+def test_scheduler_run_once_failure_keeps_last_good_price() -> None:
+    repo = _build_repo()
     now = datetime.now(tz=UTC)
     item = _item(
         item_id="trk_failure",
@@ -298,6 +532,8 @@ def test_scheduler_run_once_failure_keeps_last_good_price(tmp_path: Path) -> Non
     assert outcome.processed_count == 1
     assert outcome.success_count == 0
     assert outcome.failure_count == 1
+    assert outcome.site_failure_counts.get("generic") == 1
+    assert outcome.failure_class_counts.get("price_not_found") == 1
 
     updated = repo.get_item(item.item_id)
     assert updated is not None
@@ -314,3 +550,103 @@ def test_scheduler_run_once_failure_keeps_last_good_price(tmp_path: Path) -> Non
     runs = repo.list_check_runs(item.item_id, limit=5)
     assert runs
     assert runs[0].status == "failed"
+
+
+def test_scheduler_due_lag_metrics_are_reported() -> None:
+    repo = _build_repo()
+    now = datetime.now(tz=UTC)
+    lagging_item = _item(
+        item_id="trk_lag",
+        url="https://example.com/lag",
+        now=now,
+        next_check_at=_iso(now - timedelta(minutes=10)),
+        last_amount="50.00",
+    )
+    repo.save_item(lagging_item)
+
+    scrape_result = PriceResult(
+        url=lagging_item.source_url,
+        success=True,
+        amount="49.00",
+        currency="USD",
+        raw_text="$49.00",
+        source="test:lag",
+        site_key="generic",
+        adapter_key="generic",
+    )
+
+    scheduler = TrackingSchedulerService(
+        repository=repo,
+        scrape_runner=_FakeScrapeRunner({lagging_item.source_url: scrape_result}),
+        timeout_seconds=30,
+        claim_batch_size=50,
+        max_inflight=4,
+        lease_seconds=180,
+        jitter_percent=0,
+        lease_owner="scheduler-test",
+    )
+
+    outcome = scheduler.run_once()
+    assert outcome.due_lag_seconds_p50 is not None
+    assert outcome.due_lag_seconds_p95 is not None
+    assert outcome.due_lag_seconds_p99 is not None
+    assert outcome.due_lag_seconds_p95 >= 590
+
+
+def test_scheduler_skips_duplicate_job_key_and_avoids_duplicate_snapshot() -> None:
+    repo = _build_repo()
+    now = datetime.now(tz=UTC)
+    scheduled_for = _iso(now - timedelta(minutes=2))
+    item = _item(
+        item_id="trk_dupe",
+        url="https://example.com/dupe",
+        now=now,
+        next_check_at=scheduled_for,
+        last_amount="70.00",
+    )
+    repo.save_item(item)
+
+    scrape_result = PriceResult(
+        url=item.source_url,
+        success=True,
+        amount="69.00",
+        currency="USD",
+        raw_text="$69.00",
+        source="test:dupe",
+        site_key="generic",
+        adapter_key="generic",
+    )
+    scheduler = TrackingSchedulerService(
+        repository=repo,
+        scrape_runner=_FakeScrapeRunner({item.source_url: scrape_result}),
+        timeout_seconds=30,
+        claim_batch_size=50,
+        max_inflight=4,
+        lease_seconds=180,
+        jitter_percent=0,
+        lease_owner="scheduler-test",
+    )
+
+    first = scheduler.run_once()
+    assert first.success_count == 1
+    first_item = repo.get_item(item.item_id)
+    assert first_item is not None
+    assert first_item.next_check_at is not None
+
+    # Force the same schedule key again to emulate a duplicate queue message.
+    repo.save_item(
+        replace(
+            first_item,
+            next_check_at=scheduled_for,
+            lease_owner=None,
+            lease_until=None,
+        )
+    )
+    second = scheduler.run_once()
+    assert second.claimed_count == 1
+    assert second.processed_count == 0
+    assert second.skipped_count == 1
+    assert second.failure_class_counts.get("duplicate_job") == 1
+
+    snapshots = repo.list_snapshots(item.item_id, limit=10)
+    assert len(snapshots) == 1
