@@ -203,7 +203,13 @@ class PostgresTrackingRepository:
             conninfo=database_url,
             min_size=min_pool_size,
             max_size=max_pool_size,
-            kwargs={"row_factory": dict_row},
+            # Supabase PgBouncer (transaction pooler) is not compatible with
+            # psycopg's auto-prepared statements. Disabling auto-prepare
+            # prevents intermittent `DuplicatePreparedStatement` errors.
+            kwargs={
+                "row_factory": dict_row,
+                "prepare_threshold": None,
+            },
             open=False,
         )
 
