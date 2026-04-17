@@ -3,6 +3,22 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from functools import lru_cache
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+
+def _load_dotenv_file() -> None:
+    """Load repository .env once so local runs work without shell `source`."""
+    project_root = Path(__file__).resolve().parents[2]
+    dotenv_path = project_root / ".env"
+    if dotenv_path.exists():
+        load_dotenv(dotenv_path=dotenv_path, override=False)
+        return
+    load_dotenv(override=False)
+
+
+_load_dotenv_file()
 
 
 def _parse_int_env(name: str, default: int) -> int:

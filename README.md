@@ -17,7 +17,7 @@ Install dependencies:
 Start the server:
 
 ```bash
-export TRACKING_DATABASE_URL="postgresql://postgres.<project-ref>:<password>@aws-0-<region>.pooler.supabase.com:6543/postgres?sslmode=require"
+# Put TRACKING_DATABASE_URL in .env (recommended) or export it in shell.
 ./.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
 ```
 
@@ -46,7 +46,7 @@ Tracked-item bootstrap supports optional idempotent retries via request header:
 Run periodic tracking checks in a separate process:
 
 ```bash
-export TRACKING_DATABASE_URL="postgresql://postgres.<project-ref>:<password>@aws-0-<region>.pooler.supabase.com:6543/postgres?sslmode=require"
+# .env is auto-loaded by app config.
 ./.venv/bin/python -m app.jobs.scheduler
 ```
 
