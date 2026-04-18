@@ -86,6 +86,11 @@ class Settings:
     telegram_webhook_secret: str
     telegram_connect_ttl_minutes: int
     affiliate_link_template: str
+    auth_required: bool
+    better_auth_jwks_url: str
+    better_auth_jwt_issuer: str
+    better_auth_jwt_audience: str
+    better_auth_jwks_cache_ttl_seconds: int
 
 
 @lru_cache
@@ -139,6 +144,13 @@ def get_settings() -> Settings:
         telegram_webhook_secret=_parse_str_env("TELEGRAM_WEBHOOK_SECRET", ""),
         telegram_connect_ttl_minutes=_parse_int_env("TELEGRAM_CONNECT_TTL_MINUTES", 15),
         affiliate_link_template=_parse_str_env("AFFILIATE_LINK_TEMPLATE", ""),
+        auth_required=_parse_str_env("AUTH_REQUIRED", "false").lower() == "true",
+        better_auth_jwks_url=_parse_str_env("BETTER_AUTH_JWKS_URL", ""),
+        better_auth_jwt_issuer=_parse_str_env("BETTER_AUTH_JWT_ISSUER", ""),
+        better_auth_jwt_audience=_parse_str_env("BETTER_AUTH_JWT_AUDIENCE", ""),
+        better_auth_jwks_cache_ttl_seconds=_parse_int_env(
+            "BETTER_AUTH_JWKS_CACHE_TTL_SECONDS", 300
+        ),
     )
 
     if settings.scrape_timeout_min < 1:
@@ -213,5 +225,14 @@ def get_settings() -> Settings:
         raise RuntimeError("NOTIFIER_RETRY_JITTER_PERCENT must be between 0 and 50")
     if settings.telegram_connect_ttl_minutes < 1 or settings.telegram_connect_ttl_minutes > 120:
         raise RuntimeError("TELEGRAM_CONNECT_TTL_MINUTES must be between 1 and 120")
+    if settings.auth_required:
+        if not settings.better_auth_jwks_url:
+            raise RuntimeError("BETTER_AUTH_JWKS_URL is required when AUTH_REQUIRED=true")
+        if not settings.better_auth_jwt_issuer:
+            raise RuntimeError("BETTER_AUTH_JWT_ISSUER is required when AUTH_REQUIRED=true")
+        if not settings.better_auth_jwt_audience:
+            raise RuntimeError("BETTER_AUTH_JWT_AUDIENCE is required when AUTH_REQUIRED=true")
+    if settings.better_auth_jwks_cache_ttl_seconds < 30:
+        raise RuntimeError("BETTER_AUTH_JWKS_CACHE_TTL_SECONDS must be >= 30")
 
     return settings

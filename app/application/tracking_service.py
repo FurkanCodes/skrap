@@ -10,6 +10,8 @@ from app.application.scrape_service import ScrapeBatchInput, ScrapeBatchService
 from app.scraper import PriceResult
 from app.tracking import PriceSnapshot, TrackedItem, TrackingRepository, TrackingStatus
 
+_LEGACY_USER_ID = "legacy_owner"
+
 
 class TrackingServiceError(RuntimeError):
     """Base tracking service error."""
@@ -32,6 +34,7 @@ class TrackingBootstrapInput:
     target_amount: str | None
     scrape_result_ref: str | None = None
     pre_fetched_result: PriceResult | None = None
+    user_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -43,6 +46,7 @@ class TrackingUpdateInput:
     check_interval_minutes: int | None
     target_amount: str | None
     target_amount_provided: bool
+    user_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -82,17 +86,23 @@ class TrackingService:
         """Expose supported site keys via the existing scrape service."""
         return self._scrape_service.list_sites()
 
-    def list_items(self) -> list[TrackedItem]:
+    def list_items(self, *, user_id: str | None = None) -> list[TrackedItem]:
         """Return tracked items, usually sorted by latest update."""
-        return self._repository.list_items()
+        return self._list_items_for_user(_resolve_user_id(user_id))
 
-    def get_item(self, item_id: str) -> TrackedItem | None:
+    def get_item(self, item_id: str, *, user_id: str | None = None) -> TrackedItem | None:
         """Return one tracked item or None when not found."""
-        return self._repository.get_item(item_id)
+        return self._get_item_for_user(item_id=item_id, user_id=_resolve_user_id(user_id))
 
-    def get_detail(self, item_id: str, snapshot_limit: int | None = None) -> TrackingDetailOutput | None:
+    def get_detail(
+        self,
+        item_id: str,
+        snapshot_limit: int | None = None,
+        *,
+        user_id: str | None = None,
+    ) -> TrackingDetailOutput | None:
         """Return one tracked item with recent snapshots."""
-        item = self._repository.get_item(item_id)
+        item = self._get_item_for_user(item_id=item_id, user_id=_resolve_user_id(user_id))
         if item is None:
             return None
 
@@ -109,7 +119,12 @@ class TrackingService:
         Bootstrap is scrape-first by design: if we cannot extract a current
         price, the tracked item is not created.
         """
-        interval = self._normalize_interval(payload.check_interval_minutes)
+        user_id = _resolve_user_id(payload.user_id)
+        entitlement = self._resolve_entitlement(user_id=user_id)
+        interval = self._normalize_interval(
+            payload.check_interval_minutes,
+            user_min_interval=entitlement.min_check_interval_minutes,
+        )
         result = payload.pre_fetched_result
         if result is None:
             # Phase 1: run the same extractor pipeline used by /api/v1/scrapes.
@@ -134,7 +149,12 @@ class TrackingService:
         # Phase 2: upsert one tracked item per source URL.
         checked_at = _utcnow_iso()
         source_url = result.url
-        existing = self._repository.get_item_by_source_url(source_url)
+        existing = self._get_item_by_source_url_for_user(source_url=source_url, user_id=user_id)
+        if existing is None:
+            self._enforce_tracker_capacity(
+                user_id=user_id,
+                max_active=entitlement.max_active_trackers,
+            )
         item_id = existing.item_id if existing is not None else _new_item_id()
         created_at = existing.created_at if existing is not None else checked_at
 
@@ -146,6 +166,7 @@ class TrackingService:
 
         item = TrackedItem(
             item_id=item_id,
+            user_id=user_id,
             source_url=source_url,
             canonical_url=result.canonical_url or source_url,
             product_id=result.product_id,
@@ -200,19 +221,23 @@ class TrackingService:
     ) -> TrackedItem:
         """Bootstrap with idempotency semantics for safe client retries."""
         request_hash = _build_bootstrap_request_hash(payload)
-        existing = self._repository.get_bootstrap_idempotency_record(idempotency_key)
+        user_id = _resolve_user_id(payload.user_id)
+        existing = self._get_bootstrap_idempotency_record(
+            user_id=user_id, idempotency_key=idempotency_key
+        )
         if existing is not None:
             if existing.request_hash != request_hash:
                 raise TrackingServiceError(
                     "Idempotency-Key reuse with different payload is not allowed"
                 )
             if existing.item_id:
-                item = self._repository.get_item(existing.item_id)
+                item = self._get_item_for_user(item_id=existing.item_id, user_id=user_id)
                 if item is not None:
                     return item
 
-        item = self.bootstrap(payload)
-        self._repository.save_bootstrap_idempotency_record(
+        item = self.bootstrap(replace(payload, user_id=user_id))
+        self._save_bootstrap_idempotency_record(
+            user_id=user_id,
             idempotency_key=idempotency_key,
             request_hash=request_hash,
             item_id=item.item_id,
@@ -222,12 +247,18 @@ class TrackingService:
 
     def update_item(self, payload: TrackingUpdateInput) -> TrackedItem | None:
         """Patch mutable tracking config without executing a scrape."""
-        current = self._repository.get_item(payload.item_id)
+        user_id = _resolve_user_id(payload.user_id)
+        entitlement = self._resolve_entitlement(user_id=user_id)
+
+        current = self._get_item_for_user(item_id=payload.item_id, user_id=user_id)
         if current is None:
             return None
 
         interval = (
-            self._normalize_interval(payload.check_interval_minutes)
+            self._normalize_interval(
+                payload.check_interval_minutes,
+                user_min_interval=entitlement.min_check_interval_minutes,
+            )
             if payload.check_interval_minutes is not None
             else current.check_interval_minutes
         )
@@ -251,23 +282,127 @@ class TrackingService:
         )
         return self._repository.save_item(updated)
 
-    def delete_item(self, item_id: str) -> bool:
+    def delete_item(self, item_id: str, *, user_id: str | None = None) -> bool:
         """Delete tracked item and related snapshots (FK cascade)."""
+        item = self._get_item_for_user(item_id=item_id, user_id=_resolve_user_id(user_id))
+        if item is None:
+            return False
         return self._repository.delete_item(item_id)
 
-    def _normalize_interval(self, value: int | None) -> int:
+    def _normalize_interval(self, value: int | None, *, user_min_interval: int) -> int:
         """Apply default interval and enforce configured bounds."""
         interval = value if value is not None else self._default_interval_minutes
-        if interval < self._min_interval_minutes or interval > self._max_interval_minutes:
+        floor = max(self._min_interval_minutes, user_min_interval)
+        if interval < floor or interval > self._max_interval_minutes:
             raise TrackingServiceError(
-                f"check_interval_minutes must be between {self._min_interval_minutes} and {self._max_interval_minutes}"
+                f"check_interval_minutes must be between {floor} and {self._max_interval_minutes}"
             )
         return interval
+
+    def _enforce_tracker_capacity(self, *, user_id: str, max_active: int) -> None:
+        if max_active <= 0:
+            raise TrackingServiceError("Active tracker capacity exhausted")
+        items = self._list_items_for_user(user_id)
+        active_count = sum(1 for item in items if item.status == "active")
+        if active_count >= max_active:
+            raise TrackingServiceError(
+                f"Active tracker limit reached ({max_active}) for current plan"
+            )
+
+    def _resolve_entitlement(self, *, user_id: str):
+        if not hasattr(self._repository, "ensure_default_user_entitlement") or not hasattr(
+            self._repository, "get_user_entitlement"
+        ):
+            return _FallbackEntitlement(min_check_interval_minutes=self._min_interval_minutes)
+        try:
+            self._repository.ensure_default_user_entitlement(user_id=user_id, now=_utcnow_iso())
+            entitlement = self._repository.get_user_entitlement(user_id=user_id)
+            if entitlement is not None:
+                return entitlement
+        except Exception as exc:  # pragma: no cover - fallback for legacy test doubles
+            raise TrackingServiceError(f"missing entitlement: {exc}") from exc
+        raise TrackingServiceError("missing entitlement")
+
+    def _list_items_for_user(self, user_id: str) -> list[TrackedItem]:
+        method = getattr(self._repository, "list_items_for_user", None)
+        if callable(method):
+            return method(user_id)
+        return self._repository.list_items()
+
+    def _get_item_for_user(self, *, item_id: str, user_id: str) -> TrackedItem | None:
+        method = getattr(self._repository, "get_item_for_user", None)
+        if callable(method):
+            return method(item_id=item_id, user_id=user_id)
+        return self._repository.get_item(item_id)
+
+    def _get_item_by_source_url_for_user(
+        self,
+        *,
+        source_url: str,
+        user_id: str,
+    ) -> TrackedItem | None:
+        method = getattr(self._repository, "get_item_by_source_url_for_user", None)
+        if callable(method):
+            return method(source_url=source_url, user_id=user_id)
+        return self._repository.get_item_by_source_url(source_url)
+
+    def _get_bootstrap_idempotency_record(
+        self,
+        *,
+        user_id: str,
+        idempotency_key: str,
+    ):
+        method = getattr(self._repository, "get_bootstrap_idempotency_record", None)
+        if method is None:
+            return None
+        try:
+            return method(user_id=user_id, idempotency_key=idempotency_key)
+        except TypeError:
+            return method(idempotency_key=idempotency_key)
+
+    def _save_bootstrap_idempotency_record(
+        self,
+        *,
+        user_id: str,
+        idempotency_key: str,
+        request_hash: str,
+        item_id: str,
+        now: str,
+    ) -> None:
+        method = getattr(self._repository, "save_bootstrap_idempotency_record", None)
+        if method is None:
+            return
+        try:
+            method(
+                user_id=user_id,
+                idempotency_key=idempotency_key,
+                request_hash=request_hash,
+                item_id=item_id,
+                now=now,
+            )
+        except TypeError:
+            method(
+                idempotency_key=idempotency_key,
+                request_hash=request_hash,
+                item_id=item_id,
+                now=now,
+            )
+
+
+@dataclass(frozen=True)
+class _FallbackEntitlement:
+    min_check_interval_minutes: int
+    max_active_trackers: int = 1_000_000
 
 
 def _utcnow_iso() -> str:
     """Return current UTC timestamp in compact ISO-8601 form."""
     return datetime.now(tz=UTC).isoformat().replace("+00:00", "Z")
+
+
+def _resolve_user_id(user_id: str | None) -> str:
+    normalized = (user_id or "").strip()
+    return normalized or _LEGACY_USER_ID
 
 
 def _new_item_id() -> str:

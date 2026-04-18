@@ -54,7 +54,7 @@ class TelegramIntegrationService:
         self._bot_username = bot_username.strip().lstrip("@")
         self._connect_ttl_minutes = max(1, connect_ttl_minutes)
 
-    def start_connect(self) -> TelegramConnectStartOutput:
+    def start_connect(self, *, user_id: str = "legacy_owner") -> TelegramConnectStartOutput:
         if not self._bot_username:
             raise TelegramIntegrationError("TELEGRAM_BOT_USERNAME is required")
 
@@ -62,6 +62,7 @@ class TelegramIntegrationService:
         expires_at = now + timedelta(minutes=self._connect_ttl_minutes)
         state = secrets.token_urlsafe(24)
         session = TelegramConnectSession(
+            user_id=user_id,
             state=state,
             status="pending",
             created_at=_to_iso(now),
@@ -79,8 +80,13 @@ class TelegramIntegrationService:
             bot_username=self._bot_username,
         )
 
-    def get_connect_status(self, state: str) -> TelegramConnectStatusOutput | None:
-        session = self._repository.get_telegram_connect_session(state)
+    def get_connect_status(
+        self,
+        *,
+        user_id: str = "legacy_owner",
+        state: str,
+    ) -> TelegramConnectStatusOutput | None:
+        session = self._get_connect_session(user_id=user_id, state=state)
         if session is None:
             return None
 
@@ -94,8 +100,8 @@ class TelegramIntegrationService:
             telegram_username=session.telegram_username,
         )
 
-    def get_active_chat_status(self) -> tuple[bool, str | None]:
-        active_chat = self._repository.get_active_telegram_chat()
+    def get_active_chat_status(self, *, user_id: str = "legacy_owner") -> tuple[bool, str | None]:
+        active_chat = self._get_active_chat(user_id=user_id)
         return (active_chat is not None, active_chat)
 
     def setup_webhook(
@@ -149,7 +155,7 @@ class TelegramIntegrationService:
             return False
 
         state = start_payload.state
-        session = self._repository.get_telegram_connect_session(state)
+        session = self._get_connect_session_by_state(state=state)
         if session is None:
             return False
 
@@ -158,7 +164,8 @@ class TelegramIntegrationService:
             return False
 
         connected_at = _to_iso(_utcnow())
-        updated = self._repository.mark_telegram_connect_session_connected(
+        updated = self._mark_connect_session_connected(
+            user_id=session.user_id,
             state=state,
             connected_at=connected_at,
             telegram_user_id=start_payload.user_id,
@@ -168,7 +175,8 @@ class TelegramIntegrationService:
         if updated is None:
             return False
 
-        self._repository.set_active_telegram_chat(
+        self._set_active_chat(
+            user_id=session.user_id,
             chat_id=start_payload.chat_id,
             updated_at=connected_at,
         )
@@ -183,11 +191,91 @@ class TelegramIntegrationService:
         if now <= expires_at:
             return session
 
-        expired = self._repository.mark_telegram_connect_session_expired(state=session.state)
+        expired = self._mark_connect_session_expired(
+            user_id=session.user_id,
+            state=session.state,
+        )
         if expired is not None:
             return expired
-        refreshed = self._repository.get_telegram_connect_session(session.state)
+        refreshed = self._get_connect_session(
+            user_id=session.user_id,
+            state=session.state,
+        )
         return refreshed or session
+
+    def _get_connect_session(
+        self,
+        *,
+        user_id: str,
+        state: str,
+    ) -> TelegramConnectSession | None:
+        method = getattr(self._repository, "get_telegram_connect_session")
+        try:
+            return method(user_id=user_id, state=state)
+        except TypeError:
+            return method(state)
+
+    def _get_connect_session_by_state(self, *, state: str) -> TelegramConnectSession | None:
+        method = getattr(self._repository, "get_telegram_connect_session_by_state", None)
+        if callable(method):
+            return method(state)
+        # Compatibility path for older repositories/tests.
+        return self._get_connect_session(user_id="legacy_owner", state=state)
+
+    def _mark_connect_session_connected(
+        self,
+        *,
+        user_id: str,
+        state: str,
+        connected_at: str,
+        telegram_user_id: str,
+        telegram_chat_id: str,
+        telegram_username: str | None,
+    ) -> TelegramConnectSession | None:
+        method = getattr(self._repository, "mark_telegram_connect_session_connected")
+        try:
+            return method(
+                user_id=user_id,
+                state=state,
+                connected_at=connected_at,
+                telegram_user_id=telegram_user_id,
+                telegram_chat_id=telegram_chat_id,
+                telegram_username=telegram_username,
+            )
+        except TypeError:
+            return method(
+                state=state,
+                connected_at=connected_at,
+                telegram_user_id=telegram_user_id,
+                telegram_chat_id=telegram_chat_id,
+                telegram_username=telegram_username,
+            )
+
+    def _mark_connect_session_expired(
+        self,
+        *,
+        user_id: str,
+        state: str,
+    ) -> TelegramConnectSession | None:
+        method = getattr(self._repository, "mark_telegram_connect_session_expired")
+        try:
+            return method(user_id=user_id, state=state)
+        except TypeError:
+            return method(state=state)
+
+    def _set_active_chat(self, *, user_id: str, chat_id: str, updated_at: str) -> None:
+        method = getattr(self._repository, "set_active_telegram_chat")
+        try:
+            method(user_id=user_id, chat_id=chat_id, updated_at=updated_at)
+        except TypeError:
+            method(chat_id=chat_id, updated_at=updated_at)
+
+    def _get_active_chat(self, *, user_id: str) -> str | None:
+        method = getattr(self._repository, "get_active_telegram_chat")
+        try:
+            return method(user_id=user_id)
+        except TypeError:
+            return method()
 
 
 @dataclass(frozen=True)

@@ -5,7 +5,13 @@ from dataclasses import asdict
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.concurrency import run_in_threadpool
 
-from app.api.dependencies import get_app_settings, get_scrape_result_cache, get_tracking_service
+from app.api.dependencies import (
+    get_app_settings,
+    get_current_principal,
+    get_scrape_result_cache,
+    get_tracking_service,
+    get_user_service,
+)
 from app.api.schemas.tracking import (
     PriceSnapshotResponse,
     TrackedItemBootstrapRequest,
@@ -25,6 +31,8 @@ from app.application.tracking_service import (
 )
 from app.application.scrape_result_cache import ScrapeResultCache
 from app.core.config import Settings
+from app.core.auth import AuthPrincipal
+from app.application.user_service import UserService
 from app.tracking import TrackedItem, derive_tracking_mode
 
 router = APIRouter(prefix="/tracked-items", tags=["tracked-items"])
@@ -69,6 +77,8 @@ async def post_tracked_item_bootstrap(
     settings: Settings = Depends(get_app_settings),
     service: TrackingService = Depends(get_tracking_service),
     scrape_result_cache: ScrapeResultCache = Depends(get_scrape_result_cache),
+    principal: AuthPrincipal = Depends(get_current_principal),
+    user_service: UserService = Depends(get_user_service),
 ) -> TrackedItemBootstrapResponse:
     """Create or refresh one tracked item from a product URL.
 
@@ -86,6 +96,7 @@ async def post_tracked_item_bootstrap(
         )
 
     selected_sites = _normalize_selected_sites(payload.sites, set(service.list_sites()))
+    current_user = await run_in_threadpool(user_service.provision_from_principal, principal)
     request_id = str(getattr(request.state, "request_id", ""))
     idempotency_key = request.headers.get("Idempotency-Key", "").strip()
     scrape_result_ref = (payload.scrape_result_ref or "").strip() or None
@@ -113,6 +124,7 @@ async def post_tracked_item_bootstrap(
         target_amount=payload.target_amount,
         scrape_result_ref=scrape_result_ref,
         pre_fetched_result=pre_fetched_result,
+        user_id=current_user.user_id,
     )
 
     try:
@@ -140,9 +152,12 @@ async def post_tracked_item_bootstrap(
 @router.get("", response_model=TrackedItemListResponse)
 async def get_tracked_items(
     service: TrackingService = Depends(get_tracking_service),
+    principal: AuthPrincipal = Depends(get_current_principal),
+    user_service: UserService = Depends(get_user_service),
 ) -> TrackedItemListResponse:
     """List tracked items with their latest known state."""
-    items = await run_in_threadpool(service.list_items)
+    current_user = await run_in_threadpool(user_service.provision_from_principal, principal)
+    items = await run_in_threadpool(service.list_items, user_id=current_user.user_id)
     return TrackedItemListResponse(
         items=[_to_item_response(item) for item in items]
     )
@@ -153,9 +168,17 @@ async def get_tracked_item(
     item_id: str,
     snapshot_limit: int | None = None,
     service: TrackingService = Depends(get_tracking_service),
+    principal: AuthPrincipal = Depends(get_current_principal),
+    user_service: UserService = Depends(get_user_service),
 ) -> TrackedItemDetailResponse:
     """Return one tracked item plus recent historical snapshots."""
-    detail = await run_in_threadpool(service.get_detail, item_id, snapshot_limit)
+    current_user = await run_in_threadpool(user_service.provision_from_principal, principal)
+    detail = await run_in_threadpool(
+        service.get_detail,
+        item_id,
+        snapshot_limit,
+        user_id=current_user.user_id,
+    )
     if detail is None:
         raise HTTPException(status_code=404, detail="tracked item not found")
 
@@ -173,9 +196,12 @@ async def patch_tracked_item(
     item_id: str,
     payload: TrackedItemUpdateRequest,
     service: TrackingService = Depends(get_tracking_service),
+    principal: AuthPrincipal = Depends(get_current_principal),
+    user_service: UserService = Depends(get_user_service),
 ) -> TrackedItemUpdateResponse:
     """Patch tracking settings without triggering a new scrape."""
     try:
+        current_user = await run_in_threadpool(user_service.provision_from_principal, principal)
         updated = await run_in_threadpool(
             service.update_item,
             TrackingUpdateInput(
@@ -184,6 +210,7 @@ async def patch_tracked_item(
                 check_interval_minutes=payload.check_interval_minutes,
                 target_amount=payload.target_amount,
                 target_amount_provided="target_amount" in payload.model_fields_set,
+                user_id=current_user.user_id,
             ),
         )
     except TrackingServiceError as exc:
@@ -199,9 +226,12 @@ async def patch_tracked_item(
 async def delete_tracked_item(
     item_id: str,
     service: TrackingService = Depends(get_tracking_service),
+    principal: AuthPrincipal = Depends(get_current_principal),
+    user_service: UserService = Depends(get_user_service),
 ) -> Response:
     """Delete tracked item and all linked snapshots."""
-    deleted = await run_in_threadpool(service.delete_item, item_id)
+    current_user = await run_in_threadpool(user_service.provision_from_principal, principal)
+    deleted = await run_in_threadpool(service.delete_item, item_id, user_id=current_user.user_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="tracked item not found")
     return Response(status_code=204)

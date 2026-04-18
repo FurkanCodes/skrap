@@ -415,6 +415,7 @@ class TrackingSchedulerService:
             return
         self._enqueue_notification_event(
             event,
+            user_id=getattr(item_before, "user_id", "legacy_owner"),
             product_url=product_url,
             listing_url=listing_url,
         )
@@ -430,7 +431,9 @@ class TrackingSchedulerService:
     ) -> None:
         """Queue one monitor notification for each successful scheduler check."""
         now = snapshot.checked_at
-        active_chat_id = self._repository.get_active_telegram_chat()
+        active_chat_id = self._get_active_telegram_chat(
+            user_id=getattr(item_before, "user_id", "legacy_owner")
+        )
         channel = "telegram" if active_chat_id else "log"
         affiliate_url = _build_affiliate_url(
             product_url=product_url,
@@ -503,11 +506,12 @@ class TrackingSchedulerService:
         self,
         event: AlertEvent,
         *,
+        user_id: str,
         product_url: str | None,
         listing_url: str | None,
     ) -> None:
         now = event.triggered_at
-        active_chat_id = self._repository.get_active_telegram_chat()
+        active_chat_id = self._get_active_telegram_chat(user_id=user_id)
         channel = "telegram" if active_chat_id else "log"
         affiliate_url = _build_affiliate_url(
             product_url=product_url,
@@ -558,6 +562,15 @@ class TrackingSchedulerService:
             updated_at=now,
         )
         self._repository.enqueue_notification_event(notification)
+
+    def _get_active_telegram_chat(self, *, user_id: str) -> str | None:
+        method = getattr(self._repository, "get_active_telegram_chat", None)
+        if method is None:
+            return None
+        try:
+            return method(user_id=user_id)
+        except TypeError:
+            return method()
 
     def _mark_context_failure(self, context: _ItemRunContext, error: str) -> None:
         finished_at = _to_iso(_utcnow())

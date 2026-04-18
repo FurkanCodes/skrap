@@ -2,11 +2,13 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from threading import RLock
+import uuid
 
 from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 
 from app.tracking.domain import (
+    AppUser,
     AlertEvent,
     NotificationEvent,
     NotificationEventStatus,
@@ -16,13 +18,15 @@ from app.tracking.domain import (
     TrackingBootstrapIdempotencyRecord,
     TrackingCheckRun,
     TrackingCheckRunStatus,
+    UserEntitlement,
 )
 
 _SCHEMA_STATEMENTS: tuple[str, ...] = (
     """
     CREATE TABLE IF NOT EXISTS tracked_items (
         item_id TEXT PRIMARY KEY,
-        source_url TEXT NOT NULL UNIQUE,
+        user_id TEXT,
+        source_url TEXT NOT NULL,
         canonical_url TEXT,
         product_id TEXT,
         site_key TEXT,
@@ -49,6 +53,66 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
         lease_until TIMESTAMPTZ,
         last_check_started_at TIMESTAMPTZ,
         last_check_finished_at TIMESTAMPTZ
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS users (
+        user_id TEXT PRIMARY KEY,
+        auth_provider TEXT NOT NULL,
+        auth_subject TEXT NOT NULL,
+        email TEXT,
+        display_name TEXT,
+        created_at TIMESTAMPTZ NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL,
+        UNIQUE(auth_provider, auth_subject)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS plans (
+        plan_key TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS user_subscriptions (
+        subscription_id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+        provider TEXT NOT NULL,
+        provider_customer_id TEXT,
+        provider_subscription_id TEXT,
+        status TEXT NOT NULL,
+        current_period_end TIMESTAMPTZ,
+        cancel_at_period_end BOOLEAN NOT NULL DEFAULT FALSE,
+        created_at TIMESTAMPTZ NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL,
+        UNIQUE(user_id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS entitlements (
+        user_id TEXT PRIMARY KEY REFERENCES users(user_id) ON DELETE CASCADE,
+        plan_key TEXT NOT NULL REFERENCES plans(plan_key),
+        max_active_trackers INTEGER NOT NULL CHECK (max_active_trackers >= 0),
+        min_check_interval_minutes INTEGER NOT NULL CHECK (min_check_interval_minutes >= 1),
+        monthly_check_units INTEGER NOT NULL CHECK (monthly_check_units >= 0),
+        allowed_channels TEXT NOT NULL,
+        overage_policy TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS usage_counters (
+        counter_id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+        period_start TIMESTAMPTZ NOT NULL,
+        period_end TIMESTAMPTZ NOT NULL,
+        consumed_check_units INTEGER NOT NULL DEFAULT 0 CHECK (consumed_check_units >= 0),
+        created_at TIMESTAMPTZ NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL,
+        UNIQUE(user_id, period_start, period_end)
     )
     """,
     """
@@ -126,6 +190,7 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
     """,
     """
     CREATE TABLE IF NOT EXISTS telegram_connect_sessions (
+        user_id TEXT,
         state TEXT PRIMARY KEY,
         status TEXT NOT NULL CHECK (status IN ('pending', 'connected', 'expired')),
         created_at TIMESTAMPTZ NOT NULL,
@@ -147,6 +212,14 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
     CREATE INDEX IF NOT EXISTS idx_tracked_items_due_active
       ON tracked_items(next_check_at, item_id)
       WHERE status = 'active'
+    """,
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_tracked_items_user_source_unique
+      ON tracked_items(user_id, source_url)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_tracked_items_user_updated
+      ON tracked_items(user_id, updated_at DESC)
     """,
     """
     CREATE INDEX IF NOT EXISTS idx_tracked_items_lease_until
@@ -204,6 +277,10 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
     CREATE INDEX IF NOT EXISTS idx_telegram_connect_sessions_status_expires
       ON telegram_connect_sessions(status, expires_at)
     """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_telegram_connect_sessions_user_status
+      ON telegram_connect_sessions(user_id, status, expires_at)
+    """,
 )
 
 
@@ -243,8 +320,44 @@ class PostgresTrackingRepository:
             self._pool.open(wait=True)
             with self._pool.connection() as conn:
                 with conn.transaction():
+                    # Ensure legacy tables have user columns before user-scoped
+                    # indexes are created in `_SCHEMA_STATEMENTS`.
+                    conn.execute(_SCHEMA_STATEMENTS[0])
+                    conn.execute(_SCHEMA_STATEMENTS[11])
+                    conn.execute(
+                        """
+                        ALTER TABLE tracked_items
+                        ADD COLUMN IF NOT EXISTS user_id TEXT
+                        """
+                    )
+                    conn.execute(
+                        """
+                        ALTER TABLE telegram_connect_sessions
+                        ADD COLUMN IF NOT EXISTS user_id TEXT
+                        """
+                    )
                     for statement in _SCHEMA_STATEMENTS:
                         conn.execute(statement)
+                    conn.execute(
+                        """
+                        UPDATE tracked_items
+                        SET user_id = COALESCE(user_id, 'legacy_owner')
+                        WHERE user_id IS NULL
+                        """
+                    )
+                    conn.execute(
+                        """
+                        UPDATE telegram_connect_sessions
+                        SET user_id = COALESCE(user_id, 'legacy_owner')
+                        WHERE user_id IS NULL
+                        """
+                    )
+                    conn.execute(
+                        """
+                        ALTER TABLE tracked_items
+                        DROP CONSTRAINT IF EXISTS tracked_items_source_url_key
+                        """
+                    )
                     # Older deployments created notification_events.alert_event_id
                     # as NOT NULL. Monitor-mode notifications don't have alert rows.
                     conn.execute(
@@ -260,11 +373,174 @@ class PostgresTrackingRepository:
                         ALTER COLUMN next_attempt_at DROP NOT NULL
                         """
                     )
+                    now = datetime.now(tz=UTC)
+                    conn.execute(
+                        """
+                        INSERT INTO plans (plan_key, name, created_at, updated_at)
+                        VALUES (%s, %s, %s, %s)
+                        ON CONFLICT(plan_key) DO NOTHING
+                        """,
+                        ("free", "Free", now, now),
+                    )
 
     def close(self) -> None:
         """Close pooled connections (useful in tests/shutdown hooks)."""
         with self._lock:
             self._pool.close()
+
+    def upsert_app_user(
+        self,
+        *,
+        auth_provider: str,
+        auth_subject: str,
+        email: str | None,
+        display_name: str | None,
+        now: str,
+    ) -> AppUser:
+        now_dt = _parse_timestamp(now)
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                """
+                INSERT INTO users (
+                    user_id,
+                    auth_provider,
+                    auth_subject,
+                    email,
+                    display_name,
+                    created_at,
+                    updated_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT(auth_provider, auth_subject) DO UPDATE SET
+                    email = EXCLUDED.email,
+                    display_name = EXCLUDED.display_name,
+                    updated_at = EXCLUDED.updated_at
+                RETURNING *
+                """,
+                (
+                    f"usr_{uuid.uuid4().hex[:20]}",
+                    auth_provider,
+                    auth_subject,
+                    email,
+                    display_name,
+                    now_dt,
+                    now_dt,
+                ),
+            ).fetchone()
+        if row is None:  # pragma: no cover - defensive guard
+            raise RuntimeError("Failed to upsert app user")
+        return self._row_to_app_user(row)
+
+    def get_app_user_by_auth_subject(
+        self,
+        *,
+        auth_provider: str,
+        auth_subject: str,
+    ) -> AppUser | None:
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                """
+                SELECT *
+                FROM users
+                WHERE auth_provider = %s
+                  AND auth_subject = %s
+                LIMIT 1
+                """,
+                (auth_provider, auth_subject),
+            ).fetchone()
+        if row is None:
+            return None
+        return self._row_to_app_user(row)
+
+    def get_app_user(self, *, user_id: str) -> AppUser | None:
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                """
+                SELECT *
+                FROM users
+                WHERE user_id = %s
+                LIMIT 1
+                """,
+                (user_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return self._row_to_app_user(row)
+
+    def ensure_default_user_entitlement(self, *, user_id: str, now: str) -> None:
+        now_dt = _parse_timestamp(now)
+        with self._pool.connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO entitlements (
+                    user_id,
+                    plan_key,
+                    max_active_trackers,
+                    min_check_interval_minutes,
+                    monthly_check_units,
+                    allowed_channels,
+                    overage_policy,
+                    created_at,
+                    updated_at
+                ) VALUES (%s, 'free', 5, 360, 1500, 'telegram', 'deny', %s, %s)
+                ON CONFLICT(user_id) DO NOTHING
+                """,
+                (user_id, now_dt, now_dt),
+            )
+            conn.execute(
+                """
+                INSERT INTO user_subscriptions (
+                    subscription_id,
+                    user_id,
+                    provider,
+                    provider_customer_id,
+                    provider_subscription_id,
+                    status,
+                    current_period_end,
+                    cancel_at_period_end,
+                    created_at,
+                    updated_at
+                ) VALUES (%s, %s, 'internal', NULL, NULL, 'active', NULL, FALSE, %s, %s)
+                ON CONFLICT(user_id) DO NOTHING
+                """,
+                (f"sub_{uuid.uuid4().hex[:20]}", user_id, now_dt, now_dt),
+            )
+
+    def get_user_entitlement(self, *, user_id: str) -> UserEntitlement | None:
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                """
+                SELECT *
+                FROM entitlements
+                WHERE user_id = %s
+                LIMIT 1
+                """,
+                (user_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return self._row_to_user_entitlement(row)
+
+    def assign_all_legacy_data_to_user(self, *, user_id: str, now: str) -> None:
+        now_dt = _parse_timestamp(now)
+        with self._pool.connection() as conn:
+            with conn.transaction():
+                conn.execute(
+                    """
+                    UPDATE tracked_items
+                    SET user_id = %s,
+                        updated_at = %s
+                    WHERE user_id IS NULL OR user_id = 'legacy_owner'
+                    """,
+                    (user_id, now_dt),
+                )
+                conn.execute(
+                    """
+                    UPDATE telegram_connect_sessions
+                    SET user_id = %s
+                    WHERE user_id IS NULL OR user_id = 'legacy_owner'
+                    """,
+                    (user_id,),
+                )
 
     def list_items(self) -> list[TrackedItem]:
         with self._pool.connection() as conn:
@@ -277,6 +553,19 @@ class PostgresTrackingRepository:
             ).fetchall()
         return [self._row_to_item(row) for row in rows]
 
+    def list_items_for_user(self, user_id: str) -> list[TrackedItem]:
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM tracked_items
+                WHERE user_id = %s
+                ORDER BY updated_at DESC
+                """,
+                (user_id,),
+            ).fetchall()
+        return [self._row_to_item(row) for row in rows]
+
     def get_item(self, item_id: str) -> TrackedItem | None:
         with self._pool.connection() as conn:
             row = conn.execute(
@@ -286,6 +575,21 @@ class PostgresTrackingRepository:
                 WHERE item_id = %s
                 """,
                 (item_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return self._row_to_item(row)
+
+    def get_item_for_user(self, *, item_id: str, user_id: str) -> TrackedItem | None:
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                """
+                SELECT *
+                FROM tracked_items
+                WHERE item_id = %s
+                  AND user_id = %s
+                """,
+                (item_id, user_id),
             ).fetchone()
         if row is None:
             return None
@@ -305,12 +609,34 @@ class PostgresTrackingRepository:
             return None
         return self._row_to_item(row)
 
+    def get_item_by_source_url_for_user(
+        self,
+        *,
+        source_url: str,
+        user_id: str,
+    ) -> TrackedItem | None:
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                """
+                SELECT *
+                FROM tracked_items
+                WHERE source_url = %s
+                  AND user_id = %s
+                LIMIT 1
+                """,
+                (source_url, user_id),
+            ).fetchone()
+        if row is None:
+            return None
+        return self._row_to_item(row)
+
     def save_item(self, item: TrackedItem) -> TrackedItem:
         with self._pool.connection() as conn:
             row = conn.execute(
                 """
                 INSERT INTO tracked_items (
                     item_id,
+                    user_id,
                     source_url,
                     canonical_url,
                     product_id,
@@ -340,6 +666,7 @@ class PostgresTrackingRepository:
                     last_check_finished_at
                 ) VALUES (
                     %(item_id)s,
+                    %(user_id)s,
                     %(source_url)s,
                     %(canonical_url)s,
                     %(product_id)s,
@@ -368,7 +695,7 @@ class PostgresTrackingRepository:
                     %(last_check_started_at)s,
                     %(last_check_finished_at)s
                 )
-                ON CONFLICT(source_url) DO UPDATE SET
+                ON CONFLICT(user_id, source_url) DO UPDATE SET
                     canonical_url = EXCLUDED.canonical_url,
                     product_id = EXCLUDED.product_id,
                     site_key = EXCLUDED.site_key,
@@ -407,9 +734,10 @@ class PostgresTrackingRepository:
             with conn.transaction():
                 row = conn.execute(
                     """
-                    INSERT INTO tracked_items (
-                        item_id,
-                        source_url,
+                INSERT INTO tracked_items (
+                    item_id,
+                    user_id,
+                    source_url,
                         canonical_url,
                         product_id,
                         site_key,
@@ -438,6 +766,7 @@ class PostgresTrackingRepository:
                         last_check_finished_at
                     ) VALUES (
                         %(item_id)s,
+                        %(user_id)s,
                         %(source_url)s,
                         %(canonical_url)s,
                         %(product_id)s,
@@ -466,7 +795,7 @@ class PostgresTrackingRepository:
                         %(last_check_started_at)s,
                         %(last_check_finished_at)s
                     )
-                    ON CONFLICT(source_url) DO UPDATE SET
+                    ON CONFLICT(user_id, source_url) DO UPDATE SET
                         canonical_url = EXCLUDED.canonical_url,
                         product_id = EXCLUDED.product_id,
                         site_key = EXCLUDED.site_key,
@@ -974,8 +1303,11 @@ class PostgresTrackingRepository:
 
     def get_bootstrap_idempotency_record(
         self,
+        *,
+        user_id: str,
         idempotency_key: str,
     ) -> TrackingBootstrapIdempotencyRecord | None:
+        scoped_key = _scope_idempotency_key(user_id=user_id, key=idempotency_key)
         with self._pool.connection() as conn:
             row = conn.execute(
                 """
@@ -983,7 +1315,7 @@ class PostgresTrackingRepository:
                 FROM tracking_bootstrap_idempotency
                 WHERE idempotency_key = %s
                 """,
-                (idempotency_key,),
+                (scoped_key,),
             ).fetchone()
         if row is None:
             return None
@@ -992,12 +1324,14 @@ class PostgresTrackingRepository:
     def save_bootstrap_idempotency_record(
         self,
         *,
+        user_id: str,
         idempotency_key: str,
         request_hash: str,
         item_id: str,
         now: str,
     ) -> None:
         now_dt = _parse_timestamp(now)
+        scoped_key = _scope_idempotency_key(user_id=user_id, key=idempotency_key)
         with self._pool.connection() as conn:
             conn.execute(
                 """
@@ -1013,7 +1347,7 @@ class PostgresTrackingRepository:
                     item_id = EXCLUDED.item_id,
                     updated_at = EXCLUDED.updated_at
                 """,
-                (idempotency_key, request_hash, item_id, now_dt, now_dt),
+                (scoped_key, request_hash, item_id, now_dt, now_dt),
             )
 
     def create_telegram_connect_session(self, session: TelegramConnectSession) -> TelegramConnectSession:
@@ -1021,6 +1355,7 @@ class PostgresTrackingRepository:
             row = conn.execute(
                 """
                 INSERT INTO telegram_connect_sessions (
+                    user_id,
                     state,
                     status,
                     created_at,
@@ -1029,8 +1364,9 @@ class PostgresTrackingRepository:
                     telegram_user_id,
                     telegram_chat_id,
                     telegram_username
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT(state) DO UPDATE SET
+                    user_id = EXCLUDED.user_id,
                     status = EXCLUDED.status,
                     created_at = EXCLUDED.created_at,
                     expires_at = EXCLUDED.expires_at,
@@ -1041,6 +1377,7 @@ class PostgresTrackingRepository:
                 RETURNING *
                 """,
                 (
+                    session.user_id,
                     session.state,
                     session.status,
                     _parse_timestamp(session.created_at),
@@ -1055,13 +1392,34 @@ class PostgresTrackingRepository:
             raise RuntimeError("Failed to persist telegram connect session")
         return self._row_to_telegram_connect_session(row)
 
-    def get_telegram_connect_session(self, state: str) -> TelegramConnectSession | None:
+    def get_telegram_connect_session(
+        self,
+        *,
+        user_id: str,
+        state: str,
+    ) -> TelegramConnectSession | None:
         with self._pool.connection() as conn:
             row = conn.execute(
                 """
                 SELECT *
                 FROM telegram_connect_sessions
                 WHERE state = %s
+                  AND user_id = %s
+                """,
+                (state, user_id),
+            ).fetchone()
+        if row is None:
+            return None
+        return self._row_to_telegram_connect_session(row)
+
+    def get_telegram_connect_session_by_state(self, state: str) -> TelegramConnectSession | None:
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                """
+                SELECT *
+                FROM telegram_connect_sessions
+                WHERE state = %s
+                LIMIT 1
                 """,
                 (state,),
             ).fetchone()
@@ -1072,6 +1430,7 @@ class PostgresTrackingRepository:
     def mark_telegram_connect_session_connected(
         self,
         *,
+        user_id: str,
         state: str,
         connected_at: str,
         telegram_user_id: str,
@@ -1088,6 +1447,7 @@ class PostgresTrackingRepository:
                     telegram_chat_id = %s,
                     telegram_username = %s
                 WHERE state = %s
+                  AND user_id = %s
                 RETURNING *
                 """,
                 (
@@ -1096,23 +1456,30 @@ class PostgresTrackingRepository:
                     telegram_chat_id,
                     telegram_username,
                     state,
+                    user_id,
                 ),
             ).fetchone()
         if row is None:
             return None
         return self._row_to_telegram_connect_session(row)
 
-    def mark_telegram_connect_session_expired(self, *, state: str) -> TelegramConnectSession | None:
+    def mark_telegram_connect_session_expired(
+        self,
+        *,
+        user_id: str,
+        state: str,
+    ) -> TelegramConnectSession | None:
         with self._pool.connection() as conn:
             row = conn.execute(
                 """
                 UPDATE telegram_connect_sessions
                 SET status = 'expired'
                 WHERE state = %s
+                  AND user_id = %s
                   AND status = 'pending'
                 RETURNING *
                 """,
-                (state,),
+                (state, user_id),
             ).fetchone()
         if row is None:
             return None
@@ -1121,10 +1488,12 @@ class PostgresTrackingRepository:
     def set_active_telegram_chat(
         self,
         *,
+        user_id: str,
         chat_id: str,
         updated_at: str,
     ) -> None:
         updated_at_dt = _parse_timestamp(updated_at)
+        key = _active_telegram_chat_key(user_id)
         with self._pool.connection() as conn:
             conn.execute(
                 """
@@ -1134,10 +1503,11 @@ class PostgresTrackingRepository:
                     value = EXCLUDED.value,
                     updated_at = EXCLUDED.updated_at
                 """,
-                ("active_telegram_chat_id", chat_id, updated_at_dt),
+                (key, chat_id, updated_at_dt),
             )
 
-    def get_active_telegram_chat(self) -> str | None:
+    def get_active_telegram_chat(self, *, user_id: str) -> str | None:
+        key = _active_telegram_chat_key(user_id)
         with self._pool.connection() as conn:
             row = conn.execute(
                 """
@@ -1146,7 +1516,7 @@ class PostgresTrackingRepository:
                 WHERE key = %s
                 LIMIT 1
                 """,
-                ("active_telegram_chat_id",),
+                (key,),
             ).fetchone()
         if row is None:
             return None
@@ -1217,6 +1587,7 @@ class PostgresTrackingRepository:
     def _item_params(item: TrackedItem) -> dict[str, object | None]:
         return {
             "item_id": item.item_id,
+            "user_id": item.user_id,
             "source_url": item.source_url,
             "canonical_url": item.canonical_url,
             "product_id": item.product_id,
@@ -1250,6 +1621,7 @@ class PostgresTrackingRepository:
     def _row_to_item(row: dict[str, object]) -> TrackedItem:
         return TrackedItem(
             item_id=str(row["item_id"]),
+            user_id=str(row["user_id"]),
             source_url=str(row["source_url"]),
             canonical_url=_as_str(row.get("canonical_url")),
             product_id=_as_str(row.get("product_id")),
@@ -1348,6 +1720,32 @@ class PostgresTrackingRepository:
         )
 
     @staticmethod
+    def _row_to_app_user(row: dict[str, object]) -> AppUser:
+        return AppUser(
+            user_id=str(row["user_id"]),
+            auth_provider=str(row["auth_provider"]),
+            auth_subject=str(row["auth_subject"]),
+            email=_as_str(row.get("email")),
+            display_name=_as_str(row.get("display_name")),
+            created_at=_format_timestamp(row.get("created_at")),
+            updated_at=_format_timestamp(row.get("updated_at")),
+        )
+
+    @staticmethod
+    def _row_to_user_entitlement(row: dict[str, object]) -> UserEntitlement:
+        return UserEntitlement(
+            user_id=str(row["user_id"]),
+            plan_key=str(row["plan_key"]),
+            max_active_trackers=int(row["max_active_trackers"]),
+            min_check_interval_minutes=int(row["min_check_interval_minutes"]),
+            monthly_check_units=int(row["monthly_check_units"]),
+            allowed_channels=str(row["allowed_channels"]),
+            overage_policy=str(row["overage_policy"]),
+            created_at=_format_timestamp(row.get("created_at")),
+            updated_at=_format_timestamp(row.get("updated_at")),
+        )
+
+    @staticmethod
     def _row_to_bootstrap_idempotency(
         row: dict[str, object],
     ) -> TrackingBootstrapIdempotencyRecord:
@@ -1364,6 +1762,7 @@ class PostgresTrackingRepository:
         row: dict[str, object],
     ) -> TelegramConnectSession:
         return TelegramConnectSession(
+            user_id=str(row["user_id"]),
             state=str(row["state"]),
             status=str(row["status"]),
             created_at=_format_timestamp(row.get("created_at")),
@@ -1393,3 +1792,11 @@ def _as_str(value: object | None) -> str | None:
     if value is None:
         return None
     return str(value)
+
+
+def _scope_idempotency_key(*, user_id: str, key: str) -> str:
+    return f"{user_id}:{key}"
+
+
+def _active_telegram_chat_key(user_id: str) -> str:
+    return f"active_telegram_chat_id:{user_id}"

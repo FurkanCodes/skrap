@@ -5,7 +5,9 @@ from fastapi.concurrency import run_in_threadpool
 
 from app.api.dependencies import (
     get_app_settings,
+    get_current_principal,
     get_telegram_integration_service,
+    get_user_service,
 )
 from app.api.schemas.integrations import (
     TelegramActiveStatusResponse,
@@ -19,7 +21,9 @@ from app.application.telegram_integration_service import (
     TelegramIntegrationError,
     TelegramIntegrationService,
 )
+from app.application.user_service import UserService
 from app.core.config import Settings
+from app.core.auth import AuthPrincipal
 
 router = APIRouter(prefix="/integrations/telegram", tags=["integrations:telegram"])
 
@@ -30,8 +34,11 @@ async def setup_telegram_webhook(
     request: Request,
     settings: Settings = Depends(get_app_settings),
     service: TelegramIntegrationService = Depends(get_telegram_integration_service),
+    principal: AuthPrincipal = Depends(get_current_principal),
+    user_service: UserService = Depends(get_user_service),
 ) -> TelegramWebhookSetupResponse:
     request_id = str(getattr(request.state, "request_id", ""))
+    await run_in_threadpool(user_service.provision_from_principal, principal)
     try:
         output = await run_in_threadpool(
             service.setup_webhook,
@@ -54,10 +61,13 @@ async def setup_telegram_webhook(
 async def start_telegram_connect(
     request: Request,
     service: TelegramIntegrationService = Depends(get_telegram_integration_service),
+    principal: AuthPrincipal = Depends(get_current_principal),
+    user_service: UserService = Depends(get_user_service),
 ) -> TelegramConnectStartResponse:
     request_id = str(getattr(request.state, "request_id", ""))
+    current_user = await run_in_threadpool(user_service.provision_from_principal, principal)
     try:
-        output = await run_in_threadpool(service.start_connect)
+        output = await run_in_threadpool(service.start_connect, user_id=current_user.user_id)
     except TelegramIntegrationError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -74,8 +84,15 @@ async def start_telegram_connect(
 async def get_telegram_connect_status(
     state: str,
     service: TelegramIntegrationService = Depends(get_telegram_integration_service),
+    principal: AuthPrincipal = Depends(get_current_principal),
+    user_service: UserService = Depends(get_user_service),
 ) -> TelegramConnectStatusResponse:
-    output = await run_in_threadpool(service.get_connect_status, state)
+    current_user = await run_in_threadpool(user_service.provision_from_principal, principal)
+    output = await run_in_threadpool(
+        service.get_connect_status,
+        user_id=current_user.user_id,
+        state=state,
+    )
     if output is None:
         raise HTTPException(status_code=404, detail="connect session not found")
 
@@ -93,8 +110,14 @@ async def get_telegram_connect_status(
 async def get_telegram_status(
     settings: Settings = Depends(get_app_settings),
     service: TelegramIntegrationService = Depends(get_telegram_integration_service),
+    principal: AuthPrincipal = Depends(get_current_principal),
+    user_service: UserService = Depends(get_user_service),
 ) -> TelegramActiveStatusResponse:
-    connected, active_chat_id = await run_in_threadpool(service.get_active_chat_status)
+    current_user = await run_in_threadpool(user_service.provision_from_principal, principal)
+    connected, active_chat_id = await run_in_threadpool(
+        service.get_active_chat_status,
+        user_id=current_user.user_id,
+    )
     return TelegramActiveStatusResponse(
         connected=connected,
         active_chat_id=active_chat_id,

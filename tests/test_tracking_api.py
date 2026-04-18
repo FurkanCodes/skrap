@@ -96,10 +96,16 @@ class FakeTrackingService:
             )
         return self.bootstrap(payload)
 
-    def list_items(self) -> list[TrackedItem]:
+    def list_items(self, *, user_id: str | None = None) -> list[TrackedItem]:  # noqa: ARG002
         return list(self.items.values())
 
-    def get_detail(self, item_id: str, snapshot_limit: int | None = None) -> TrackingDetailOutput | None:
+    def get_detail(
+        self,
+        item_id: str,
+        snapshot_limit: int | None = None,
+        *,
+        user_id: str | None = None,  # noqa: ARG002
+    ) -> TrackingDetailOutput | None:
         item = self.items.get(item_id)
         if item is None:
             return None
@@ -145,7 +151,7 @@ class FakeTrackingService:
         self.items[item.item_id] = updated
         return updated
 
-    def delete_item(self, item_id: str) -> bool:
+    def delete_item(self, item_id: str, *, user_id: str | None = None) -> bool:  # noqa: ARG002
         existed = item_id in self.items
         self.items.pop(item_id, None)
         self.snapshots.pop(item_id, None)

@@ -9,6 +9,7 @@ TrackingCheckRunStatus = Literal["running", "succeeded", "failed"]
 AlertRuleType = Literal["price_below"]
 NotificationEventStatus = Literal["queued", "sending", "sent", "failed", "dead"]
 TelegramConnectSessionStatus = Literal["pending", "connected", "expired"]
+AuthProvider = Literal["better_auth"]
 
 
 def derive_tracking_mode(target_amount: str | None) -> TrackingMode:
@@ -18,11 +19,12 @@ def derive_tracking_mode(target_amount: str | None) -> TrackingMode:
     return "alert" if target_amount.strip() else "monitor"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class TrackedItem:
     """Persisted product tracking aggregate."""
 
     item_id: str
+    user_id: str = "legacy_owner"
     source_url: str
     canonical_url: str | None
     product_id: str | None
@@ -144,10 +146,11 @@ class NotificationEvent:
     updated_at: str
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class TelegramConnectSession:
     """Short-lived Telegram connection handshake state."""
 
+    user_id: str = "legacy_owner"
     state: str
     status: TelegramConnectSessionStatus
     created_at: str
@@ -156,3 +159,31 @@ class TelegramConnectSession:
     telegram_user_id: str | None
     telegram_chat_id: str | None
     telegram_username: str | None
+
+
+@dataclass(frozen=True)
+class AppUser:
+    """Application-owned user row mapped to external auth subject."""
+
+    user_id: str
+    auth_provider: AuthProvider
+    auth_subject: str
+    email: str | None
+    display_name: str | None
+    created_at: str
+    updated_at: str
+
+
+@dataclass(frozen=True)
+class UserEntitlement:
+    """Resolved effective plan limits for one app user."""
+
+    user_id: str
+    plan_key: str
+    max_active_trackers: int
+    min_check_interval_minutes: int
+    monthly_check_units: int
+    allowed_channels: str
+    overage_policy: str
+    created_at: str
+    updated_at: str

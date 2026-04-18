@@ -1,4 +1,5 @@
 from .domain import (
+    AppUser,
     AlertEvent,
     AlertRuleType,
     NotificationEvent,
@@ -12,6 +13,7 @@ from .domain import (
     TrackingCheckRunStatus,
     TrackingMode,
     TrackingStatus,
+    UserEntitlement,
     derive_tracking_mode,
 )
 from .repository import TrackingRepository
@@ -19,6 +21,7 @@ from .repository import TrackingRepository
 __all__ = [
     "AlertEvent",
     "AlertRuleType",
+    "AppUser",
     "NotificationEvent",
     "NotificationEventStatus",
     "PriceSnapshot",
@@ -31,5 +34,6 @@ __all__ = [
     "TrackingMode",
     "TrackingRepository",
     "TrackingStatus",
+    "UserEntitlement",
     "derive_tracking_mode",
 ]

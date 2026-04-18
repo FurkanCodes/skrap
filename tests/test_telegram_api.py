@@ -20,7 +20,7 @@ class _FakeTelegramService:
     started: bool = False
     processed_updates: int = 0
 
-    def start_connect(self) -> TelegramConnectStartOutput:
+    def start_connect(self, *, user_id: str | None = None) -> TelegramConnectStartOutput:  # noqa: ARG002
         self.started = True
         return TelegramConnectStartOutput(
             state="state_123",
@@ -29,7 +29,12 @@ class _FakeTelegramService:
             bot_username="testbot",
         )
 
-    def get_connect_status(self, state: str) -> TelegramConnectStatusOutput | None:
+    def get_connect_status(
+        self,
+        *,
+        user_id: str | None = None,  # noqa: ARG002
+        state: str,
+    ) -> TelegramConnectStatusOutput | None:
         if state == "missing":
             return None
         return TelegramConnectStatusOutput(
@@ -41,7 +46,7 @@ class _FakeTelegramService:
             telegram_username="tester",
         )
 
-    def get_active_chat_status(self) -> tuple[bool, str | None]:
+    def get_active_chat_status(self, *, user_id: str | None = None) -> tuple[bool, str | None]:  # noqa: ARG002
         return (True, "12345")
 
     def process_webhook_update(self, payload: dict) -> bool:
@@ -64,7 +69,7 @@ class _FakeTelegramService:
 
 @dataclass
 class _FailingTelegramService:
-    def start_connect(self) -> TelegramConnectStartOutput:
+    def start_connect(self, *, user_id: str | None = None) -> TelegramConnectStartOutput:  # noqa: ARG002
         raise TelegramIntegrationError("TELEGRAM_BOT_USERNAME is required")
 
 

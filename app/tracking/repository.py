@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Protocol
 
 from app.tracking.domain import (
+    AppUser,
     AlertEvent,
     NotificationEvent,
     NotificationEventStatus,
@@ -12,6 +13,7 @@ from app.tracking.domain import (
     TrackedItem,
     TrackingCheckRun,
     TrackingCheckRunStatus,
+    UserEntitlement,
 )
 
 
@@ -24,10 +26,24 @@ class TrackingRepository(Protocol):
     def list_items(self) -> list[TrackedItem]:
         ...
 
+    def list_items_for_user(self, user_id: str) -> list[TrackedItem]:
+        ...
+
     def get_item(self, item_id: str) -> TrackedItem | None:
         ...
 
+    def get_item_for_user(self, *, item_id: str, user_id: str) -> TrackedItem | None:
+        ...
+
     def get_item_by_source_url(self, source_url: str) -> TrackedItem | None:
+        ...
+
+    def get_item_by_source_url_for_user(
+        self,
+        *,
+        source_url: str,
+        user_id: str,
+    ) -> TrackedItem | None:
         ...
 
     def save_item(self, item: TrackedItem) -> TrackedItem:
@@ -141,6 +157,8 @@ class TrackingRepository(Protocol):
 
     def get_bootstrap_idempotency_record(
         self,
+        *,
+        user_id: str,
         idempotency_key: str,
     ) -> TrackingBootstrapIdempotencyRecord | None:
         ...
@@ -148,6 +166,7 @@ class TrackingRepository(Protocol):
     def save_bootstrap_idempotency_record(
         self,
         *,
+        user_id: str,
         idempotency_key: str,
         request_hash: str,
         item_id: str,
@@ -158,12 +177,21 @@ class TrackingRepository(Protocol):
     def create_telegram_connect_session(self, session: TelegramConnectSession) -> TelegramConnectSession:
         ...
 
-    def get_telegram_connect_session(self, state: str) -> TelegramConnectSession | None:
+    def get_telegram_connect_session(
+        self,
+        *,
+        user_id: str,
+        state: str,
+    ) -> TelegramConnectSession | None:
+        ...
+
+    def get_telegram_connect_session_by_state(self, state: str) -> TelegramConnectSession | None:
         ...
 
     def mark_telegram_connect_session_connected(
         self,
         *,
+        user_id: str,
         state: str,
         connected_at: str,
         telegram_user_id: str,
@@ -172,16 +200,53 @@ class TrackingRepository(Protocol):
     ) -> TelegramConnectSession | None:
         ...
 
-    def mark_telegram_connect_session_expired(self, *, state: str) -> TelegramConnectSession | None:
+    def mark_telegram_connect_session_expired(
+        self,
+        *,
+        user_id: str,
+        state: str,
+    ) -> TelegramConnectSession | None:
         ...
 
     def set_active_telegram_chat(
         self,
         *,
+        user_id: str,
         chat_id: str,
         updated_at: str,
     ) -> None:
         ...
 
-    def get_active_telegram_chat(self) -> str | None:
+    def get_active_telegram_chat(self, *, user_id: str) -> str | None:
+        ...
+
+    def upsert_app_user(
+        self,
+        *,
+        auth_provider: str,
+        auth_subject: str,
+        email: str | None,
+        display_name: str | None,
+        now: str,
+    ) -> AppUser:
+        ...
+
+    def get_app_user_by_auth_subject(
+        self,
+        *,
+        auth_provider: str,
+        auth_subject: str,
+    ) -> AppUser | None:
+        ...
+
+    def get_app_user(self, *, user_id: str) -> AppUser | None:
+        ...
+
+    def ensure_default_user_entitlement(self, *, user_id: str, now: str) -> None:
+        ...
+
+    def get_user_entitlement(self, *, user_id: str) -> UserEntitlement | None:
+        ...
+
+    def assign_all_legacy_data_to_user(self, *, user_id: str, now: str) -> None:
         ...
