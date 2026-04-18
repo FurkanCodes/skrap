@@ -81,6 +81,11 @@ class Settings:
     notifier_base_backoff_seconds: int
     notifier_backoff_max_seconds: int
     notifier_retry_jitter_percent: int
+    telegram_bot_token: str
+    telegram_bot_username: str
+    telegram_webhook_secret: str
+    telegram_connect_ttl_minutes: int
+    affiliate_link_template: str
 
 
 @lru_cache
@@ -129,6 +134,11 @@ def get_settings() -> Settings:
         notifier_base_backoff_seconds=_parse_int_env("NOTIFIER_BASE_BACKOFF_SECONDS", 30),
         notifier_backoff_max_seconds=_parse_int_env("NOTIFIER_BACKOFF_MAX_SECONDS", 3600),
         notifier_retry_jitter_percent=_parse_int_env("NOTIFIER_RETRY_JITTER_PERCENT", 10),
+        telegram_bot_token=_parse_str_env("TELEGRAM_BOT_TOKEN", ""),
+        telegram_bot_username=_parse_str_env("TELEGRAM_BOT_USERNAME", ""),
+        telegram_webhook_secret=_parse_str_env("TELEGRAM_WEBHOOK_SECRET", ""),
+        telegram_connect_ttl_minutes=_parse_int_env("TELEGRAM_CONNECT_TTL_MINUTES", 15),
+        affiliate_link_template=_parse_str_env("AFFILIATE_LINK_TEMPLATE", ""),
     )
 
     if settings.scrape_timeout_min < 1:
@@ -201,5 +211,7 @@ def get_settings() -> Settings:
         )
     if settings.notifier_retry_jitter_percent < 0 or settings.notifier_retry_jitter_percent > 50:
         raise RuntimeError("NOTIFIER_RETRY_JITTER_PERCENT must be between 0 and 50")
+    if settings.telegram_connect_ttl_minutes < 1 or settings.telegram_connect_ttl_minutes > 120:
+        raise RuntimeError("TELEGRAM_CONNECT_TTL_MINUTES must be between 1 and 120")
 
     return settings

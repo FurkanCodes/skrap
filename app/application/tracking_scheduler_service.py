@@ -9,6 +9,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 import json
 from typing import Protocol
+from urllib.parse import quote_plus
 
 from app.application.scrape_service import ScrapeBatchInput, ScrapeBatchOutput
 from app.scraper import PriceResult
@@ -79,6 +80,7 @@ class TrackingSchedulerService:
         fetch_mode: str = "auto",
         alert_cooldown_minutes: int = 60,
         notification_max_attempts: int = 5,
+        affiliate_link_template: str = "",
     ) -> None:
         self._repository = repository
         self._scrape_runner = scrape_runner
@@ -91,6 +93,7 @@ class TrackingSchedulerService:
         self._fetch_mode = fetch_mode
         self._alert_cooldown_minutes = max(0, alert_cooldown_minutes)
         self._notification_max_attempts = max(1, notification_max_attempts)
+        self._affiliate_link_template = affiliate_link_template.strip()
 
     def run_once(self) -> SchedulerCycleResult:
         started = time.perf_counter()
@@ -183,8 +186,35 @@ class TrackingSchedulerService:
                     started_at=started_at,
                 )
                 if run.run_id != run_id:
+                    if run.status == "running" and run.finished_at is None:
+                        # A previous worker claimed this schedule slot and never
+                        # closed it. Release the stale run so the current worker
+                        # can take over instead of looping forever on duplicate_job.
+                        self._repository.abandon_check_run(
+                            run_id=run.run_id,
+                            finished_at=started_at,
+                            error="stale_run_reclaimed",
+                        )
+                        retry_run = self._repository.start_check_run(
+                            run_id=run_id,
+                            item_id=item.item_id,
+                            scheduled_for=scheduled_for,
+                            job_key=job_key,
+                            started_at=started_at,
+                        )
+                        if retry_run.run_id == run_id:
+                            contexts.append(
+                                _ItemRunContext(
+                                    item=item,
+                                    run_id=run_id,
+                                    scheduled_for=scheduled_for,
+                                    job_key=job_key,
+                                    started_at=started_at,
+                                )
+                            )
+                            continue
                     skipped += 1
-                    self._release_lease_only(item=item, started_at=started_at)
+                    self._release_duplicate_job(item=item, started_at=started_at)
                     continue
                 contexts.append(
                     _ItemRunContext(
@@ -275,11 +305,24 @@ class TrackingSchedulerService:
                 scheduled_for=context.scheduled_for,
             )
             self._repository.save_item_and_snapshot(updated_item, snapshot)
-            self._emit_alert_if_crossed(
-                item_before=item,
-                snapshot=snapshot,
-                current_amount=scrape_result.amount,
-            )
+            product_url = _resolve_product_url(item, scrape_result)
+            listing_url = _resolve_listing_url(scrape_result)
+            if item.tracking_mode == "monitor":
+                self._emit_monitor_notification(
+                    item_before=item,
+                    snapshot=snapshot,
+                    current_amount=scrape_result.amount,
+                    product_url=product_url,
+                    listing_url=listing_url,
+                )
+            else:
+                self._emit_alert_if_crossed(
+                    item_before=item,
+                    snapshot=snapshot,
+                    current_amount=scrape_result.amount,
+                    product_url=product_url,
+                    listing_url=listing_url,
+                )
             self._repository.finish_check_run(
                 run_id=context.run_id,
                 status="succeeded",
@@ -326,6 +369,8 @@ class TrackingSchedulerService:
         item_before: TrackedItem,
         snapshot: PriceSnapshot,
         current_amount: str | None,
+        product_url: str | None,
+        listing_url: str | None,
     ) -> None:
         """Emit one idempotent alert event when price crosses below target."""
         if not item_before.alerts_enabled:
@@ -368,7 +413,76 @@ class TrackingSchedulerService:
         created = self._repository.create_alert_event(event)
         if not created:
             return
-        self._enqueue_notification_event(event)
+        self._enqueue_notification_event(
+            event,
+            product_url=product_url,
+            listing_url=listing_url,
+        )
+
+    def _emit_monitor_notification(
+        self,
+        *,
+        item_before: TrackedItem,
+        snapshot: PriceSnapshot,
+        current_amount: str | None,
+        product_url: str | None,
+        listing_url: str | None,
+    ) -> None:
+        """Queue one monitor notification for each successful scheduler check."""
+        now = snapshot.checked_at
+        active_chat_id = self._repository.get_active_telegram_chat()
+        channel = "telegram" if active_chat_id else "log"
+        affiliate_url = _build_affiliate_url(
+            product_url=product_url,
+            template=self._affiliate_link_template,
+        )
+        payload = {
+            "notification_type": "monitor",
+            "item_id": item_before.item_id,
+            "snapshot_id": snapshot.snapshot_id,
+            "rule_type": "monitor",
+            "current_amount": current_amount,
+            "currency": snapshot.currency or item_before.currency,
+            "triggered_at": snapshot.checked_at,
+        }
+        if product_url:
+            payload["product_url"] = product_url
+        if listing_url:
+            payload["listing_url"] = listing_url
+        if affiliate_url:
+            payload["affiliate_url"] = affiliate_url
+        if active_chat_id is not None:
+            payload["chat_id"] = active_chat_id
+
+        notification = NotificationEvent(
+            notification_id=_new_notification_event_id(),
+            idempotency_key=_build_notification_idempotency_key(
+                event_key=_build_monitor_notification_event_key(
+                    item_id=item_before.item_id,
+                    scheduled_for=snapshot.scheduled_for,
+                    checked_at=snapshot.checked_at,
+                ),
+                channel=channel,
+            ),
+            alert_event_id=None,
+            item_id=item_before.item_id,
+            channel=channel,
+            payload=json.dumps(payload, separators=(",", ":"), sort_keys=True),
+            status="queued",
+            attempt_count=0,
+            max_attempts=self._notification_max_attempts,
+            next_attempt_at=now,
+            last_attempt_at=None,
+            sent_at=None,
+            provider_name=None,
+            provider_message_id=None,
+            last_error=None,
+            lease_owner=None,
+            lease_until=None,
+            created_at=now,
+            updated_at=now,
+        )
+        self._repository.enqueue_notification_event(notification)
 
     def _is_in_cooldown(self, *, item_id: str, rule_type: str, now: str) -> bool:
         if self._alert_cooldown_minutes <= 0:
@@ -385,9 +499,22 @@ class TrackingSchedulerService:
         elapsed = now_dt - last_dt
         return elapsed < timedelta(minutes=self._alert_cooldown_minutes)
 
-    def _enqueue_notification_event(self, event: AlertEvent) -> None:
+    def _enqueue_notification_event(
+        self,
+        event: AlertEvent,
+        *,
+        product_url: str | None,
+        listing_url: str | None,
+    ) -> None:
         now = event.triggered_at
+        active_chat_id = self._repository.get_active_telegram_chat()
+        channel = "telegram" if active_chat_id else "log"
+        affiliate_url = _build_affiliate_url(
+            product_url=product_url,
+            template=self._affiliate_link_template,
+        )
         payload = {
+            "notification_type": "alert",
             "alert_event_id": event.event_id,
             "item_id": event.item_id,
             "snapshot_id": event.snapshot_id,
@@ -398,15 +525,23 @@ class TrackingSchedulerService:
             "currency": event.currency,
             "triggered_at": event.triggered_at,
         }
+        if product_url:
+            payload["product_url"] = product_url
+        if listing_url:
+            payload["listing_url"] = listing_url
+        if affiliate_url:
+            payload["affiliate_url"] = affiliate_url
+        if active_chat_id is not None:
+            payload["chat_id"] = active_chat_id
         notification = NotificationEvent(
             notification_id=_new_notification_event_id(),
             idempotency_key=_build_notification_idempotency_key(
-                alert_event_id=event.event_id,
-                channel="log",
+                event_key=event.event_id,
+                channel=channel,
             ),
             alert_event_id=event.event_id,
             item_id=event.item_id,
-            channel="log",
+            channel=channel,
             payload=json.dumps(payload, separators=(",", ":"), sort_keys=True),
             status="queued",
             attempt_count=0,
@@ -487,6 +622,35 @@ class TrackingSchedulerService:
                     last_check_started_at=started_at,
                     last_check_finished_at=now,
                     updated_at=now,
+                )
+            )
+        except Exception:
+            pass
+
+    def _release_duplicate_job(
+        self,
+        *,
+        item: TrackedItem,
+        started_at: str,
+    ) -> None:
+        now = _to_iso(_utcnow())
+        next_check_at = compute_next_check_at(
+            base_time=now,
+            interval_minutes=item.check_interval_minutes,
+            jitter_percent=self._jitter_percent,
+        )
+        try:
+            # Keep `last_checked_at` intact here because no fresh scrape actually
+            # ran. We only want to unstick the schedule from a duplicate job key.
+            self._repository.save_item(
+                replace(
+                    item,
+                    lease_owner=None,
+                    lease_until=None,
+                    last_check_started_at=started_at,
+                    last_check_finished_at=now,
+                    updated_at=now,
+                    next_check_at=next_check_at,
                 )
             )
         except Exception:
@@ -591,8 +755,52 @@ def _build_alert_idempotency_key(*, item_id: str, rule_type: str, snapshot_id: s
     return f"{item_id}:{rule_type}:{snapshot_id}"
 
 
-def _build_notification_idempotency_key(*, alert_event_id: str, channel: str) -> str:
-    return f"{alert_event_id}:{channel}"
+def _build_notification_idempotency_key(*, event_key: str, channel: str) -> str:
+    return f"{event_key}:{channel}"
+
+def _build_monitor_notification_event_key(
+    *,
+    item_id: str,
+    scheduled_for: str | None,
+    checked_at: str,
+) -> str:
+    marker = scheduled_for or checked_at
+    return f"monitor:{item_id}:{marker}"
+
+
+def _resolve_product_url(item: TrackedItem, scrape_result: PriceResult) -> str | None:
+    candidate = (
+        (scrape_result.canonical_url or "").strip()
+        or (scrape_result.url or "").strip()
+        or (item.canonical_url or "").strip()
+        or (item.source_url or "").strip()
+    )
+    return candidate or None
+
+
+def _resolve_listing_url(scrape_result: PriceResult) -> str | None:
+    if not scrape_result.listings:
+        return None
+    listing_url = (scrape_result.listings[0].listing_url or "").strip()
+    return listing_url or None
+
+
+def _build_affiliate_url(*, product_url: str | None, template: str) -> str | None:
+    url = (product_url or "").strip()
+    if not url:
+        return None
+
+    normalized_template = template.strip()
+    if not normalized_template:
+        # No template configured: fall back to direct product URL.
+        return url
+
+    encoded = quote_plus(url)
+    if "{url}" in normalized_template:
+        return normalized_template.replace("{url}", encoded)
+
+    separator = "&" if "?" in normalized_template else "?"
+    return f"{normalized_template}{separator}url={encoded}"
 
 
 def _parse_decimal(value: str | None) -> Decimal | None:

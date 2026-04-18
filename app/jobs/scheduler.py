@@ -132,6 +132,7 @@ def _build_scheduler_service() -> tuple[TrackingSchedulerService, int]:
         fetch_mode="auto",
         alert_cooldown_minutes=settings.scheduler_alert_cooldown_minutes,
         notification_max_attempts=settings.notifier_max_attempts,
+        affiliate_link_template=settings.affiliate_link_template,
     )
     return scheduler_service, settings.scheduler_poll_seconds
 

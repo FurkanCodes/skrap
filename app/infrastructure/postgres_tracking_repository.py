@@ -11,6 +11,7 @@ from app.tracking.domain import (
     NotificationEvent,
     NotificationEventStatus,
     PriceSnapshot,
+    TelegramConnectSession,
     TrackedItem,
     TrackingBootstrapIdempotencyRecord,
     TrackingCheckRun,
@@ -104,14 +105,14 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
     CREATE TABLE IF NOT EXISTS notification_events (
         notification_id TEXT PRIMARY KEY,
         idempotency_key TEXT NOT NULL UNIQUE,
-        alert_event_id TEXT NOT NULL REFERENCES alert_events(event_id) ON DELETE CASCADE,
+        alert_event_id TEXT REFERENCES alert_events(event_id) ON DELETE CASCADE,
         item_id TEXT NOT NULL REFERENCES tracked_items(item_id) ON DELETE CASCADE,
         channel TEXT NOT NULL,
         payload TEXT NOT NULL,
         status TEXT NOT NULL CHECK (status IN ('queued', 'sending', 'sent', 'failed', 'dead')),
         attempt_count INTEGER NOT NULL CHECK (attempt_count >= 0),
         max_attempts INTEGER NOT NULL CHECK (max_attempts >= 1),
-        next_attempt_at TIMESTAMPTZ NOT NULL,
+        next_attempt_at TIMESTAMPTZ,
         last_attempt_at TIMESTAMPTZ,
         sent_at TIMESTAMPTZ,
         provider_name TEXT,
@@ -120,6 +121,25 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
         lease_owner TEXT,
         lease_until TIMESTAMPTZ,
         created_at TIMESTAMPTZ NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS telegram_connect_sessions (
+        state TEXT PRIMARY KEY,
+        status TEXT NOT NULL CHECK (status IN ('pending', 'connected', 'expired')),
+        created_at TIMESTAMPTZ NOT NULL,
+        expires_at TIMESTAMPTZ NOT NULL,
+        connected_at TIMESTAMPTZ,
+        telegram_user_id TEXT,
+        telegram_chat_id TEXT,
+        telegram_username TEXT
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS app_runtime_settings (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL,
         updated_at TIMESTAMPTZ NOT NULL
     )
     """,
@@ -180,6 +200,10 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
     CREATE INDEX IF NOT EXISTS idx_notification_events_item_created
       ON notification_events(item_id, created_at DESC)
     """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_telegram_connect_sessions_status_expires
+      ON telegram_connect_sessions(status, expires_at)
+    """,
 )
 
 
@@ -221,6 +245,21 @@ class PostgresTrackingRepository:
                 with conn.transaction():
                     for statement in _SCHEMA_STATEMENTS:
                         conn.execute(statement)
+                    # Older deployments created notification_events.alert_event_id
+                    # as NOT NULL. Monitor-mode notifications don't have alert rows.
+                    conn.execute(
+                        """
+                        ALTER TABLE notification_events
+                        ALTER COLUMN alert_event_id DROP NOT NULL
+                        """
+                    )
+                    # Sent/dead notifications should clear their retry schedule.
+                    conn.execute(
+                        """
+                        ALTER TABLE notification_events
+                        ALTER COLUMN next_attempt_at DROP NOT NULL
+                        """
+                    )
 
     def close(self) -> None:
         """Close pooled connections (useful in tests/shutdown hooks)."""
@@ -897,6 +936,28 @@ class PostgresTrackingRepository:
                 (status, _parse_timestamp(finished_at), error, run_id),
             )
 
+    def abandon_check_run(
+        self,
+        *,
+        run_id: str,
+        finished_at: str,
+        error: str,
+    ) -> None:
+        with self._pool.connection() as conn:
+            conn.execute(
+                """
+                UPDATE tracking_check_runs
+                SET status = 'failed',
+                    finished_at = %s,
+                    error = %s,
+                    job_key = NULL
+                WHERE run_id = %s
+                  AND status = 'running'
+                  AND finished_at IS NULL
+                """,
+                (_parse_timestamp(finished_at), error, run_id),
+            )
+
     def list_check_runs(self, item_id: str, limit: int) -> list[TrackingCheckRun]:
         with self._pool.connection() as conn:
             rows = conn.execute(
@@ -954,6 +1015,142 @@ class PostgresTrackingRepository:
                 """,
                 (idempotency_key, request_hash, item_id, now_dt, now_dt),
             )
+
+    def create_telegram_connect_session(self, session: TelegramConnectSession) -> TelegramConnectSession:
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                """
+                INSERT INTO telegram_connect_sessions (
+                    state,
+                    status,
+                    created_at,
+                    expires_at,
+                    connected_at,
+                    telegram_user_id,
+                    telegram_chat_id,
+                    telegram_username
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT(state) DO UPDATE SET
+                    status = EXCLUDED.status,
+                    created_at = EXCLUDED.created_at,
+                    expires_at = EXCLUDED.expires_at,
+                    connected_at = EXCLUDED.connected_at,
+                    telegram_user_id = EXCLUDED.telegram_user_id,
+                    telegram_chat_id = EXCLUDED.telegram_chat_id,
+                    telegram_username = EXCLUDED.telegram_username
+                RETURNING *
+                """,
+                (
+                    session.state,
+                    session.status,
+                    _parse_timestamp(session.created_at),
+                    _parse_timestamp(session.expires_at),
+                    _parse_timestamp(session.connected_at),
+                    session.telegram_user_id,
+                    session.telegram_chat_id,
+                    session.telegram_username,
+                ),
+            ).fetchone()
+        if row is None:  # pragma: no cover - defensive guard
+            raise RuntimeError("Failed to persist telegram connect session")
+        return self._row_to_telegram_connect_session(row)
+
+    def get_telegram_connect_session(self, state: str) -> TelegramConnectSession | None:
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                """
+                SELECT *
+                FROM telegram_connect_sessions
+                WHERE state = %s
+                """,
+                (state,),
+            ).fetchone()
+        if row is None:
+            return None
+        return self._row_to_telegram_connect_session(row)
+
+    def mark_telegram_connect_session_connected(
+        self,
+        *,
+        state: str,
+        connected_at: str,
+        telegram_user_id: str,
+        telegram_chat_id: str,
+        telegram_username: str | None,
+    ) -> TelegramConnectSession | None:
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                """
+                UPDATE telegram_connect_sessions
+                SET status = 'connected',
+                    connected_at = %s,
+                    telegram_user_id = %s,
+                    telegram_chat_id = %s,
+                    telegram_username = %s
+                WHERE state = %s
+                RETURNING *
+                """,
+                (
+                    _parse_timestamp(connected_at),
+                    telegram_user_id,
+                    telegram_chat_id,
+                    telegram_username,
+                    state,
+                ),
+            ).fetchone()
+        if row is None:
+            return None
+        return self._row_to_telegram_connect_session(row)
+
+    def mark_telegram_connect_session_expired(self, *, state: str) -> TelegramConnectSession | None:
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                """
+                UPDATE telegram_connect_sessions
+                SET status = 'expired'
+                WHERE state = %s
+                  AND status = 'pending'
+                RETURNING *
+                """,
+                (state,),
+            ).fetchone()
+        if row is None:
+            return None
+        return self._row_to_telegram_connect_session(row)
+
+    def set_active_telegram_chat(
+        self,
+        *,
+        chat_id: str,
+        updated_at: str,
+    ) -> None:
+        updated_at_dt = _parse_timestamp(updated_at)
+        with self._pool.connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO app_runtime_settings (key, value, updated_at)
+                VALUES (%s, %s, %s)
+                ON CONFLICT(key) DO UPDATE SET
+                    value = EXCLUDED.value,
+                    updated_at = EXCLUDED.updated_at
+                """,
+                ("active_telegram_chat_id", chat_id, updated_at_dt),
+            )
+
+    def get_active_telegram_chat(self) -> str | None:
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                """
+                SELECT value
+                FROM app_runtime_settings
+                WHERE key = %s
+                LIMIT 1
+                """,
+                ("active_telegram_chat_id",),
+            ).fetchone()
+        if row is None:
+            return None
+        return _as_str(row.get("value"))
 
     def _insert_snapshot(self, conn, snapshot: PriceSnapshot) -> None:
         conn.execute(
@@ -1117,7 +1314,7 @@ class PostgresTrackingRepository:
         return NotificationEvent(
             notification_id=str(row["notification_id"]),
             idempotency_key=str(row["idempotency_key"]),
-            alert_event_id=str(row["alert_event_id"]),
+            alert_event_id=_as_str(row.get("alert_event_id")),
             item_id=str(row["item_id"]),
             channel=str(row["channel"]),
             payload=str(row["payload"]),
@@ -1160,6 +1357,21 @@ class PostgresTrackingRepository:
             item_id=_as_str(row.get("item_id")),
             created_at=_format_timestamp(row.get("created_at")),
             updated_at=_format_timestamp(row.get("updated_at")),
+        )
+
+    @staticmethod
+    def _row_to_telegram_connect_session(
+        row: dict[str, object],
+    ) -> TelegramConnectSession:
+        return TelegramConnectSession(
+            state=str(row["state"]),
+            status=str(row["status"]),
+            created_at=_format_timestamp(row.get("created_at")),
+            expires_at=_format_timestamp(row.get("expires_at")),
+            connected_at=_format_timestamp(row.get("connected_at")),
+            telegram_user_id=_as_str(row.get("telegram_user_id")),
+            telegram_chat_id=_as_str(row.get("telegram_chat_id")),
+            telegram_username=_as_str(row.get("telegram_username")),
         )
 
 

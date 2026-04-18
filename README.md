@@ -718,3 +718,56 @@ High-level relationships:
 Additional docs:
 - Architecture notes: `docs/backend-architecture-delivery.md`
 - Postgres migration runbook: `docs/postgres-migration-runbook.md`
+
+## Telegram Integration (New)
+
+This project now includes a Telegram connect flow and Telegram delivery channel.
+
+### New endpoints
+
+- `POST /api/v1/integrations/telegram/connect`
+  - creates a short-lived connect session
+  - returns `deep_link_url` like `https://t.me/<bot>?start=<state>`
+- `POST /api/v1/integrations/telegram/setup-webhook`
+  - configures Telegram webhook via backend using `TELEGRAM_BOT_TOKEN`
+  - input: `{ "public_base_url": "https://your-domain" }`
+- `GET /api/v1/integrations/telegram/connect/{state}`
+  - poll connection status (`pending`, `connected`, `expired`)
+- `GET /api/v1/integrations/telegram/status`
+  - returns currently active Telegram chat status used by notifier
+- `POST /api/v1/integrations/telegram/webhook`
+  - Telegram webhook receiver
+  - validates `X-Telegram-Bot-Api-Secret-Token` when `TELEGRAM_WEBHOOK_SECRET` is configured
+
+### End-to-end setup steps
+
+1. Create a bot with `@BotFather`.
+2. Save bot credentials in `.env`:
+   - `TELEGRAM_BOT_TOKEN`
+   - `TELEGRAM_BOT_USERNAME` (without `@`)
+   - optional: `TELEGRAM_WEBHOOK_SECRET`
+   - optional: `AFFILIATE_LINK_TEMPLATE`
+     - empty: send direct product URL
+     - contains `{url}`: uses encoded product URL replacement
+     - otherwise appends `?url=<encoded>` (or `&url=`) to the template base URL
+3. Expose your backend publicly (HTTPS) and set webhook through your API:
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/v1/integrations/telegram/setup-webhook \
+  -H "Content-Type: application/json" \
+  -d '{"public_base_url":"https://<your-domain>"}'
+```
+
+4. In UI, call `POST /api/v1/integrations/telegram/connect` and open `deep_link_url`.
+5. User taps Start in Telegram bot chat (`/start <state>`).
+6. Webhook processes update and marks session `connected`; active chat is stored.
+7. Scheduler emits notification events with channel `telegram` when active chat exists.
+8. Notifier sends via Telegram Bot API (`sendMessage`).
+
+### Worker behavior with Telegram
+
+- Scheduler uses `telegram` channel only when an active chat is connected.
+- Otherwise it falls back to `log` channel.
+- Notifier routes by channel:
+  - `telegram` -> Telegram Bot API
+  - other channels -> log sender

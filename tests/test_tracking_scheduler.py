@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -103,6 +104,7 @@ class _InMemoryTrackingRepository:
     alerts_by_idempotency_key: dict[str, str]
     notifications_by_id: dict[str, NotificationEvent]
     notifications_by_idempotency_key: dict[str, str]
+    active_telegram_chat_id: str | None
 
     def initialize(self) -> None:
         return None
@@ -370,6 +372,25 @@ class _InMemoryTrackingRepository:
             error=error,
         )
 
+    def abandon_check_run(
+        self,
+        *,
+        run_id: str,
+        finished_at: str,
+        error: str,
+    ) -> None:
+        run = self.runs_by_id.get(run_id)
+        if run is None:
+            return
+        self.runs_by_job_key.pop(run.job_key or "", None)
+        self.runs_by_id[run_id] = replace(
+            run,
+            status="failed",
+            finished_at=finished_at,
+            error=error,
+            job_key=None,
+        )
+
     def list_check_runs(self, item_id: str, limit: int) -> list[TrackingCheckRun]:
         rows = [run for run in self.runs_by_id.values() if run.item_id == item_id]
         rows.sort(key=lambda run: run.started_at, reverse=True)
@@ -398,6 +419,24 @@ class _InMemoryTrackingRepository:
             created_at=created_at,
             updated_at=now,
         )
+
+    def create_telegram_connect_session(self, session):  # pragma: no cover - not used in these tests
+        return session
+
+    def get_telegram_connect_session(self, state: str):  # pragma: no cover - not used in these tests
+        return None
+
+    def mark_telegram_connect_session_connected(self, **kwargs):  # pragma: no cover - not used in these tests
+        return None
+
+    def mark_telegram_connect_session_expired(self, *, state: str):  # pragma: no cover - not used in these tests
+        return None
+
+    def set_active_telegram_chat(self, *, chat_id: str, updated_at: str) -> None:  # noqa: ARG002
+        self.active_telegram_chat_id = chat_id
+
+    def get_active_telegram_chat(self) -> str | None:
+        return self.active_telegram_chat_id
 
     def _upsert_snapshot(self, snapshot: PriceSnapshot) -> None:
         conflict_id = None
@@ -447,6 +486,7 @@ def _build_repo() -> _InMemoryTrackingRepository:
         alerts_by_idempotency_key={},
         notifications_by_id={},
         notifications_by_idempotency_key={},
+        active_telegram_chat_id=None,
     )
     return repo
 
@@ -832,6 +872,195 @@ def test_scheduler_emits_alert_event_on_price_below_crossing() -> None:
     assert len(notifications) == 1
     assert notifications[0].status == "queued"
     assert notifications[0].alert_event_id == events[0].event_id
+    payload = json.loads(notifications[0].payload)
+    assert payload["affiliate_url"] == item.source_url
+    assert payload["product_url"] == item.source_url
+
+
+def test_scheduler_includes_affiliate_template_link_in_notification_payload() -> None:
+    repo = _build_repo()
+    now = datetime.now(tz=UTC)
+    item = _item(
+        item_id="trk_affiliate",
+        url="https://example.com/product/123?ref=abc",
+        now=now,
+        next_check_at=_iso(now - timedelta(minutes=1)),
+        last_amount="200.00",
+        target_amount="100.00",
+    )
+    repo.save_item(item)
+    repo.set_active_telegram_chat(chat_id="12345", updated_at=_iso(now))
+
+    scrape_result = PriceResult(
+        url=item.source_url,
+        success=True,
+        amount="90.00",
+        currency="USD",
+        raw_text="$90.00",
+        source="test:affiliate",
+        site_key="generic",
+        adapter_key="generic",
+        canonical_url="https://example.com/product/123",
+        listings=[
+            PriceListing(
+                item_id="itm_aff",
+                amount="90.00",
+                currency="USD",
+                raw_text="$90.00",
+                source="test:affiliate",
+                listing_url="https://merchant.example.com/buy/123",
+            )
+        ],
+        listing_count=1,
+    )
+
+    scheduler = TrackingSchedulerService(
+        repository=repo,
+        scrape_runner=_FakeScrapeRunner({item.source_url: scrape_result}),
+        timeout_seconds=30,
+        claim_batch_size=50,
+        max_inflight=4,
+        lease_seconds=180,
+        jitter_percent=0,
+        lease_owner="scheduler-test",
+        alert_cooldown_minutes=60,
+        affiliate_link_template="https://go.example.com/out?u={url}",
+    )
+
+    outcome = scheduler.run_once()
+    assert outcome.success_count == 1
+
+    notifications = repo.list_notification_events(item.item_id, limit=10)
+    assert len(notifications) == 1
+    assert notifications[0].channel == "telegram"
+    payload = json.loads(notifications[0].payload)
+    assert payload["product_url"] == "https://example.com/product/123"
+    assert payload["listing_url"] == "https://merchant.example.com/buy/123"
+    assert payload["affiliate_url"] == "https://go.example.com/out?u=https%3A%2F%2Fexample.com%2Fproduct%2F123"
+
+def test_scheduler_monitor_mode_notifies_even_when_price_unchanged() -> None:
+    repo = _build_repo()
+    now = datetime.now(tz=UTC)
+    due_time = _iso(now - timedelta(minutes=1))
+    item = _item(
+        item_id="trk_monitor_notify",
+        url="https://example.com/monitor",
+        now=now,
+        next_check_at=due_time,
+        last_amount="95.00",
+        target_amount=None,  # monitor mode
+    )
+    repo.save_item(item)
+
+    scrape_result = PriceResult(
+        url=item.source_url,
+        success=True,
+        amount="95.00",
+        currency="USD",
+        raw_text="$95.00",
+        source="test:monitor",
+        site_key="generic",
+        adapter_key="generic",
+    )
+    scheduler = TrackingSchedulerService(
+        repository=repo,
+        scrape_runner=_FakeScrapeRunner({item.source_url: scrape_result}),
+        timeout_seconds=30,
+        claim_batch_size=50,
+        max_inflight=4,
+        lease_seconds=180,
+        jitter_percent=0,
+        lease_owner="scheduler-test",
+    )
+
+    first = scheduler.run_once()
+    assert first.success_count == 1
+    assert repo.list_alert_events(item.item_id, limit=10) == []
+
+    notifications = repo.list_notification_events(item.item_id, limit=10)
+    assert len(notifications) == 1
+    assert notifications[0].alert_event_id is None
+    first_payload = json.loads(notifications[0].payload)
+    assert first_payload["notification_type"] == "monitor"
+    assert first_payload["current_amount"] == "95.00"
+
+    # Re-run at a new schedule tick: unchanged price still creates a new
+    # monitor notification because the user explicitly selected monitor mode.
+    updated = repo.get_item(item.item_id)
+    assert updated is not None
+    repo.save_item(
+        replace(
+            updated,
+            next_check_at=_iso(now - timedelta(minutes=2)),
+            lease_owner=None,
+            lease_until=None,
+        )
+    )
+    second = scheduler.run_once()
+    assert second.success_count == 1
+
+    notifications = repo.list_notification_events(item.item_id, limit=10)
+    assert len(notifications) == 2
+
+def test_scheduler_reclaims_stale_running_duplicate_job() -> None:
+    repo = _build_repo()
+    now = datetime.now(tz=UTC)
+    scheduled_for = _iso(now - timedelta(minutes=1))
+    item = _item(
+        item_id="trk_stale_dupe",
+        url="https://example.com/stale-dupe",
+        now=now,
+        next_check_at=scheduled_for,
+        last_amount="100.00",
+    )
+    repo.save_item(item)
+
+    stale_run = TrackingCheckRun(
+        run_id="run_stale",
+        item_id=item.item_id,
+        scheduled_for=scheduled_for,
+        started_at=_iso(now - timedelta(hours=1)),
+        finished_at=None,
+        status="running",
+        attempt=1,
+        error=None,
+        job_key=f"{item.item_id}:{scheduled_for}",
+    )
+    repo.runs_by_id[stale_run.run_id] = stale_run
+    repo.runs_by_job_key[stale_run.job_key or ""] = stale_run.run_id
+
+    scrape_result = PriceResult(
+        url=item.source_url,
+        success=True,
+        amount="90.00",
+        currency="USD",
+        raw_text="$90.00",
+        source="test:stale-dupe",
+        site_key="generic",
+        adapter_key="generic",
+    )
+    scheduler = TrackingSchedulerService(
+        repository=repo,
+        scrape_runner=_FakeScrapeRunner({item.source_url: scrape_result}),
+        timeout_seconds=30,
+        claim_batch_size=50,
+        max_inflight=4,
+        lease_seconds=180,
+        jitter_percent=0,
+        lease_owner="scheduler-test",
+    )
+
+    outcome = scheduler.run_once()
+
+    assert outcome.claimed_count == 1
+    assert outcome.processed_count == 1
+    assert outcome.skipped_count == 0
+    assert outcome.success_count == 1
+
+    reclaimed = repo.runs_by_id["run_stale"]
+    assert reclaimed.status == "failed"
+    assert reclaimed.error == "stale_run_reclaimed"
+    assert reclaimed.job_key is None
 
 
 def test_scheduler_does_not_emit_alert_without_crossing() -> None:

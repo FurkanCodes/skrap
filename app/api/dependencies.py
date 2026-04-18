@@ -7,6 +7,7 @@ from fastapi import Depends
 from app.application.discovery_service import DiscoveryBatchService
 from app.application.scrape_result_cache import ScrapeResultCache
 from app.application.scrape_service import ScrapeBatchService
+from app.application.telegram_integration_service import TelegramIntegrationService
 from app.application.tracking_service import TrackingService
 from app.core.config import Settings, get_settings
 from app.infrastructure.postgres_tracking_repository import PostgresTrackingRepository
@@ -63,6 +64,21 @@ def get_scrape_result_cache(
 
 
 @lru_cache
+def _get_tracking_repository_cached(
+    database_url: str,
+    db_pool_min_size: int,
+    db_pool_max_size: int,
+) -> PostgresTrackingRepository:
+    repository = PostgresTrackingRepository(
+        database_url=database_url,
+        min_pool_size=db_pool_min_size,
+        max_pool_size=db_pool_max_size,
+    )
+    repository.initialize()
+    return repository
+
+
+@lru_cache
 def _get_tracking_service_cached(
     scrape_concurrency: int,
     database_url: str,
@@ -73,14 +89,11 @@ def _get_tracking_service_cached(
     max_interval_minutes: int,
     snapshot_default_limit: int,
 ) -> TrackingService:
-    # Keep one initialized repository/service per process config.
-    # This avoids reopening database pools on every request.
-    repository = PostgresTrackingRepository(
+    repository = _get_tracking_repository_cached(
         database_url=database_url,
-        min_pool_size=db_pool_min_size,
-        max_pool_size=db_pool_max_size,
+        db_pool_min_size=db_pool_min_size,
+        db_pool_max_size=db_pool_max_size,
     )
-    repository.initialize()
 
     scrape_service = _get_scrape_service_cached(scrape_concurrency)
     return TrackingService(
@@ -90,6 +103,28 @@ def _get_tracking_service_cached(
         min_interval_minutes=min_interval_minutes,
         max_interval_minutes=max_interval_minutes,
         default_snapshot_limit=snapshot_default_limit,
+    )
+
+
+@lru_cache
+def _get_telegram_integration_service_cached(
+    database_url: str,
+    db_pool_min_size: int,
+    db_pool_max_size: int,
+    bot_token: str,
+    bot_username: str,
+    connect_ttl_minutes: int,
+) -> TelegramIntegrationService:
+    repository = _get_tracking_repository_cached(
+        database_url=database_url,
+        db_pool_min_size=db_pool_min_size,
+        db_pool_max_size=db_pool_max_size,
+    )
+    return TelegramIntegrationService(
+        repository=repository,
+        bot_token=bot_token,
+        bot_username=bot_username,
+        connect_ttl_minutes=connect_ttl_minutes,
     )
 
 
@@ -105,4 +140,17 @@ def get_tracking_service(
         min_interval_minutes=settings.tracking_interval_min_minutes,
         max_interval_minutes=settings.tracking_interval_max_minutes,
         snapshot_default_limit=settings.tracking_snapshot_default_limit,
+    )
+
+
+def get_telegram_integration_service(
+    settings: Settings = Depends(get_app_settings),
+) -> TelegramIntegrationService:
+    return _get_telegram_integration_service_cached(
+        database_url=settings.tracking_database_url,
+        db_pool_min_size=settings.tracking_db_pool_min_size,
+        db_pool_max_size=settings.tracking_db_pool_max_size,
+        bot_token=settings.telegram_bot_token,
+        bot_username=settings.telegram_bot_username,
+        connect_ttl_minutes=settings.telegram_connect_ttl_minutes,
     )

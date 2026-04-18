@@ -7,6 +7,7 @@ from app.tracking.domain import (
     NotificationEvent,
     NotificationEventStatus,
     PriceSnapshot,
+    TelegramConnectSession,
     TrackingBootstrapIdempotencyRecord,
     TrackedItem,
     TrackingCheckRun,
@@ -126,6 +127,15 @@ class TrackingRepository(Protocol):
     ) -> None:
         ...
 
+    def abandon_check_run(
+        self,
+        *,
+        run_id: str,
+        finished_at: str,
+        error: str,
+    ) -> None:
+        ...
+
     def list_check_runs(self, item_id: str, limit: int) -> list[TrackingCheckRun]:
         ...
 
@@ -143,4 +153,35 @@ class TrackingRepository(Protocol):
         item_id: str,
         now: str,
     ) -> None:
+        ...
+
+    def create_telegram_connect_session(self, session: TelegramConnectSession) -> TelegramConnectSession:
+        ...
+
+    def get_telegram_connect_session(self, state: str) -> TelegramConnectSession | None:
+        ...
+
+    def mark_telegram_connect_session_connected(
+        self,
+        *,
+        state: str,
+        connected_at: str,
+        telegram_user_id: str,
+        telegram_chat_id: str,
+        telegram_username: str | None,
+    ) -> TelegramConnectSession | None:
+        ...
+
+    def mark_telegram_connect_session_expired(self, *, state: str) -> TelegramConnectSession | None:
+        ...
+
+    def set_active_telegram_chat(
+        self,
+        *,
+        chat_id: str,
+        updated_at: str,
+    ) -> None:
+        ...
+
+    def get_active_telegram_chat(self) -> str | None:
         ...

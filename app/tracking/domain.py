@@ -8,6 +8,7 @@ TrackingMode = Literal["monitor", "alert"]
 TrackingCheckRunStatus = Literal["running", "succeeded", "failed"]
 AlertRuleType = Literal["price_below"]
 NotificationEventStatus = Literal["queued", "sending", "sent", "failed", "dead"]
+TelegramConnectSessionStatus = Literal["pending", "connected", "expired"]
 
 
 def derive_tracking_mode(target_amount: str | None) -> TrackingMode:
@@ -124,7 +125,7 @@ class NotificationEvent:
 
     notification_id: str
     idempotency_key: str
-    alert_event_id: str
+    alert_event_id: str | None
     item_id: str
     channel: str
     payload: str
@@ -141,3 +142,17 @@ class NotificationEvent:
     lease_until: str | None
     created_at: str
     updated_at: str
+
+
+@dataclass(frozen=True)
+class TelegramConnectSession:
+    """Short-lived Telegram connection handshake state."""
+
+    state: str
+    status: TelegramConnectSessionStatus
+    created_at: str
+    expires_at: str
+    connected_at: str | None
+    telegram_user_id: str | None
+    telegram_chat_id: str | None
+    telegram_username: str | None
