@@ -189,7 +189,7 @@ class TrackingService:
             created_at=created_at,
             updated_at=checked_at,
             last_checked_at=checked_at,
-            next_check_at=_add_minutes_iso(checked_at, interval),
+            next_check_at=_add_interval_iso(checked_at, interval),
             lease_owner=None,
             lease_until=None,
             last_check_started_at=None,
@@ -275,7 +275,7 @@ class TrackingService:
             target_amount=target_amount,
             updated_at=updated_at,
             next_check_at=(
-                _add_minutes_iso(updated_at, interval)
+                _add_interval_iso(updated_at, interval)
                 if (payload.check_interval_minutes is not None or current.next_check_at is None)
                 else current.next_check_at
             ),
@@ -422,9 +422,11 @@ def _normalize_target_amount(value: str | None) -> str | None:
     normalized = value.strip()
     return normalized or None
 
-def _add_minutes_iso(timestamp: str, minutes: int) -> str:
+def _add_interval_iso(timestamp: str, interval_value: int) -> str:
     dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
-    return (dt + timedelta(minutes=minutes)).isoformat().replace("+00:00", "Z")
+    if interval_value < 60:
+        return (dt + timedelta(seconds=interval_value)).isoformat().replace("+00:00", "Z")
+    return (dt + timedelta(minutes=interval_value)).isoformat().replace("+00:00", "Z")
 
 
 def _build_bootstrap_request_hash(payload: TrackingBootstrapInput) -> str:

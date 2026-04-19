@@ -675,17 +675,22 @@ def compute_next_check_at(
     base_time: str,
     interval_minutes: int,
     jitter_percent: int,
-    minimum_delay_seconds: int = 60,
+    minimum_delay_seconds: int = 1,
 ) -> str:
     """Compute next check time with bounded jitter to flatten bursty schedules."""
     base_dt = datetime.fromisoformat(base_time.replace("Z", "+00:00"))
-    interval_seconds = max(60, interval_minutes * 60)
+    interval_seconds = max(1, _interval_value_to_seconds(interval_minutes))
     jitter_ratio = max(0.0, float(jitter_percent) / 100.0)
     max_jitter_seconds = interval_seconds * jitter_ratio
     jitter_seconds = random.uniform(-max_jitter_seconds, max_jitter_seconds)
     delay_seconds = max(float(minimum_delay_seconds), interval_seconds + jitter_seconds)
     next_dt = base_dt + timedelta(seconds=delay_seconds)
     return _to_iso(next_dt)
+
+def _interval_value_to_seconds(interval_value: int) -> int:
+    if interval_value < 60:
+        return max(1, interval_value)
+    return max(60, interval_value * 60)
 
 
 def _new_snapshot_id() -> str:

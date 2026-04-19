@@ -117,7 +117,7 @@ def get_settings() -> Settings:
         tracking_interval_default_minutes=_parse_int_env(
             "TRACKING_INTERVAL_DEFAULT_MINUTES", 60
         ),
-        tracking_interval_min_minutes=_parse_int_env("TRACKING_INTERVAL_MIN_MINUTES", 5),
+        tracking_interval_min_minutes=_parse_int_env("TRACKING_INTERVAL_MIN_MINUTES", 1),
         tracking_interval_max_minutes=_parse_int_env(
             "TRACKING_INTERVAL_MAX_MINUTES", 10080
         ),

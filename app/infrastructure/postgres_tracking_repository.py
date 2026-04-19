@@ -481,8 +481,13 @@ class PostgresTrackingRepository:
                     overage_policy,
                     created_at,
                     updated_at
-                ) VALUES (%s, 'free', 5, 360, 1500, 'telegram', 'deny', %s, %s)
-                ON CONFLICT(user_id) DO NOTHING
+                ) VALUES (%s, 'free', 5, 1, 1500, 'telegram', 'deny', %s, %s)
+                ON CONFLICT(user_id) DO UPDATE
+                SET min_check_interval_minutes = LEAST(
+                        entitlements.min_check_interval_minutes,
+                        EXCLUDED.min_check_interval_minutes
+                    ),
+                    updated_at = EXCLUDED.updated_at
                 """,
                 (user_id, now_dt, now_dt),
             )

@@ -263,7 +263,7 @@ class _DevUserService:
                 user_id=principal.subject,
                 plan_key="free",
                 max_active_trackers=1_000_000,
-                min_check_interval_minutes=5,
+                min_check_interval_minutes=1,
                 monthly_check_units=1_000_000,
                 allowed_channels="telegram,log",
                 overage_policy="block",

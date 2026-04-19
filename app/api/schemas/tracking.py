@@ -11,7 +11,7 @@ class TrackedItemBootstrapRequest(BaseModel):
     sites: list[str] | None = None
     timeout_seconds: int | None = Field(default=None, ge=1)
     fetch_mode: Literal["auto", "http", "dynamic", "stealth"] = "auto"
-    check_interval_minutes: int = Field(default=60, ge=5, le=10080)
+    check_interval_minutes: int = Field(default=60, ge=1, le=10080)
     target_amount: str | None = None
 
     @model_validator(mode="after")
@@ -23,7 +23,7 @@ class TrackedItemBootstrapRequest(BaseModel):
 
 class TrackedItemUpdateRequest(BaseModel):
     status: Literal["active", "paused"] | None = None
-    check_interval_minutes: int | None = Field(default=None, ge=5, le=10080)
+    check_interval_minutes: int | None = Field(default=None, ge=1, le=10080)
     target_amount: str | None = None
 
 
