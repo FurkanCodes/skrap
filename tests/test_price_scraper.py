@@ -5,7 +5,7 @@ from decimal import Decimal
 import pytest
 from scrapling.parser import Selector
 
-from app.scraper.adapters import AkakceAdapter
+from app.scraper.adapters import AkakceAdapter, N11Adapter
 from app.scraper.domain import PriceCandidate
 from app.scraper.extractors.generic import extract_price_listings_from_selector
 from app.scraper.fetching import auto_followup_modes, detect_auto_escalation_signals
@@ -274,6 +274,106 @@ def test_akakce_adapter_parses_decimals_and_seller_fallbacks() -> None:
     assert listings[2].seller == "MediaMarkt"
 
 
+def test_n11_adapter_prefers_requested_seller_from_initial_state() -> None:
+    page = Selector(
+        """
+        <html>
+          <head>
+            <script>
+              window.__INITIAL_STATE__ = {
+                "unifiedProductList": [
+                  {
+                    "price": "310,00 TL",
+                    "sellerNickName": "seller-a",
+                    "url": "https://m.n11.com/urun/example?magaza=seller-a&renk=siyah"
+                  },
+                  {
+                    "price": "309,00 TL",
+                    "sellerNickName": "seller-b",
+                    "url": "https://m.n11.com/urun/example?magaza=seller-b&renk=siyah"
+                  }
+                ]
+              };
+            </script>
+          </head>
+          <body></body>
+        </html>
+        """
+    )
+
+    listings = N11Adapter().extract(page, "https://www.n11.com/urun/example?magaza=seller-b&renk=siyah")
+
+    assert len(listings) == 2
+    assert str(listings[0].amount) == "309.00"
+    assert listings[0].currency == "TRY"
+    assert listings[0].seller == "seller-b"
+    assert listings[0].source == "n11:initial-state"
+
+
+def test_n11_adapter_falls_back_to_dom_rows() -> None:
+    page = Selector(
+        """
+        <html>
+          <body>
+            <div class="unifiedProduct">
+              <a href="/urun/example?magaza=seller-a&renk=siyah">
+                <div class="title"><span class="name">Seller A</span></div>
+                <div class="priceDisplay">310,00 TL</div>
+              </a>
+            </div>
+            <div class="unifiedProduct">
+              <a href="/urun/example?magaza=seller-b&renk=siyah">
+                <div class="title"><span class="name">Seller B</span></div>
+                <div class="priceDisplay">309,00 TL</div>
+              </a>
+            </div>
+          </body>
+        </html>
+        """
+    )
+
+    listings = N11Adapter().extract(page, "https://www.n11.com/urun/example?magaza=seller-b&renk=siyah")
+
+    assert len(listings) == 2
+    assert str(listings[0].amount) == "309.00"
+    assert listings[0].seller == "Seller B"
+    assert listings[0].source == "n11:dom"
+
+
+def test_n11_adapter_prefers_selected_offer_metadata() -> None:
+    page = Selector(
+        """
+        <html>
+          <body>
+            <div class="sellerInfo">
+              <div class="sellerNameWrapper"><a>n11</a></div>
+            </div>
+            <div class="unifiedProduct">
+              <a href="/urun/example?magaza=seller-a&renk=siyah">
+                <div class="title"><span class="name">Seller A</span></div>
+                <div class="priceDisplay">310,00 TL</div>
+              </a>
+            </div>
+            <script>
+              window.__INITIAL_STATE__ = {
+                "productMeta": {
+                  "price": "309.00"
+                }
+              };
+            </script>
+          </body>
+        </html>
+        """
+    )
+
+    listings = N11Adapter().extract(page, "https://www.n11.com/urun/example?magaza=n11&renk=siyah")
+
+    assert len(listings) >= 1
+    assert str(listings[0].amount) == "309.00"
+    assert listings[0].seller == "n11"
+    assert listings[0].source == "n11:selected-meta"
+
+
 def test_parse_sites_blob() -> None:
     assert parse_sites_blob("akakce,newegg") == {"akakce", "newegg"}
     assert parse_sites_blob("all") == set()
@@ -300,6 +400,7 @@ def test_parse_sites_blob_invalid_key() -> None:
 def test_detect_site_key() -> None:
     assert detect_site_key("https://www.akakce.com/ssd/a") == "akakce"
     assert detect_site_key("https://newegg.com/p/pl?d=4070") == "newegg"
+    assert detect_site_key("https://www.n11.com/urun/iphone-17") == "n11"
     assert detect_site_key("https://example.com/product") == "generic"
 
 
@@ -418,3 +519,211 @@ def test_extract_price_from_page_includes_metadata_fields() -> None:
     assert result.image_url == "https://cdn.example.com/product.png"
     assert result.canonical_url == "https://example.com/products/p1"
     assert result.extracted_at is not None
+
+
+def test_extract_product_metadata_prefers_embedded_product_state_over_site_org() -> None:
+    source_url = "https://www.n11.com/urun/example-phone?magaza=n11&renk=siyah"
+    page = Selector(
+        """
+        <html>
+          <head>
+            <script type="application/ld+json">
+              {
+                "@context": "https://schema.org",
+                "@type": "Organization",
+                "name": "n11.com",
+                "url": "https://www.n11.com/",
+                "logo": "https://n11scdn.example/logo.png"
+              }
+            </script>
+            <script>
+              window.__INITIAL_STATE__ = {
+                "productMeta": {
+                  "brand": "Apple",
+                  "skuId": "123456"
+                },
+                "catalogProductInfo": {
+                  "title": "Apple iPhone 17 256 GB",
+                  "imageUrl": "/images/product-main.png"
+                },
+                "jsonLDProduct": {
+                  "name": "Apple iPhone 17 256 GB Fiyatlari ve Ozellikleri",
+                  "brand": "Apple",
+                  "gtin8": "0195950643541"
+                }
+              };
+            </script>
+          </head>
+          <body></body>
+        </html>
+        """
+    )
+
+    metadata = extract_product_metadata(page, source_url)
+
+    assert metadata["product_name"] == "Apple iPhone 17 256 GB Fiyatlari ve Ozellikleri"
+    assert metadata["image_url"] == "https://www.n11.com/images/product-main.png"
+    assert metadata["brand"] == "Apple"
+    assert metadata["sku"] == "123456"
+    assert metadata["gtin"] == "0195950643541"
+    assert metadata["canonical_url"] == source_url
+
+
+def test_extract_product_metadata_prefers_n11_gallery_image() -> None:
+    source_url = "https://www.n11.com/urun/example-phone?magaza=n11&renk=siyah"
+    page = Selector(
+        """
+        <html>
+          <head>
+            <script>
+              window.__INITIAL_STATE__ = {
+                "jsonLDProduct": {
+                  "name": "Example Product",
+                  "image": "https://n11scdn2-im.akamaized.net/a1/640/11/22/33/44/example.jpg"
+                }
+              };
+            </script>
+          </head>
+          <body>
+            <div class="desktop-slider">
+              <div class="img-wrapper-onBoard">
+                <img class="active" src="https://n11scdn.akamaized.net/a1/375_535/09/19/62/43/IMG-4331282096654046141.jpg" />
+                <img src="https://n11scdn.akamaized.net/a1/375_535/03/13/58/99/IMG-8460333519124174689.png" />
+              </div>
+            </div>
+          </body>
+        </html>
+        """
+    )
+
+    metadata = extract_product_metadata(page, source_url)
+
+    assert (
+        metadata["image_url"]
+        == "https://n11scdn.akamaized.net/a1/375_535/09/19/62/43/IMG-4331282096654046141.jpg"
+    )
+
+
+def test_extract_product_metadata_upgrades_active_n11_thumbnail_to_high_res() -> None:
+    source_url = "https://www.n11.com/urun/example-phone?magaza=n11&renk=siyah"
+    page = Selector(
+        """
+        <html>
+          <head>
+            <script>
+              window.__INITIAL_STATE__ = {
+                "jsonLDProduct": {
+                  "name": "Example Product",
+                  "image": "https://n11scdn2-im.akamaized.net/a1/640/11/22/33/44/example.jpg"
+                }
+              };
+            </script>
+          </head>
+          <body>
+            <div class="desktop-slider">
+              <div class="img-wrapper-onBoard">
+                <img class="active" src="https://n11scdn.akamaized.net/a1/60_86/09/19/62/43/IMG-4331282096654046141.jpg" />
+              </div>
+            </div>
+          </body>
+        </html>
+        """
+    )
+
+    metadata = extract_product_metadata(page, source_url)
+
+    assert (
+        metadata["image_url"]
+        == "https://n11scdn.akamaized.net/a1/375_535/09/19/62/43/IMG-4331282096654046141.jpg"
+    )
+
+
+def test_extract_price_from_page_prefers_listing_matching_requested_url() -> None:
+    page = Selector(
+        """
+        <html>
+          <head>
+            <script type='application/ld+json'>
+              {
+                "@context": "https://schema.org",
+                "@type": "Product",
+                "name": "Widget",
+                "offers": {
+                  "@type": "AggregateOffer",
+                  "offers": [
+                    {
+                      "@type": "Offer",
+                      "priceCurrency": "USD",
+                      "price": "310.00",
+                      "url": "https://shop.example.com/buy/other-seller",
+                      "seller": {"@type": "Organization", "name": "Other Seller"}
+                    },
+                    {
+                      "@type": "Offer",
+                      "priceCurrency": "USD",
+                      "price": "309.00",
+                      "url": "https://shop.example.com/products/widget",
+                      "seller": {"@type": "Organization", "name": "Direct Seller"}
+                    }
+                  ]
+                }
+              }
+            </script>
+          </head>
+          <body></body>
+        </html>
+        """
+    )
+
+    result = extract_price_from_page(page, "https://shop.example.com/products/widget?utm_source=newsletter")
+
+    assert result.success is True
+    assert result.amount == "309.00"
+    assert result.listings[0].amount == "309.00"
+    assert result.listings[0].seller == "Direct Seller"
+
+
+def test_extract_price_from_page_prefers_listing_matching_canonical_url() -> None:
+    page = Selector(
+        """
+        <html>
+          <head>
+            <link rel="canonical" href="https://shop.example.com/products/widget">
+            <script type='application/ld+json'>
+              {
+                "@context": "https://schema.org",
+                "@type": "Product",
+                "name": "Widget",
+                "offers": {
+                  "@type": "AggregateOffer",
+                  "offers": [
+                    {
+                      "@type": "Offer",
+                      "priceCurrency": "USD",
+                      "price": "310.00",
+                      "url": "https://shop.example.com/buy/other-seller",
+                      "seller": {"@type": "Organization", "name": "Other Seller"}
+                    },
+                    {
+                      "@type": "Offer",
+                      "priceCurrency": "USD",
+                      "price": "309.00",
+                      "url": "https://shop.example.com/products/widget",
+                      "seller": {"@type": "Organization", "name": "Direct Seller"}
+                    }
+                  ]
+                }
+              }
+            </script>
+          </head>
+          <body></body>
+        </html>
+        """
+    )
+
+    result = extract_price_from_page(page, "https://shop.example.com/p/widget")
+
+    assert result.success is True
+    assert result.amount == "309.00"
+    assert result.listings[0].amount == "309.00"
+    assert result.listings[0].seller == "Direct Seller"

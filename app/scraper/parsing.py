@@ -10,6 +10,11 @@ from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
 from .constants import CURRENCY_TOKEN_TO_CODE, PRICE_PATTERN
 from .domain import PriceCandidate
 
+_TRACKING_QUERY_PARAM_PATTERN = re.compile(
+    r"^(utm_|fbclid$|gclid$|yclid$|ref$|tag$|aff$|affiliate$|mc_cid$|mc_eid$)",
+    re.IGNORECASE,
+)
+
 
 def normalize_currency(token: str | None) -> str | None:
     """Normalize symbol/code variants to canonical ISO-like codes."""
@@ -98,17 +103,13 @@ def scan_prices_in_text(text: str, source: str, require_currency: bool) -> list[
     return candidates
 
 
-def strip_tracking_query_params(url: str) -> str:
-    """Normalize URL and remove tracking parameters for stable ID generation."""
+def normalize_url(url: str, *, keep_fragment: bool = False) -> str:
+    """Normalize URL for stable matching across scraping and tracking flows."""
     parsed = urlparse(url)
     filtered_query = [
         (key, value)
         for key, value in parse_qsl(parsed.query, keep_blank_values=True)
-        if not re.match(
-            r"^(utm_|fbclid$|gclid$|yclid$|ref$|tag$|aff$|affiliate$|mc_cid$|mc_eid$)",
-            key,
-            re.IGNORECASE,
-        )
+        if not _TRACKING_QUERY_PARAM_PATTERN.match(key)
     ]
     normalized_query = urlencode(sorted(filtered_query), doseq=True)
     normalized_path = parsed.path or "/"
@@ -122,9 +123,14 @@ def strip_tracking_query_params(url: str) -> str:
             normalized_path,
             "",
             normalized_query,
-            "",
+            parsed.fragment if keep_fragment else "",
         )
     )
+
+
+def strip_tracking_query_params(url: str) -> str:
+    """Normalize URL and remove tracking parameters for stable ID generation."""
+    return normalize_url(url, keep_fragment=False)
 
 
 def make_product_id(url: str) -> str:

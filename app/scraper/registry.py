@@ -4,23 +4,26 @@ from __future__ import annotations
 
 from urllib.parse import urlparse
 
-from .adapters import AkakceAdapter, GenericAdapter, NeweggAdapter, SiteAdapter
+from .adapters import AkakceAdapter, GenericAdapter, N11Adapter, NeweggAdapter, SiteAdapter
 
 SUPPORTED_SITES: dict[str, str] = {
     "generic": "Generic extractor (fallback for any site)",
     "akakce": "Akakce adapter",
     "newegg": "Newegg adapter",
+    "n11": "n11 adapter",
 }
 
 SITE_DOMAIN_SUFFIXES: dict[str, tuple[str, ...]] = {
     "akakce": ("akakce.com",),
     "newegg": ("newegg.com",),
+    "n11": ("n11.com",),
 }
 
 ADAPTERS: dict[str, SiteAdapter] = {
     "generic": GenericAdapter(),
     "akakce": AkakceAdapter(),
     "newegg": NeweggAdapter(),
+    "n11": N11Adapter(),
 }
 
 

@@ -12,18 +12,56 @@ This module is the application-facing entry point for scraping. It coordinates:
 from collections.abc import Iterable
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import urljoin
 
 from .constants import SUPPORTED_FETCH_MODES
 from .domain import PriceListing, PriceResult
 from .fetching import auto_followup_modes, detect_auto_escalation_signals, fetch_page_with_mode
 from .inputs import parse_fetch_mode
 from .metadata import extract_product_metadata
-from .parsing import make_item_id, make_product_id
+from .parsing import make_item_id, make_product_id, normalize_url
 from .registry import ADAPTERS, detect_site_key, list_supported_sites
 
 
 def _utc_now_iso() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
+
+
+def _resolve_primary_listings(
+    listings: list[PriceListing],
+    *,
+    source_url: str,
+    canonical_url: str | None,
+) -> list[PriceListing]:
+    """Promote the listing that matches the requested product URL.
+
+    This keeps the user-facing `amount` aligned with the URL they actually
+    submitted when pages also expose alternate merchant offers.
+    """
+    if len(listings) < 2:
+        return listings
+
+    requested_refs = {
+        normalize_url(candidate, keep_fragment=True)
+        for candidate in (source_url, canonical_url)
+        if candidate
+    }
+    if not requested_refs:
+        return listings
+
+    for index, listing in enumerate(listings):
+        raw_listing_url = (listing.listing_url or "").strip()
+        if not raw_listing_url:
+            continue
+
+        absolute_listing_url = urljoin(source_url, raw_listing_url)
+        if normalize_url(absolute_listing_url, keep_fragment=True) not in requested_refs:
+            continue
+        if index == 0:
+            return listings
+        return [listing, *listings[:index], *listings[index + 1 :]]
+
+    return listings
 
 
 def fetch_price(
@@ -200,6 +238,11 @@ def extract_price_from_page(
         )
         for index, candidate in enumerate(candidates, 1)
     ]
+    listings = _resolve_primary_listings(
+        listings,
+        source_url=url,
+        canonical_url=metadata["canonical_url"],
+    )
     first = listings[0]
     return PriceResult(
         url=url,
