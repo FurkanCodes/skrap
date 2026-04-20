@@ -26,6 +26,7 @@ class MeUsageOutput:
     monthly_check_units: int
     consumed_check_units: int
     remaining_check_units: int
+    updated_at: str
 
 
 class UserService:
@@ -46,15 +47,23 @@ class UserService:
         self._repository.ensure_default_user_entitlement(user_id=user.user_id, now=now)
         return user
 
+    def resolve_or_provision_user(self, principal: AuthPrincipal) -> AppUser:
+        user = self._repository.get_app_user_by_auth_subject(
+            auth_provider=principal.provider,
+            auth_subject=principal.subject,
+        )
+        if user is not None:
+            return user
+        return self.provision_from_principal(principal)
+
     def get_me(self, principal: AuthPrincipal) -> MeOutput:
         now = _utcnow_iso()
-        user = self.provision_from_principal(principal)
-        entitlement = self._repository.get_user_entitlement(user_id=user.user_id)
-        if entitlement is None:
-            self._repository.ensure_default_user_entitlement(user_id=user.user_id, now=now)
-            entitlement = self._repository.get_user_entitlement(user_id=user.user_id)
-            if entitlement is None:  # pragma: no cover - defensive guard
-                raise RuntimeError("Failed to resolve default user entitlement")
+        user = self.resolve_or_provision_user(principal)
+        entitlement = _resolve_user_entitlement(
+            repository=self._repository,
+            user_id=user.user_id,
+            now=now,
+        )
         usage = _resolve_me_usage(
             repository=self._repository,
             user_id=user.user_id,
@@ -62,6 +71,21 @@ class UserService:
             now=now,
         )
         return MeOutput(user=user, entitlement=entitlement, usage=usage)
+
+    def get_usage(self, principal: AuthPrincipal) -> MeUsageOutput:
+        now = _utcnow_iso()
+        user = self.resolve_or_provision_user(principal)
+        entitlement = _resolve_user_entitlement(
+            repository=self._repository,
+            user_id=user.user_id,
+            now=now,
+        )
+        return _resolve_me_usage(
+            repository=self._repository,
+            user_id=user.user_id,
+            monthly_check_units=entitlement.monthly_check_units,
+            now=now,
+        )
 
 
 def _utcnow_iso() -> str:
@@ -89,7 +113,25 @@ def _resolve_me_usage(
         monthly_check_units=monthly_check_units,
         consumed_check_units=consumed,
         remaining_check_units=remaining,
+        updated_at=current_counter.updated_at,
     )
+
+
+def _resolve_user_entitlement(
+    *,
+    repository: TrackingRepository,
+    user_id: str,
+    now: str,
+) -> UserEntitlement:
+    entitlement = repository.get_user_entitlement(user_id=user_id)
+    if entitlement is not None:
+        return entitlement
+
+    repository.ensure_default_user_entitlement(user_id=user_id, now=now)
+    entitlement = repository.get_user_entitlement(user_id=user_id)
+    if entitlement is None:  # pragma: no cover - defensive guard
+        raise RuntimeError("Failed to resolve default user entitlement")
+    return entitlement
 
 
 def _get_current_usage_counter(

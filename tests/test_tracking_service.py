@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 
 import pytest
 
@@ -155,6 +156,48 @@ def test_bootstrap_creates_item_and_snapshot() -> None:
     assert item.tracking_mode == "alert"
     assert item.alerts_enabled is True
     assert repository.list_snapshots(item.item_id, limit=10)
+
+
+def test_bootstrap_interval_under_sixty_is_treated_as_minutes() -> None:
+    service, _ = _build_service(_success_result("https://example.com/p/minutes"))
+
+    item = service.bootstrap(
+        TrackingBootstrapInput(
+            request_id="req_minutes",
+            url="https://example.com/p/minutes",
+            timeout_seconds=20,
+            selected_sites=None,
+            fetch_mode="auto",
+            check_interval_minutes=15,
+            target_amount=None,
+        )
+    )
+
+    assert item.next_check_at is not None
+    checked_dt = datetime.fromisoformat(item.last_checked_at.replace("Z", "+00:00"))
+    next_dt = datetime.fromisoformat(item.next_check_at.replace("Z", "+00:00"))
+    assert (next_dt - checked_dt).total_seconds() == 900
+
+
+def test_bootstrap_test_interval_schedules_fifteen_seconds() -> None:
+    service, _ = _build_service(_success_result("https://example.com/p/fifteen-seconds"))
+
+    item = service.bootstrap(
+        TrackingBootstrapInput(
+            request_id="req_fifteen_seconds",
+            url="https://example.com/p/fifteen-seconds",
+            timeout_seconds=20,
+            selected_sites=None,
+            fetch_mode="auto",
+            check_interval_minutes=10_079,
+            target_amount=None,
+        )
+    )
+
+    assert item.next_check_at is not None
+    checked_dt = datetime.fromisoformat(item.last_checked_at.replace("Z", "+00:00"))
+    next_dt = datetime.fromisoformat(item.next_check_at.replace("Z", "+00:00"))
+    assert (next_dt - checked_dt).total_seconds() == 15
 
 
 def test_bootstrap_without_target_starts_monitor_mode() -> None:

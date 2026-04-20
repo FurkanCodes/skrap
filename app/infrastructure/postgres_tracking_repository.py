@@ -57,7 +57,7 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
     )
     """,
     """
-    CREATE TABLE IF NOT EXISTS users (
+    CREATE TABLE IF NOT EXISTS app_users (
         user_id TEXT PRIMARY KEY,
         auth_provider TEXT NOT NULL,
         auth_subject TEXT NOT NULL,
@@ -69,17 +69,22 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
     )
     """,
     """
-    CREATE TABLE IF NOT EXISTS plans (
+    CREATE TABLE IF NOT EXISTS billing_plans (
         plan_key TEXT PRIMARY KEY,
         name TEXT NOT NULL,
+        max_active_trackers INTEGER NOT NULL CHECK (max_active_trackers >= 0),
+        min_check_interval_minutes INTEGER NOT NULL CHECK (min_check_interval_minutes >= 1),
+        monthly_check_units INTEGER NOT NULL CHECK (monthly_check_units >= 0),
+        allowed_channels TEXT NOT NULL,
+        overage_policy TEXT NOT NULL,
         created_at TIMESTAMPTZ NOT NULL,
         updated_at TIMESTAMPTZ NOT NULL
     )
     """,
     """
-    CREATE TABLE IF NOT EXISTS user_subscriptions (
+    CREATE TABLE IF NOT EXISTS billing_subscriptions (
         subscription_id TEXT PRIMARY KEY,
-        user_id TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+        user_id TEXT NOT NULL REFERENCES app_users(user_id) ON DELETE CASCADE,
         provider TEXT NOT NULL,
         provider_customer_id TEXT,
         provider_subscription_id TEXT,
@@ -92,9 +97,9 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
     )
     """,
     """
-    CREATE TABLE IF NOT EXISTS entitlements (
-        user_id TEXT PRIMARY KEY REFERENCES users(user_id) ON DELETE CASCADE,
-        plan_key TEXT NOT NULL REFERENCES plans(plan_key),
+    CREATE TABLE IF NOT EXISTS billing_entitlements (
+        user_id TEXT PRIMARY KEY REFERENCES app_users(user_id) ON DELETE CASCADE,
+        plan_key TEXT NOT NULL REFERENCES billing_plans(plan_key),
         max_active_trackers INTEGER NOT NULL CHECK (max_active_trackers >= 0),
         min_check_interval_minutes INTEGER NOT NULL CHECK (min_check_interval_minutes >= 1),
         monthly_check_units INTEGER NOT NULL CHECK (monthly_check_units >= 0),
@@ -105,9 +110,9 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
     )
     """,
     """
-    CREATE TABLE IF NOT EXISTS usage_counters (
+    CREATE TABLE IF NOT EXISTS billing_usage_counters (
         counter_id TEXT PRIMARY KEY,
-        user_id TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+        user_id TEXT NOT NULL REFERENCES app_users(user_id) ON DELETE CASCADE,
         period_start TIMESTAMPTZ NOT NULL,
         period_end TIMESTAMPTZ NOT NULL,
         consumed_check_units INTEGER NOT NULL DEFAULT 0 CHECK (consumed_check_units >= 0),
@@ -117,7 +122,7 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
     )
     """,
     """
-    CREATE TABLE IF NOT EXISTS price_snapshots (
+    CREATE TABLE IF NOT EXISTS tracker_snapshots (
         snapshot_id TEXT PRIMARY KEY,
         item_id TEXT NOT NULL REFERENCES tracked_items(item_id) ON DELETE CASCADE,
         checked_at TIMESTAMPTZ NOT NULL,
@@ -131,7 +136,7 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
     )
     """,
     """
-    CREATE TABLE IF NOT EXISTS tracking_check_runs (
+    CREATE TABLE IF NOT EXISTS tracker_runs (
         run_id TEXT PRIMARY KEY,
         item_id TEXT NOT NULL REFERENCES tracked_items(item_id) ON DELETE CASCADE,
         scheduled_for TIMESTAMPTZ NOT NULL,
@@ -148,7 +153,7 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
         event_id TEXT PRIMARY KEY,
         idempotency_key TEXT NOT NULL UNIQUE,
         item_id TEXT NOT NULL REFERENCES tracked_items(item_id) ON DELETE CASCADE,
-        snapshot_id TEXT NOT NULL REFERENCES price_snapshots(snapshot_id) ON DELETE CASCADE,
+        snapshot_id TEXT NOT NULL REFERENCES tracker_snapshots(snapshot_id) ON DELETE CASCADE,
         rule_type TEXT NOT NULL CHECK (rule_type IN ('price_below')),
         previous_amount TEXT,
         current_amount TEXT NOT NULL,
@@ -167,7 +172,7 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
     )
     """,
     """
-    CREATE TABLE IF NOT EXISTS notification_events (
+    CREATE TABLE IF NOT EXISTS outbound_notifications (
         notification_id TEXT PRIMARY KEY,
         idempotency_key TEXT NOT NULL UNIQUE,
         alert_event_id TEXT REFERENCES alert_events(event_id) ON DELETE CASCADE,
@@ -232,23 +237,23 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
     """,
     """
     CREATE INDEX IF NOT EXISTS idx_price_snapshots_item_checked
-      ON price_snapshots(item_id, checked_at DESC)
+      ON tracker_snapshots(item_id, checked_at DESC)
     """,
     """
     CREATE UNIQUE INDEX IF NOT EXISTS idx_price_snapshots_item_schedule_unique
-      ON price_snapshots(item_id, scheduled_for)
+      ON tracker_snapshots(item_id, scheduled_for)
     """,
     """
     CREATE INDEX IF NOT EXISTS idx_check_runs_item_started
-      ON tracking_check_runs(item_id, started_at DESC)
+      ON tracker_runs(item_id, started_at DESC)
     """,
     """
     CREATE INDEX IF NOT EXISTS idx_check_runs_item_scheduled
-      ON tracking_check_runs(item_id, scheduled_for, attempt DESC)
+      ON tracker_runs(item_id, scheduled_for, attempt DESC)
     """,
     """
     CREATE UNIQUE INDEX IF NOT EXISTS idx_check_runs_job_key_unique
-      ON tracking_check_runs(job_key)
+      ON tracker_runs(job_key)
     """,
     """
     CREATE INDEX IF NOT EXISTS idx_bootstrap_idempotency_item
@@ -264,15 +269,15 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
     """,
     """
     CREATE INDEX IF NOT EXISTS idx_notification_events_due
-      ON notification_events(status, next_attempt_at)
+      ON outbound_notifications(status, next_attempt_at)
     """,
     """
     CREATE INDEX IF NOT EXISTS idx_notification_events_lease_until
-      ON notification_events(lease_until)
+      ON outbound_notifications(lease_until)
     """,
     """
     CREATE INDEX IF NOT EXISTS idx_notification_events_item_created
-      ON notification_events(item_id, created_at DESC)
+      ON outbound_notifications(item_id, created_at DESC)
     """,
     """
     CREATE INDEX IF NOT EXISTS idx_telegram_connect_sessions_status_expires
@@ -283,6 +288,118 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
       ON telegram_connect_sessions(user_id, status, expires_at)
     """,
 )
+
+_LEGACY_TABLE_RENAMES: tuple[tuple[str, str], ...] = (
+    ("users", "app_users"),
+    ("plans", "billing_plans"),
+    ("user_subscriptions", "billing_subscriptions"),
+    ("entitlements", "billing_entitlements"),
+    ("usage_counters", "billing_usage_counters"),
+    ("price_snapshots", "tracker_snapshots"),
+    ("tracking_check_runs", "tracker_runs"),
+    ("notification_events", "outbound_notifications"),
+)
+
+_PLAN_DEFINITIONS: tuple[tuple[str, str, int, int, int, str, str], ...] = (
+    ("free", "Free", 5, 180, 1_500, "telegram", "block"),
+    ("plus", "Plus", 50, 30, 20_000, "telegram", "block"),
+    ("pro", "Pro", 200, 10, 100_000, "telegram", "block"),
+)
+
+_DEFAULT_PLAN_KEY = "free"
+
+_PLAN_DEFINITION_BY_KEY = {plan[0]: plan for plan in _PLAN_DEFINITIONS}
+
+_SYNC_BILLING_ENTITLEMENT_FROM_PLAN_FUNCTION_SQL = """
+CREATE OR REPLACE FUNCTION sync_billing_entitlement_limits_from_plan()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    selected_plan billing_plans%ROWTYPE;
+BEGIN
+    SELECT *
+    INTO selected_plan
+    FROM billing_plans
+    WHERE plan_key = NEW.plan_key
+    LIMIT 1;
+
+    IF selected_plan.plan_key IS NULL THEN
+        RAISE EXCEPTION 'unknown billing plan: %', NEW.plan_key;
+    END IF;
+
+    NEW.max_active_trackers := selected_plan.max_active_trackers;
+    NEW.min_check_interval_minutes := selected_plan.min_check_interval_minutes;
+    NEW.monthly_check_units := selected_plan.monthly_check_units;
+    NEW.allowed_channels := selected_plan.allowed_channels;
+    NEW.overage_policy := selected_plan.overage_policy;
+    NEW.updated_at := COALESCE(NEW.updated_at, NOW());
+    NEW.created_at := COALESCE(NEW.created_at, NEW.updated_at, NOW());
+
+    RETURN NEW;
+END;
+$$
+"""
+
+_SYNC_BILLING_ENTITLEMENT_FROM_PLAN_TRIGGER_SQL = """
+DROP TRIGGER IF EXISTS trg_sync_billing_entitlement_limits_from_plan
+ON billing_entitlements;
+CREATE TRIGGER trg_sync_billing_entitlement_limits_from_plan
+BEFORE INSERT OR UPDATE OF plan_key
+ON billing_entitlements
+FOR EACH ROW
+EXECUTE FUNCTION sync_billing_entitlement_limits_from_plan();
+"""
+
+_PROPAGATE_BILLING_PLAN_LIMITS_FUNCTION_SQL = """
+CREATE OR REPLACE FUNCTION propagate_billing_plan_limits_to_entitlements()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    UPDATE billing_entitlements
+    SET
+        max_active_trackers = NEW.max_active_trackers,
+        min_check_interval_minutes = NEW.min_check_interval_minutes,
+        monthly_check_units = NEW.monthly_check_units,
+        allowed_channels = NEW.allowed_channels,
+        overage_policy = NEW.overage_policy,
+        updated_at = GREATEST(updated_at, COALESCE(NEW.updated_at, NOW()))
+    WHERE plan_key = NEW.plan_key
+      AND (
+        max_active_trackers IS DISTINCT FROM NEW.max_active_trackers
+        OR min_check_interval_minutes IS DISTINCT FROM NEW.min_check_interval_minutes
+        OR monthly_check_units IS DISTINCT FROM NEW.monthly_check_units
+        OR allowed_channels IS DISTINCT FROM NEW.allowed_channels
+        OR overage_policy IS DISTINCT FROM NEW.overage_policy
+      );
+    RETURN NEW;
+END;
+$$
+"""
+
+_PROPAGATE_BILLING_PLAN_LIMITS_TRIGGER_SQL = """
+DROP TRIGGER IF EXISTS trg_propagate_billing_plan_limits_to_entitlements
+ON billing_plans;
+CREATE TRIGGER trg_propagate_billing_plan_limits_to_entitlements
+AFTER UPDATE OF
+  max_active_trackers,
+  min_check_interval_minutes,
+  monthly_check_units,
+  allowed_channels,
+  overage_policy,
+  updated_at
+ON billing_plans
+FOR EACH ROW
+EXECUTE FUNCTION propagate_billing_plan_limits_to_entitlements();
+"""
+
+_SYNC_BILLING_ENTITLEMENTS_BACKFILL_SQL = """
+UPDATE billing_entitlements
+SET
+    plan_key = plan_key,
+    updated_at = COALESCE(updated_at, NOW())
+"""
 
 
 class PostgresTrackingRepository:
@@ -321,6 +438,22 @@ class PostgresTrackingRepository:
             self._pool.open(wait=True)
             with self._pool.connection() as conn:
                 with conn.transaction():
+                    for old_name, new_name in _LEGACY_TABLE_RENAMES:
+                        exists = conn.execute(
+                            """
+                            SELECT
+                              to_regclass(%s) IS NOT NULL AS old_exists,
+                              to_regclass(%s) IS NOT NULL AS new_exists
+                            """,
+                            (f"public.{old_name}", f"public.{new_name}"),
+                        ).fetchone()
+                        if not exists:
+                            continue
+                        if bool(exists["old_exists"]) and not bool(exists["new_exists"]):
+                            conn.execute(
+                                f'ALTER TABLE "{old_name}" RENAME TO "{new_name}"'
+                            )
+
                     # Ensure legacy tables have user columns before user-scoped
                     # indexes are created in `_SCHEMA_STATEMENTS`.
                     conn.execute(_SCHEMA_STATEMENTS[0])
@@ -341,6 +474,36 @@ class PostgresTrackingRepository:
                         conn.execute(statement)
                     conn.execute(
                         """
+                        ALTER TABLE billing_plans
+                        ADD COLUMN IF NOT EXISTS max_active_trackers INTEGER
+                        """
+                    )
+                    conn.execute(
+                        """
+                        ALTER TABLE billing_plans
+                        ADD COLUMN IF NOT EXISTS min_check_interval_minutes INTEGER
+                        """
+                    )
+                    conn.execute(
+                        """
+                        ALTER TABLE billing_plans
+                        ADD COLUMN IF NOT EXISTS monthly_check_units INTEGER
+                        """
+                    )
+                    conn.execute(
+                        """
+                        ALTER TABLE billing_plans
+                        ADD COLUMN IF NOT EXISTS allowed_channels TEXT
+                        """
+                    )
+                    conn.execute(
+                        """
+                        ALTER TABLE billing_plans
+                        ADD COLUMN IF NOT EXISTS overage_policy TEXT
+                        """
+                    )
+                    conn.execute(
+                        """
                         UPDATE tracked_items
                         SET user_id = COALESCE(user_id, 'legacy_owner')
                         WHERE user_id IS NULL
@@ -359,35 +522,73 @@ class PostgresTrackingRepository:
                         DROP CONSTRAINT IF EXISTS tracked_items_source_url_key
                         """
                     )
-                    # Older deployments created notification_events.alert_event_id
+                    # Older deployments created outbound_notifications.alert_event_id
                     # as NOT NULL. Monitor-mode notifications don't have alert rows.
                     conn.execute(
                         """
-                        ALTER TABLE notification_events
+                        ALTER TABLE outbound_notifications
                         ALTER COLUMN alert_event_id DROP NOT NULL
                         """
                     )
                     # Sent/dead notifications should clear their retry schedule.
                     conn.execute(
                         """
-                        ALTER TABLE notification_events
+                        ALTER TABLE outbound_notifications
                         ALTER COLUMN next_attempt_at DROP NOT NULL
                         """
                     )
                     now = datetime.now(tz=UTC)
-                    for plan_key, name in (
-                        ("free", "Free"),
-                        ("plus", "Plus"),
-                        ("pro", "Pro"),
-                    ):
+                    for (
+                        plan_key,
+                        name,
+                        max_active_trackers,
+                        min_check_interval_minutes,
+                        monthly_check_units,
+                        allowed_channels,
+                        overage_policy,
+                    ) in _PLAN_DEFINITIONS:
                         conn.execute(
                             """
-                            INSERT INTO plans (plan_key, name, created_at, updated_at)
-                            VALUES (%s, %s, %s, %s)
-                            ON CONFLICT(plan_key) DO NOTHING
+                            INSERT INTO billing_plans (
+                                plan_key,
+                                name,
+                                max_active_trackers,
+                                min_check_interval_minutes,
+                                monthly_check_units,
+                                allowed_channels,
+                                overage_policy,
+                                created_at,
+                                updated_at
+                            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                            ON CONFLICT(plan_key) DO UPDATE SET
+                                name = EXCLUDED.name,
+                                max_active_trackers = EXCLUDED.max_active_trackers,
+                                min_check_interval_minutes = EXCLUDED.min_check_interval_minutes,
+                                monthly_check_units = EXCLUDED.monthly_check_units,
+                                allowed_channels = EXCLUDED.allowed_channels,
+                                overage_policy = EXCLUDED.overage_policy,
+                                updated_at = EXCLUDED.updated_at
                             """,
-                            (plan_key, name, now, now),
+                            (
+                                plan_key,
+                                name,
+                                max_active_trackers,
+                                min_check_interval_minutes,
+                                monthly_check_units,
+                                allowed_channels,
+                                overage_policy,
+                                now,
+                                now,
+                            ),
                         )
+
+                    conn.execute(_SYNC_BILLING_ENTITLEMENT_FROM_PLAN_FUNCTION_SQL)
+                    conn.execute(_SYNC_BILLING_ENTITLEMENT_FROM_PLAN_TRIGGER_SQL)
+                    conn.execute(_PROPAGATE_BILLING_PLAN_LIMITS_FUNCTION_SQL)
+                    conn.execute(_PROPAGATE_BILLING_PLAN_LIMITS_TRIGGER_SQL)
+                    conn.execute(
+                        _SYNC_BILLING_ENTITLEMENTS_BACKFILL_SQL,
+                    )
 
     def close(self) -> None:
         """Close pooled connections (useful in tests/shutdown hooks)."""
@@ -407,7 +608,7 @@ class PostgresTrackingRepository:
         with self._pool.connection() as conn:
             row = conn.execute(
                 """
-                INSERT INTO users (
+                INSERT INTO app_users (
                     user_id,
                     auth_provider,
                     auth_subject,
@@ -446,7 +647,7 @@ class PostgresTrackingRepository:
             row = conn.execute(
                 """
                 SELECT *
-                FROM users
+                FROM app_users
                 WHERE auth_provider = %s
                   AND auth_subject = %s
                 LIMIT 1
@@ -462,7 +663,7 @@ class PostgresTrackingRepository:
             row = conn.execute(
                 """
                 SELECT *
-                FROM users
+                FROM app_users
                 WHERE user_id = %s
                 LIMIT 1
                 """,
@@ -472,12 +673,80 @@ class PostgresTrackingRepository:
             return None
         return self._row_to_app_user(row)
 
+    def _default_plan_values(self) -> tuple[str, int, int, int, str, str]:
+        plan = _PLAN_DEFINITION_BY_KEY.get(_DEFAULT_PLAN_KEY)
+        if plan is None:  # pragma: no cover - defensive guard
+            raise RuntimeError("missing default plan configuration")
+        (
+            plan_key,
+            _name,
+            max_active_trackers,
+            min_check_interval_minutes,
+            monthly_check_units,
+            allowed_channels,
+            overage_policy,
+        ) = plan
+        return (
+            plan_key,
+            max_active_trackers,
+            min_check_interval_minutes,
+            monthly_check_units,
+            allowed_channels,
+            overage_policy,
+        )
+
+    def _resolve_plan_values(
+        self,
+        *,
+        conn,
+        plan_key: str,
+        fallback: tuple[str, int, int, int, str, str],
+    ) -> tuple[str, int, int, int, str, str]:
+        row = conn.execute(
+            """
+            SELECT
+                plan_key,
+                max_active_trackers,
+                min_check_interval_minutes,
+                monthly_check_units,
+                allowed_channels,
+                overage_policy
+            FROM billing_plans
+            WHERE plan_key = %s
+            LIMIT 1
+            """,
+            (plan_key,),
+        ).fetchone()
+        if row is None:
+            return fallback
+        return (
+            str(row["plan_key"]),
+            int(row["max_active_trackers"]),
+            int(row["min_check_interval_minutes"]),
+            int(row["monthly_check_units"]),
+            str(row["allowed_channels"]),
+            str(row["overage_policy"]),
+        )
+
     def ensure_default_user_entitlement(self, *, user_id: str, now: str) -> None:
         now_dt = _parse_timestamp(now)
         with self._pool.connection() as conn:
+            default_values = self._default_plan_values()
+            (
+                default_plan_key,
+                default_max_active_trackers,
+                default_min_check_interval_minutes,
+                default_monthly_check_units,
+                default_allowed_channels,
+                default_overage_policy,
+            ) = self._resolve_plan_values(
+                conn=conn,
+                plan_key=default_values[0],
+                fallback=default_values,
+            )
             conn.execute(
                 """
-                INSERT INTO entitlements (
+                INSERT INTO billing_entitlements (
                     user_id,
                     plan_key,
                     max_active_trackers,
@@ -487,14 +756,24 @@ class PostgresTrackingRepository:
                     overage_policy,
                     created_at,
                     updated_at
-                ) VALUES (%s, 'free', 5, 180, 1500, 'telegram', 'block', %s, %s)
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT(user_id) DO NOTHING
                 """,
-                (user_id, now_dt, now_dt),
+                (
+                    user_id,
+                    default_plan_key,
+                    default_max_active_trackers,
+                    default_min_check_interval_minutes,
+                    default_monthly_check_units,
+                    default_allowed_channels,
+                    default_overage_policy,
+                    now_dt,
+                    now_dt,
+                ),
             )
             conn.execute(
                 """
-                INSERT INTO user_subscriptions (
+                INSERT INTO billing_subscriptions (
                     subscription_id,
                     user_id,
                     provider,
@@ -515,9 +794,30 @@ class PostgresTrackingRepository:
         with self._pool.connection() as conn:
             row = conn.execute(
                 """
-                SELECT *
-                FROM entitlements
-                WHERE user_id = %s
+                SELECT
+                    entitlement.user_id,
+                    entitlement.plan_key,
+                    COALESCE(plan.max_active_trackers, entitlement.max_active_trackers)
+                        AS max_active_trackers,
+                    COALESCE(
+                        plan.min_check_interval_minutes,
+                        entitlement.min_check_interval_minutes
+                    ) AS min_check_interval_minutes,
+                    COALESCE(plan.monthly_check_units, entitlement.monthly_check_units)
+                        AS monthly_check_units,
+                    COALESCE(plan.allowed_channels, entitlement.allowed_channels)
+                        AS allowed_channels,
+                    COALESCE(plan.overage_policy, entitlement.overage_policy)
+                        AS overage_policy,
+                    entitlement.created_at,
+                    GREATEST(
+                        entitlement.updated_at,
+                        COALESCE(plan.updated_at, entitlement.updated_at)
+                    ) AS updated_at
+                FROM billing_entitlements AS entitlement
+                LEFT JOIN billing_plans AS plan
+                  ON plan.plan_key = entitlement.plan_key
+                WHERE entitlement.user_id = %s
                 LIMIT 1
                 """,
                 (user_id,),
@@ -544,7 +844,7 @@ class PostgresTrackingRepository:
                 row = conn.execute(
                     """
                     SELECT *
-                    FROM usage_counters
+                    FROM billing_usage_counters
                     WHERE user_id = %s
                       AND period_start = %s
                       AND period_end = %s
@@ -585,7 +885,7 @@ class PostgresTrackingRepository:
                 )
                 row = conn.execute(
                     """
-                    UPDATE usage_counters
+                    UPDATE billing_usage_counters
                     SET consumed_check_units = consumed_check_units + %s,
                         updated_at = %s
                     WHERE user_id = %s
@@ -937,7 +1237,7 @@ class PostgresTrackingRepository:
             rows = conn.execute(
                 """
                 SELECT *
-                FROM price_snapshots
+                FROM tracker_snapshots
                 WHERE item_id = %s
                 ORDER BY checked_at DESC
                 LIMIT %s
@@ -1020,7 +1320,7 @@ class PostgresTrackingRepository:
         with self._pool.connection() as conn:
             row = conn.execute(
                 """
-                INSERT INTO notification_events (
+                INSERT INTO outbound_notifications (
                     notification_id,
                     idempotency_key,
                     alert_event_id,
@@ -1088,7 +1388,7 @@ class PostgresTrackingRepository:
                 rows = conn.execute(
                     """
                     SELECT notification_id
-                    FROM notification_events
+                    FROM outbound_notifications
                     WHERE status IN ('queued', 'failed', 'sending')
                       AND next_attempt_at <= %s
                       AND (lease_until IS NULL OR lease_until <= %s)
@@ -1106,7 +1406,7 @@ class PostgresTrackingRepository:
 
                 conn.execute(
                     """
-                    UPDATE notification_events
+                    UPDATE outbound_notifications
                     SET status = 'sending',
                         lease_owner = %s,
                         lease_until = %s,
@@ -1120,7 +1420,7 @@ class PostgresTrackingRepository:
                 claimed_rows = conn.execute(
                     """
                     SELECT *
-                    FROM notification_events
+                    FROM outbound_notifications
                     WHERE notification_id = ANY(%s)
                     """,
                     (notification_ids,),
@@ -1152,7 +1452,7 @@ class PostgresTrackingRepository:
         with self._pool.connection() as conn:
             conn.execute(
                 """
-                UPDATE notification_events
+                UPDATE outbound_notifications
                 SET status = %s,
                     attempt_count = %s,
                     next_attempt_at = %s,
@@ -1183,7 +1483,7 @@ class PostgresTrackingRepository:
             rows = conn.execute(
                 """
                 SELECT *
-                FROM notification_events
+                FROM outbound_notifications
                 WHERE item_id = %s
                 ORDER BY created_at DESC
                 LIMIT %s
@@ -1266,7 +1566,7 @@ class PostgresTrackingRepository:
                 existing = conn.execute(
                     """
                     SELECT *
-                    FROM tracking_check_runs
+                    FROM tracker_runs
                     WHERE job_key = %s
                     LIMIT 1
                     """,
@@ -1278,7 +1578,7 @@ class PostgresTrackingRepository:
                 attempt_row = conn.execute(
                     """
                     SELECT COALESCE(MAX(attempt), 0) AS max_attempt
-                    FROM tracking_check_runs
+                    FROM tracker_runs
                     WHERE item_id = %s
                       AND scheduled_for = %s
                     """,
@@ -1288,7 +1588,7 @@ class PostgresTrackingRepository:
 
                 inserted = conn.execute(
                     """
-                    INSERT INTO tracking_check_runs (
+                    INSERT INTO tracker_runs (
                         run_id,
                         item_id,
                         scheduled_for,
@@ -1319,7 +1619,7 @@ class PostgresTrackingRepository:
                     existing = conn.execute(
                         """
                         SELECT *
-                        FROM tracking_check_runs
+                        FROM tracker_runs
                         WHERE job_key = %s
                         LIMIT 1
                         """,
@@ -1342,7 +1642,7 @@ class PostgresTrackingRepository:
         with self._pool.connection() as conn:
             conn.execute(
                 """
-                UPDATE tracking_check_runs
+                UPDATE tracker_runs
                 SET status = %s,
                     finished_at = %s,
                     error = %s
@@ -1361,7 +1661,7 @@ class PostgresTrackingRepository:
         with self._pool.connection() as conn:
             conn.execute(
                 """
-                UPDATE tracking_check_runs
+                UPDATE tracker_runs
                 SET status = 'failed',
                     finished_at = %s,
                     error = %s,
@@ -1378,7 +1678,7 @@ class PostgresTrackingRepository:
             rows = conn.execute(
                 """
                 SELECT *
-                FROM tracking_check_runs
+                FROM tracker_runs
                 WHERE item_id = %s
                 ORDER BY started_at DESC
                 LIMIT %s
@@ -1619,7 +1919,7 @@ class PostgresTrackingRepository:
     ) -> None:
         conn.execute(
             """
-            INSERT INTO usage_counters (
+            INSERT INTO billing_usage_counters (
                 counter_id,
                 user_id,
                 period_start,
@@ -1643,7 +1943,7 @@ class PostgresTrackingRepository:
     def _insert_snapshot(self, conn, snapshot: PriceSnapshot) -> None:
         conn.execute(
             """
-            INSERT INTO price_snapshots (
+            INSERT INTO tracker_snapshots (
                 snapshot_id,
                 item_id,
                 checked_at,
@@ -1658,32 +1958,32 @@ class PostgresTrackingRepository:
             ON CONFLICT(item_id, scheduled_for) DO UPDATE SET
                 checked_at = EXCLUDED.checked_at,
                 success = CASE
-                    WHEN price_snapshots.success THEN TRUE
+                    WHEN tracker_snapshots.success THEN TRUE
                     ELSE EXCLUDED.success
                 END,
                 amount = CASE
-                    WHEN EXCLUDED.success OR NOT price_snapshots.success
+                    WHEN EXCLUDED.success OR NOT tracker_snapshots.success
                     THEN EXCLUDED.amount
-                    ELSE price_snapshots.amount
+                    ELSE tracker_snapshots.amount
                 END,
                 currency = CASE
-                    WHEN EXCLUDED.success OR NOT price_snapshots.success
+                    WHEN EXCLUDED.success OR NOT tracker_snapshots.success
                     THEN EXCLUDED.currency
-                    ELSE price_snapshots.currency
+                    ELSE tracker_snapshots.currency
                 END,
                 raw_text = CASE
-                    WHEN EXCLUDED.success OR NOT price_snapshots.success
+                    WHEN EXCLUDED.success OR NOT tracker_snapshots.success
                     THEN EXCLUDED.raw_text
-                    ELSE price_snapshots.raw_text
+                    ELSE tracker_snapshots.raw_text
                 END,
                 source = CASE
-                    WHEN EXCLUDED.success OR NOT price_snapshots.success
+                    WHEN EXCLUDED.success OR NOT tracker_snapshots.success
                     THEN EXCLUDED.source
-                    ELSE price_snapshots.source
+                    ELSE tracker_snapshots.source
                 END,
                 error = CASE
                     WHEN EXCLUDED.success THEN NULL
-                    WHEN price_snapshots.success THEN price_snapshots.error
+                    WHEN tracker_snapshots.success THEN tracker_snapshots.error
                     ELSE EXCLUDED.error
                 END
             """,

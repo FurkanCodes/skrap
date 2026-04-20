@@ -92,6 +92,22 @@ class NotificationWorkerService:
         failure_count = 0
         max_attempt_depth = 0
         for event in claimed:
+            if not self._is_item_active(event.item_id):
+                now_iso = _to_iso(_utcnow())
+                self._repository.finalize_notification_event(
+                    notification_id=event.notification_id,
+                    status="dead",
+                    attempt_count=event.attempt_count,
+                    now=now_iso,
+                    next_attempt_at=None,
+                    sent_at=None,
+                    provider_name="scheduler",
+                    provider_message_id=None,
+                    error="item_inactive",
+                )
+                dead_count += 1
+                continue
+
             try:
                 send_result = self._sender.send(event)
             except Exception as exc:
@@ -168,6 +184,20 @@ class NotificationWorkerService:
             max_attempt_depth=max_attempt_depth,
             duration_seconds=max(0.0, time.perf_counter() - started),
         )
+
+    def _is_item_active(self, item_id: str) -> bool:
+        get_item = getattr(self._repository, "get_item", None)
+        if not callable(get_item):
+            return True
+        try:
+            item = get_item(item_id)
+        except Exception:
+            # Fail-open for notifier availability; scheduler already guards
+            # active-only creation of new notifications.
+            return True
+        if item is None:
+            return False
+        return getattr(item, "status", "active") == "active"
 
 
 def _compute_retry_at(

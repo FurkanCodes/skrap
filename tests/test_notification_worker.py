@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 
 from app.application.notification_worker_service import (
@@ -8,6 +8,11 @@ from app.application.notification_worker_service import (
     NotificationWorkerService,
 )
 from app.tracking import NotificationEvent
+
+
+@dataclass(frozen=True)
+class _TrackedItemStub:
+    status: str
 
 
 def _iso(dt: datetime) -> str:
@@ -50,14 +55,17 @@ def _event(
 @dataclass
 class _FakeSender:
     result_by_notification_id: dict[str, NotificationSendResult]
+    sent_notification_ids: list[str] = field(default_factory=list)
 
     def send(self, event: NotificationEvent) -> NotificationSendResult:
+        self.sent_notification_ids.append(event.notification_id)
         return self.result_by_notification_id[event.notification_id]
 
 
 @dataclass
 class _InMemoryNotificationRepository:
     events_by_id: dict[str, NotificationEvent]
+    items_by_id: dict[str, object] = field(default_factory=dict)
 
     def claim_due_notification_events(
         self,
@@ -121,6 +129,12 @@ class _InMemoryNotificationRepository:
             lease_until=None,
             updated_at=now,
         )
+
+    def get_item(self, item_id: str):
+        item = self.items_by_id.get(item_id)
+        if item is not None:
+            return item
+        return _TrackedItemStub(status="active")
 
 
 def test_notification_worker_marks_sent_on_success() -> None:
@@ -277,3 +291,44 @@ def test_notification_worker_moves_to_dead_on_non_retryable_error() -> None:
     assert saved.status == "dead"
     assert saved.attempt_count == 1
     assert saved.last_error == "invalid_destination"
+
+
+def test_notification_worker_drops_event_when_item_is_paused() -> None:
+    now = datetime.now(tz=UTC)
+    event = _event(notification_id="nev_paused", now=now, max_attempts=5)
+    repository = _InMemoryNotificationRepository(
+        events_by_id={event.notification_id: event},
+        items_by_id={
+            "trk_test": _TrackedItemStub(status="paused")
+        },
+    )
+    sender = _FakeSender(
+        result_by_notification_id={
+            event.notification_id: NotificationSendResult(
+                success=True,
+                provider_name="log",
+                provider_message_id="msg-1",
+                retryable=False,
+            )
+        }
+    )
+    service = NotificationWorkerService(
+        repository=repository,
+        sender=sender,
+        claim_batch_size=10,
+        lease_seconds=30,
+        lease_owner="notifier-test",
+        max_attempts=5,
+        base_backoff_seconds=10,
+        backoff_max_seconds=300,
+        retry_jitter_percent=0,
+    )
+
+    result = service.run_once()
+    saved = repository.events_by_id[event.notification_id]
+
+    assert result.dead_count == 1
+    assert result.sent_count == 0
+    assert saved.status == "dead"
+    assert saved.last_error == "item_inactive"
+    assert sender.sent_notification_ids == []

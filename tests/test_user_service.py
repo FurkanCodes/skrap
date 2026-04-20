@@ -30,6 +30,7 @@ class _FakeUserRepository:
     user: AppUser | None = None
     entitlement: UserEntitlement | None = None
     consumed_units: int = 0
+    upsert_calls: int = 0
 
     def upsert_app_user(
         self,
@@ -40,6 +41,7 @@ class _FakeUserRepository:
         display_name: str | None,
         now: str,
     ) -> AppUser:
+        self.upsert_calls += 1
         self.user = AppUser(
             user_id=f"usr_{auth_subject}",
             auth_provider=auth_provider,
@@ -49,6 +51,20 @@ class _FakeUserRepository:
             created_at=now,
             updated_at=now,
         )
+        return self.user
+
+    def get_app_user_by_auth_subject(
+        self,
+        *,
+        auth_provider: str,
+        auth_subject: str,
+    ) -> AppUser | None:
+        if self.user is None:
+            return None
+        if self.user.auth_provider != auth_provider:
+            return None
+        if self.user.auth_subject != auth_subject:
+            return None
         return self.user
 
     def ensure_default_user_entitlement(self, *, user_id: str, now: str) -> None:
@@ -99,3 +115,42 @@ def test_user_service_get_me_includes_credit_usage() -> None:
     assert output.usage.consumed_check_units == 42
     assert output.usage.remaining_check_units == 1458
     assert output.usage.user_id == output.user.user_id
+    assert output.usage.updated_at
+
+
+def test_user_service_get_me_reuses_existing_user_without_upsert() -> None:
+    now = _iso(datetime.now(tz=UTC))
+    existing = AppUser(
+        user_id="usr_existing",
+        auth_provider="better_auth",
+        auth_subject="subject_1",
+        email="existing@example.com",
+        display_name="Existing",
+        created_at=now,
+        updated_at=now,
+    )
+    repository = _FakeUserRepository(user=existing, consumed_units=1)
+    repository.entitlement = UserEntitlement(
+        user_id=existing.user_id,
+        plan_key="free",
+        max_active_trackers=5,
+        min_check_interval_minutes=180,
+        monthly_check_units=1500,
+        allowed_channels="telegram",
+        overage_policy="block",
+        created_at=now,
+        updated_at=now,
+    )
+    service = UserService(repository=repository)
+    principal = AuthPrincipal(
+        subject="subject_1",
+        email="updated@example.com",
+        name="Updated",
+        issuer="https://auth.example.com",
+        audience="web",
+    )
+
+    output = service.get_me(principal)
+
+    assert output.user.user_id == existing.user_id
+    assert repository.upsert_calls == 0

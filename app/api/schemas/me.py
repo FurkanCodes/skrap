@@ -32,6 +32,7 @@ class MeUsageResponse(BaseModel):
     monthly_check_units: int
     consumed_check_units: int
     remaining_check_units: int
+    updated_at: str
 
 
 class MeResponse(BaseModel):

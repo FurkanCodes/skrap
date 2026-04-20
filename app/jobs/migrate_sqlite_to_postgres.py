@@ -192,7 +192,7 @@ def _load_sqlite(sqlite_path: Path) -> tuple[
             _IDEMPOTENCY_COLUMNS,
         )
         alert_events = _read_rows(conn, "alert_events", _ALERT_EVENT_COLUMNS)
-        notification_events = _read_rows(
+        outbound_notifications = _read_rows(
             conn,
             "notification_events",
             _NOTIFICATION_EVENT_COLUMNS,
@@ -206,7 +206,7 @@ def _load_sqlite(sqlite_path: Path) -> tuple[
         check_runs,
         idempotency,
         alert_events,
-        notification_events,
+        outbound_notifications,
     )
 
 
@@ -294,15 +294,15 @@ def _source_counts(
     check_runs: list[dict[str, object]],
     idempotency: list[dict[str, object]],
     alert_events: list[dict[str, object]],
-    notification_events: list[dict[str, object]],
+    outbound_notifications: list[dict[str, object]],
 ) -> dict[str, int]:
     return {
         "tracked_items": len(tracked_items),
-        "price_snapshots": len(snapshots),
-        "tracking_check_runs": len(check_runs),
+        "tracker_snapshots": len(snapshots),
+        "tracker_runs": len(check_runs),
         "tracking_bootstrap_idempotency": len(idempotency),
         "alert_events": len(alert_events),
-        "notification_events": len(notification_events),
+        "outbound_notifications": len(outbound_notifications),
     }
 
 
@@ -312,11 +312,11 @@ def _target_counts(database_url: str) -> dict[str, int]:
             "tracked_items": int(
                 conn.execute("SELECT COUNT(*) FROM tracked_items").fetchone()[0]
             ),
-            "price_snapshots": int(
-                conn.execute("SELECT COUNT(*) FROM price_snapshots").fetchone()[0]
+            "tracker_snapshots": int(
+                conn.execute("SELECT COUNT(*) FROM tracker_snapshots").fetchone()[0]
             ),
-            "tracking_check_runs": int(
-                conn.execute("SELECT COUNT(*) FROM tracking_check_runs").fetchone()[0]
+            "tracker_runs": int(
+                conn.execute("SELECT COUNT(*) FROM tracker_runs").fetchone()[0]
             ),
             "tracking_bootstrap_idempotency": int(
                 conn.execute("SELECT COUNT(*) FROM tracking_bootstrap_idempotency").fetchone()[0]
@@ -324,8 +324,8 @@ def _target_counts(database_url: str) -> dict[str, int]:
             "alert_events": int(
                 conn.execute("SELECT COUNT(*) FROM alert_events").fetchone()[0]
             ),
-            "notification_events": int(
-                conn.execute("SELECT COUNT(*) FROM notification_events").fetchone()[0]
+            "outbound_notifications": int(
+                conn.execute("SELECT COUNT(*) FROM outbound_notifications").fetchone()[0]
             ),
         }
 
@@ -334,11 +334,11 @@ def _print_counts(label: str, counts: dict[str, int]) -> None:
     print(
         f"{label}"
         f" tracked_items={counts['tracked_items']}"
-        f" snapshots={counts['price_snapshots']}"
-        f" check_runs={counts['tracking_check_runs']}"
+        f" snapshots={counts['tracker_snapshots']}"
+        f" check_runs={counts['tracker_runs']}"
         f" idempotency={counts['tracking_bootstrap_idempotency']}"
         f" alert_events={counts['alert_events']}"
-        f" notification_events={counts['notification_events']}"
+        f" outbound_notifications={counts['outbound_notifications']}"
     )
 
 
@@ -362,7 +362,7 @@ def _migrate(
     check_runs: list[dict[str, object]],
     idempotency: list[dict[str, object]],
     alert_events: list[dict[str, object]],
-    notification_events: list[dict[str, object]],
+    outbound_notifications: list[dict[str, object]],
 ) -> None:
     with psycopg.connect(database_url) as conn:
         with conn.transaction():
@@ -370,11 +370,11 @@ def _migrate(
                 conn.execute(
                     """
                     TRUNCATE TABLE
-                        notification_events,
+                        outbound_notifications,
                         alert_events,
                         tracking_bootstrap_idempotency,
-                        tracking_check_runs,
-                        price_snapshots,
+                        tracker_runs,
+                        tracker_snapshots,
                         tracked_items
                     RESTART IDENTITY CASCADE
                     """
@@ -490,7 +490,7 @@ def _migrate(
                 _executemany(
                     conn,
                     """
-                    INSERT INTO price_snapshots (
+                    INSERT INTO tracker_snapshots (
                         snapshot_id,
                         item_id,
                         checked_at,
@@ -530,7 +530,7 @@ def _migrate(
                 _executemany(
                     conn,
                     """
-                    INSERT INTO tracking_check_runs (
+                    INSERT INTO tracker_runs (
                         run_id,
                         item_id,
                         scheduled_for,
@@ -636,11 +636,11 @@ def _migrate(
                     ],
                 )
 
-            if notification_events:
+            if outbound_notifications:
                 _executemany(
                     conn,
                     """
-                    INSERT INTO notification_events (
+                    INSERT INTO outbound_notifications (
                         notification_id,
                         idempotency_key,
                         alert_event_id,
@@ -697,7 +697,7 @@ def _migrate(
                             "created_at": _parse_timestamp(row["created_at"]),
                             "updated_at": _parse_timestamp(row["updated_at"]),
                         }
-                        for row in notification_events
+                        for row in outbound_notifications
                     ],
                 )
 
@@ -728,7 +728,7 @@ def main() -> None:
         check_runs,
         idempotency,
         alert_events,
-        notification_events,
+        outbound_notifications,
     ) = _load_sqlite(sqlite_path)
     deduped_snapshots = _dedupe_snapshots(snapshots)
     deduped_check_runs = _dedupe_check_runs(check_runs)
@@ -738,7 +738,7 @@ def main() -> None:
         check_runs=deduped_check_runs,
         idempotency=idempotency,
         alert_events=alert_events,
-        notification_events=notification_events,
+        outbound_notifications=outbound_notifications,
     )
     _print_counts("source_counts", source)
 
@@ -750,7 +750,7 @@ def main() -> None:
         check_runs=deduped_check_runs,
         idempotency=idempotency,
         alert_events=alert_events,
-        notification_events=notification_events,
+        outbound_notifications=outbound_notifications,
     )
 
     target = _target_counts(database_url)

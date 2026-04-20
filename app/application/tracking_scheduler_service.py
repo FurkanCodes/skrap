@@ -22,6 +22,9 @@ from app.tracking import (
     UserEntitlement,
 )
 
+_TEST_INTERVAL_15_SECONDS_SENTINEL = 10_079
+_TEST_INTERVAL_15_SECONDS_VALUE = 15
+
 
 class TrackingSchedulerError(RuntimeError):
     """Base error for scheduler runtime failures."""
@@ -253,18 +256,20 @@ class TrackingSchedulerService:
     def _defer_item_for_credit_exhaustion(self, *, context: _ItemRunContext) -> None:
         now = _to_iso(_utcnow())
         _, period_end = _usage_period_bounds(now)
+        current_item = self._get_latest_item_state(context.item)
+        next_check_at = period_end if current_item.status == "active" else current_item.next_check_at
         try:
             # No scrape ran, so keep last_checked_at unchanged. We only release
             # the lease and park next_check_at until the next billing cycle.
             self._repository.save_item(
                 replace(
-                    context.item,
+                    current_item,
                     lease_owner=None,
                     lease_until=None,
                     last_check_started_at=context.started_at,
                     last_check_finished_at=now,
                     updated_at=now,
-                    next_check_at=period_end,
+                    next_check_at=next_check_at,
                 )
             )
         except Exception:
@@ -370,7 +375,7 @@ class TrackingSchedulerService:
         return results_by_url
 
     def _finalize_result(self, context: _ItemRunContext, scrape_result: PriceResult) -> bool:
-        item = context.item
+        item = self._get_latest_item_state(context.item)
         finished_at = _to_iso(_utcnow())
         next_check_at = compute_next_check_at(
             base_time=finished_at,
@@ -419,7 +424,11 @@ class TrackingSchedulerService:
             self._repository.save_item_and_snapshot(updated_item, snapshot)
             product_url = _resolve_product_url(item, scrape_result)
             listing_url = _resolve_listing_url(scrape_result)
-            if item.tracking_mode == "monitor":
+            if item.status != "active":
+                # User may have paused the tracker while this check was in-flight.
+                # Preserve the latest status and suppress notifications.
+                pass
+            elif item.tracking_mode == "monitor":
                 self._emit_monitor_notification(
                     item_before=item,
                     snapshot=snapshot,
@@ -708,16 +717,17 @@ class TrackingSchedulerService:
         started_at: str,
         finished_at: str | None = None,
     ) -> None:
+        current_item = self._get_latest_item_state(item)
         final_time = finished_at or _to_iso(_utcnow())
         next_check_at = compute_next_check_at(
             base_time=final_time,
-            interval_minutes=item.check_interval_minutes,
+            interval_minutes=current_item.check_interval_minutes,
             jitter_percent=self._jitter_percent,
         )
         try:
             self._repository.save_item(
                 replace(
-                    item,
+                    current_item,
                     last_checked_at=final_time,
                     updated_at=final_time,
                     next_check_at=next_check_at,
@@ -737,11 +747,12 @@ class TrackingSchedulerService:
         item: TrackedItem,
         started_at: str,
     ) -> None:
+        current_item = self._get_latest_item_state(item)
         now = _to_iso(_utcnow())
         try:
             self._repository.save_item(
                 replace(
-                    item,
+                    current_item,
                     lease_owner=None,
                     lease_until=None,
                     last_check_started_at=started_at,
@@ -758,10 +769,11 @@ class TrackingSchedulerService:
         item: TrackedItem,
         started_at: str,
     ) -> None:
+        current_item = self._get_latest_item_state(item)
         now = _to_iso(_utcnow())
         next_check_at = compute_next_check_at(
             base_time=now,
-            interval_minutes=item.check_interval_minutes,
+            interval_minutes=current_item.check_interval_minutes,
             jitter_percent=self._jitter_percent,
         )
         try:
@@ -769,7 +781,7 @@ class TrackingSchedulerService:
             # ran. We only want to unstick the schedule from a duplicate job key.
             self._repository.save_item(
                 replace(
-                    item,
+                    current_item,
                     lease_owner=None,
                     lease_until=None,
                     last_check_started_at=started_at,
@@ -780,6 +792,13 @@ class TrackingSchedulerService:
             )
         except Exception:
             pass
+
+    def _get_latest_item_state(self, item: TrackedItem) -> TrackedItem:
+        try:
+            latest = self._repository.get_item(item.item_id)
+        except Exception:
+            latest = None
+        return latest if latest is not None else item
 
 
 def compute_next_check_at(
@@ -800,8 +819,8 @@ def compute_next_check_at(
     return _to_iso(next_dt)
 
 def _interval_value_to_seconds(interval_value: int) -> int:
-    if interval_value < 60:
-        return max(1, interval_value)
+    if interval_value == _TEST_INTERVAL_15_SECONDS_SENTINEL:
+        return _TEST_INTERVAL_15_SECONDS_VALUE
     return max(60, interval_value * 60)
 
 

@@ -126,16 +126,16 @@ def test_load_sqlite_reads_extended_tracking_tables(tmp_path: Path) -> None:
         check_runs=check_runs,
         idempotency=idempotency,
         alert_events=alert_events,
-        notification_events=notification_events,
+        outbound_notifications=notification_events,
     )
 
     assert counts == {
         "tracked_items": 1,
-        "price_snapshots": 1,
-        "tracking_check_runs": 1,
+        "tracker_snapshots": 1,
+        "tracker_runs": 1,
         "tracking_bootstrap_idempotency": 1,
         "alert_events": 1,
-        "notification_events": 1,
+        "outbound_notifications": 1,
     }
 
 

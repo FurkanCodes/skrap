@@ -11,6 +11,8 @@ from app.scraper import PriceResult
 from app.tracking import PriceSnapshot, TrackedItem, TrackingRepository, TrackingStatus
 
 _LEGACY_USER_ID = "legacy_owner"
+_TEST_INTERVAL_15_SECONDS_SENTINEL = 10_079
+_TEST_INTERVAL_15_SECONDS_VALUE = 15
 
 
 class TrackingServiceError(RuntimeError):
@@ -424,9 +426,13 @@ def _normalize_target_amount(value: str | None) -> str | None:
 
 def _add_interval_iso(timestamp: str, interval_value: int) -> str:
     dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
-    if interval_value < 60:
-        return (dt + timedelta(seconds=interval_value)).isoformat().replace("+00:00", "Z")
-    return (dt + timedelta(minutes=interval_value)).isoformat().replace("+00:00", "Z")
+    return (dt + _interval_value_to_timedelta(interval_value)).isoformat().replace("+00:00", "Z")
+
+
+def _interval_value_to_timedelta(interval_value: int) -> timedelta:
+    if interval_value == _TEST_INTERVAL_15_SECONDS_SENTINEL:
+        return timedelta(seconds=_TEST_INTERVAL_15_SECONDS_VALUE)
+    return timedelta(minutes=interval_value)
 
 
 def _build_bootstrap_request_hash(payload: TrackingBootstrapInput) -> str:

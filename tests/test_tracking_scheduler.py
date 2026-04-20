@@ -669,6 +669,30 @@ def test_compute_next_check_at_applies_bounded_jitter() -> None:
     assert max(values) <= 3960  # +10%
 
 
+def test_compute_next_check_at_with_small_interval_uses_minutes() -> None:
+    base = _iso(datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC))
+    next_at = compute_next_check_at(
+        base_time=base,
+        interval_minutes=15,
+        jitter_percent=0,
+    )
+    base_dt = datetime.fromisoformat(base.replace("Z", "+00:00"))
+    next_dt = datetime.fromisoformat(next_at.replace("Z", "+00:00"))
+    assert (next_dt - base_dt).total_seconds() == 900
+
+
+def test_compute_next_check_at_with_test_interval_uses_fifteen_seconds() -> None:
+    base = _iso(datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC))
+    next_at = compute_next_check_at(
+        base_time=base,
+        interval_minutes=10_079,
+        jitter_percent=0,
+    )
+    base_dt = datetime.fromisoformat(base.replace("Z", "+00:00"))
+    next_dt = datetime.fromisoformat(next_at.replace("Z", "+00:00"))
+    assert (next_dt - base_dt).total_seconds() == 15
+
+
 def test_scheduler_run_once_persists_success_snapshot_and_next_check() -> None:
     repo = _build_repo()
     now = datetime.now(tz=UTC)
@@ -1137,6 +1161,65 @@ def test_scheduler_monitor_mode_notifies_even_when_price_unchanged() -> None:
 
     notifications = repo.list_notification_events(item.item_id, limit=10)
     assert len(notifications) == 2
+
+
+def test_scheduler_does_not_notify_when_item_is_paused_during_inflight_run() -> None:
+    repo = _build_repo()
+    now = datetime.now(tz=UTC)
+    due_time = _iso(now - timedelta(minutes=1))
+    item = _item(
+        item_id="trk_pause_race",
+        url="https://example.com/pause-race",
+        now=now,
+        next_check_at=due_time,
+        last_amount="95.00",
+        target_amount=None,  # monitor mode
+    )
+    repo.save_item(item)
+
+    scrape_result = PriceResult(
+        url=item.source_url,
+        success=True,
+        amount="94.00",
+        currency="USD",
+        raw_text="$94.00",
+        source="test:pause-race",
+        site_key="generic",
+        adapter_key="generic",
+    )
+
+    @dataclass
+    class _PauseDuringScrapeRunner:
+        repository: _InMemoryTrackingRepository
+
+        def scrape(self, payload) -> ScrapeBatchOutput:
+            current = self.repository.get_item(item.item_id)
+            if current is not None:
+                # Emulate user pause action while the scheduler run is in-flight.
+                self.repository.save_item(replace(current, status="paused"))
+            return _FakeScrapeRunner({item.source_url: scrape_result}).scrape(payload)
+
+    scheduler = TrackingSchedulerService(
+        repository=repo,
+        scrape_runner=_PauseDuringScrapeRunner(repository=repo),
+        timeout_seconds=30,
+        claim_batch_size=50,
+        max_inflight=4,
+        lease_seconds=180,
+        jitter_percent=0,
+        lease_owner="scheduler-test",
+    )
+
+    outcome = scheduler.run_once()
+    assert outcome.success_count == 1
+
+    updated_item = repo.get_item(item.item_id)
+    assert updated_item is not None
+    assert updated_item.status == "paused"
+
+    notifications = repo.list_notification_events(item.item_id, limit=10)
+    assert notifications == []
+
 
 def test_scheduler_reclaims_stale_running_duplicate_job() -> None:
     repo = _build_repo()
