@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends
 from fastapi.concurrency import run_in_threadpool
 
 from app.api.dependencies import get_current_principal, get_user_service
-from app.api.schemas.me import MeEntitlementResponse, MeResponse, MeUserResponse
+from app.api.schemas.me import MeEntitlementResponse, MeResponse, MeUsageResponse, MeUserResponse
 from app.application.user_service import UserService
 from app.core.auth import AuthPrincipal
 
@@ -22,5 +22,5 @@ async def get_me(
     return MeResponse(
         user=MeUserResponse.model_validate(asdict(output.user)),
         entitlement=MeEntitlementResponse.model_validate(asdict(output.entitlement)),
+        usage=MeUsageResponse.model_validate(asdict(output.usage)),
     )
-

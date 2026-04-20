@@ -25,7 +25,16 @@ class MeEntitlementResponse(BaseModel):
     updated_at: str
 
 
+class MeUsageResponse(BaseModel):
+    user_id: str
+    period_start: str
+    period_end: str
+    monthly_check_units: int
+    consumed_check_units: int
+    remaining_check_units: int
+
+
 class MeResponse(BaseModel):
     user: MeUserResponse
     entitlement: MeEntitlementResponse
-
+    usage: MeUsageResponse

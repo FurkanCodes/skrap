@@ -4,9 +4,11 @@ import json
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from threading import RLock
+import time
 
 import httpx
 import jwt
+from app.core.perf import log_span
 
 
 class AuthenticationError(RuntimeError):
@@ -45,6 +47,7 @@ class BetterAuthJwtVerifier:
         self._cache_expires_at: datetime | None = None
 
     def verify(self, token: str) -> AuthPrincipal:
+        verify_started = time.perf_counter()
         normalized = token.strip()
         if not normalized:
             raise AuthenticationError("Missing bearer token")
@@ -59,6 +62,7 @@ class BetterAuthJwtVerifier:
             raise AuthenticationError("Token header missing kid")
 
         signing_key = self._get_signing_key_for_kid(kid=kid)
+        decode_started = time.perf_counter()
         try:
             claims = jwt.decode(
                 normalized,
@@ -72,6 +76,12 @@ class BetterAuthJwtVerifier:
             )
         except Exception as exc:
             raise AuthenticationError(f"Invalid token claims: {exc}") from exc
+        finally:
+            log_span(
+                component="auth",
+                operation="jwt_decode",
+                duration_ms=(time.perf_counter() - decode_started) * 1000,
+            )
 
         audience = claims.get("aud")
         if isinstance(audience, list):
@@ -79,13 +89,19 @@ class BetterAuthJwtVerifier:
         else:
             audience_str = str(audience or "")
 
-        return AuthPrincipal(
+        principal = AuthPrincipal(
             subject=str(claims.get("sub", "")).strip(),
             email=_as_optional_str(claims.get("email")),
             name=_as_optional_str(claims.get("name")),
             issuer=str(claims.get("iss", "")).strip(),
             audience=audience_str,
         )
+        log_span(
+            component="auth",
+            operation="verify",
+            duration_ms=(time.perf_counter() - verify_started) * 1000,
+        )
+        return principal
 
     def _get_signing_key_for_kid(self, *, kid: str) -> jwt.PyJWK:
         with self._lock:
@@ -110,6 +126,7 @@ class BetterAuthJwtVerifier:
         return datetime.now(tz=UTC) >= self._cache_expires_at
 
     def _refresh_jwk_set(self) -> jwt.PyJWKSet:
+        started = time.perf_counter()
         try:
             response = httpx.get(self._jwks_url, timeout=10)
             response.raise_for_status()
@@ -128,6 +145,12 @@ class BetterAuthJwtVerifier:
 
         self._cached_set = parsed
         self._cache_expires_at = datetime.now(tz=UTC) + timedelta(seconds=self._cache_ttl)
+        log_span(
+            component="auth",
+            operation="jwks_fetch",
+            duration_ms=(time.perf_counter() - started) * 1000,
+            always=True,
+        )
         return parsed
 
 
@@ -153,4 +176,3 @@ def _as_optional_str(value: object | None) -> str | None:
         return None
     normalized = str(value).strip()
     return normalized or None
-

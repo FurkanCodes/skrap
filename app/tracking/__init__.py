@@ -13,6 +13,7 @@ from .domain import (
     TrackingCheckRunStatus,
     TrackingMode,
     TrackingStatus,
+    UsageCounter,
     UserEntitlement,
     derive_tracking_mode,
 )
@@ -34,6 +35,7 @@ __all__ = [
     "TrackingMode",
     "TrackingRepository",
     "TrackingStatus",
+    "UsageCounter",
     "UserEntitlement",
     "derive_tracking_mode",
 ]

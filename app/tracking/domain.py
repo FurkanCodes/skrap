@@ -187,3 +187,16 @@ class UserEntitlement:
     overage_policy: str
     created_at: str
     updated_at: str
+
+
+@dataclass(frozen=True)
+class UsageCounter:
+    """Per-user consumed check units for one billing period."""
+
+    counter_id: str
+    user_id: str
+    period_start: str
+    period_end: str
+    consumed_check_units: int
+    created_at: str
+    updated_at: str

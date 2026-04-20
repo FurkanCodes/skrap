@@ -18,6 +18,7 @@ from app.tracking.domain import (
     TrackingBootstrapIdempotencyRecord,
     TrackingCheckRun,
     TrackingCheckRunStatus,
+    UsageCounter,
     UserEntitlement,
 )
 
@@ -374,14 +375,19 @@ class PostgresTrackingRepository:
                         """
                     )
                     now = datetime.now(tz=UTC)
-                    conn.execute(
-                        """
-                        INSERT INTO plans (plan_key, name, created_at, updated_at)
-                        VALUES (%s, %s, %s, %s)
-                        ON CONFLICT(plan_key) DO NOTHING
-                        """,
-                        ("free", "Free", now, now),
-                    )
+                    for plan_key, name in (
+                        ("free", "Free"),
+                        ("plus", "Plus"),
+                        ("pro", "Pro"),
+                    ):
+                        conn.execute(
+                            """
+                            INSERT INTO plans (plan_key, name, created_at, updated_at)
+                            VALUES (%s, %s, %s, %s)
+                            ON CONFLICT(plan_key) DO NOTHING
+                            """,
+                            (plan_key, name, now, now),
+                        )
 
     def close(self) -> None:
         """Close pooled connections (useful in tests/shutdown hooks)."""
@@ -481,13 +487,8 @@ class PostgresTrackingRepository:
                     overage_policy,
                     created_at,
                     updated_at
-                ) VALUES (%s, 'free', 5, 1, 1500, 'telegram', 'deny', %s, %s)
-                ON CONFLICT(user_id) DO UPDATE
-                SET min_check_interval_minutes = LEAST(
-                        entitlements.min_check_interval_minutes,
-                        EXCLUDED.min_check_interval_minutes
-                    ),
-                    updated_at = EXCLUDED.updated_at
+                ) VALUES (%s, 'free', 5, 180, 1500, 'telegram', 'block', %s, %s)
+                ON CONFLICT(user_id) DO NOTHING
                 """,
                 (user_id, now_dt, now_dt),
             )
@@ -524,6 +525,86 @@ class PostgresTrackingRepository:
         if row is None:
             return None
         return self._row_to_user_entitlement(row)
+
+    def get_current_usage_counter(self, *, user_id: str, now: str) -> UsageCounter:
+        now_dt = _parse_timestamp(now)
+        if now_dt is None:  # pragma: no cover - defensive guard
+            raise RuntimeError("now must be provided")
+        period_start, period_end = _usage_period_bounds(now_dt)
+
+        with self._pool.connection() as conn:
+            with conn.transaction():
+                self._ensure_usage_counter(
+                    conn=conn,
+                    user_id=user_id,
+                    period_start=period_start,
+                    period_end=period_end,
+                    now=now_dt,
+                )
+                row = conn.execute(
+                    """
+                    SELECT *
+                    FROM usage_counters
+                    WHERE user_id = %s
+                      AND period_start = %s
+                      AND period_end = %s
+                    LIMIT 1
+                    """,
+                    (user_id, period_start, period_end),
+                ).fetchone()
+        if row is None:  # pragma: no cover - defensive guard
+            raise RuntimeError("Failed to resolve current usage counter")
+        return self._row_to_usage_counter(row)
+
+    def try_consume_check_units(
+        self,
+        *,
+        user_id: str,
+        units: int,
+        monthly_limit: int,
+        now: str,
+    ) -> bool:
+        if units < 1:
+            return True
+        if monthly_limit < 0:
+            monthly_limit = 0
+
+        now_dt = _parse_timestamp(now)
+        if now_dt is None:  # pragma: no cover - defensive guard
+            return False
+        period_start, period_end = _usage_period_bounds(now_dt)
+
+        with self._pool.connection() as conn:
+            with conn.transaction():
+                self._ensure_usage_counter(
+                    conn=conn,
+                    user_id=user_id,
+                    period_start=period_start,
+                    period_end=period_end,
+                    now=now_dt,
+                )
+                row = conn.execute(
+                    """
+                    UPDATE usage_counters
+                    SET consumed_check_units = consumed_check_units + %s,
+                        updated_at = %s
+                    WHERE user_id = %s
+                      AND period_start = %s
+                      AND period_end = %s
+                      AND (consumed_check_units + %s) <= %s
+                    RETURNING counter_id
+                    """,
+                    (
+                        units,
+                        now_dt,
+                        user_id,
+                        period_start,
+                        period_end,
+                        units,
+                        monthly_limit,
+                    ),
+                ).fetchone()
+        return row is not None
 
     def assign_all_legacy_data_to_user(self, *, user_id: str, now: str) -> None:
         now_dt = _parse_timestamp(now)
@@ -1527,6 +1608,38 @@ class PostgresTrackingRepository:
             return None
         return _as_str(row.get("value"))
 
+    @staticmethod
+    def _ensure_usage_counter(
+        *,
+        conn,
+        user_id: str,
+        period_start: datetime,
+        period_end: datetime,
+        now: datetime,
+    ) -> None:
+        conn.execute(
+            """
+            INSERT INTO usage_counters (
+                counter_id,
+                user_id,
+                period_start,
+                period_end,
+                consumed_check_units,
+                created_at,
+                updated_at
+            ) VALUES (%s, %s, %s, %s, 0, %s, %s)
+            ON CONFLICT(user_id, period_start, period_end) DO NOTHING
+            """,
+            (
+                f"usc_{uuid.uuid4().hex[:20]}",
+                user_id,
+                period_start,
+                period_end,
+                now,
+                now,
+            ),
+        )
+
     def _insert_snapshot(self, conn, snapshot: PriceSnapshot) -> None:
         conn.execute(
             """
@@ -1751,6 +1864,18 @@ class PostgresTrackingRepository:
         )
 
     @staticmethod
+    def _row_to_usage_counter(row: dict[str, object]) -> UsageCounter:
+        return UsageCounter(
+            counter_id=str(row["counter_id"]),
+            user_id=str(row["user_id"]),
+            period_start=_format_timestamp(row.get("period_start")),
+            period_end=_format_timestamp(row.get("period_end")),
+            consumed_check_units=int(row["consumed_check_units"]),
+            created_at=_format_timestamp(row.get("created_at")),
+            updated_at=_format_timestamp(row.get("updated_at")),
+        )
+
+    @staticmethod
     def _row_to_bootstrap_idempotency(
         row: dict[str, object],
     ) -> TrackingBootstrapIdempotencyRecord:
@@ -1797,6 +1922,15 @@ def _as_str(value: object | None) -> str | None:
     if value is None:
         return None
     return str(value)
+
+
+def _usage_period_bounds(now: datetime) -> tuple[datetime, datetime]:
+    period_start = datetime(year=now.year, month=now.month, day=1, tzinfo=UTC)
+    if now.month == 12:
+        period_end = datetime(year=now.year + 1, month=1, day=1, tzinfo=UTC)
+    else:
+        period_end = datetime(year=now.year, month=now.month + 1, day=1, tzinfo=UTC)
+    return period_start, period_end
 
 
 def _scope_idempotency_key(*, user_id: str, key: str) -> str:

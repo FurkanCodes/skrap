@@ -13,7 +13,14 @@ from urllib.parse import quote_plus
 
 from app.application.scrape_service import ScrapeBatchInput, ScrapeBatchOutput
 from app.scraper import PriceResult
-from app.tracking import AlertEvent, NotificationEvent, PriceSnapshot, TrackedItem, TrackingRepository
+from app.tracking import (
+    AlertEvent,
+    NotificationEvent,
+    PriceSnapshot,
+    TrackedItem,
+    TrackingRepository,
+    UserEntitlement,
+)
 
 
 class TrackingSchedulerError(RuntimeError):
@@ -128,9 +135,25 @@ class TrackingSchedulerService:
 
         success_count = 0
         failure_count = pre_scrape_failures
+        credit_exhausted_count = 0
+        entitlement_cache: dict[str, UserEntitlement | None] = {}
         for chunk in _chunked(contexts, self._max_inflight):
-            batch_results = self._scrape_chunk(chunk)
+            runnable_chunk: list[_ItemRunContext] = []
             for context in chunk:
+                if self._consume_check_unit_or_defer(
+                    context=context,
+                    entitlement_cache=entitlement_cache,
+                ):
+                    runnable_chunk.append(context)
+                else:
+                    credit_exhausted_count += 1
+                    failure_class_counts["credit_exhausted"] += 1
+
+            if not runnable_chunk:
+                continue
+
+            batch_results = self._scrape_chunk(runnable_chunk)
+            for context in runnable_chunk:
                 site_key = _normalize_site_key(context.item.site_key)
                 scrape_result = batch_results.get(
                     context.item.source_url,
@@ -154,7 +177,7 @@ class TrackingSchedulerService:
         return SchedulerCycleResult(
             claimed_count=len(claimed),
             processed_count=success_count + failure_count,
-            skipped_count=skipped_count,
+            skipped_count=skipped_count + credit_exhausted_count,
             success_count=success_count,
             failure_count=failure_count,
             duration_seconds=duration,
@@ -167,6 +190,95 @@ class TrackingSchedulerService:
             site_failure_counts=dict(site_failure_counts),
             failure_class_counts=dict(failure_class_counts),
         )
+
+    def _consume_check_unit_or_defer(
+        self,
+        *,
+        context: _ItemRunContext,
+        entitlement_cache: dict[str, UserEntitlement | None],
+    ) -> bool:
+        user_id = getattr(context.item, "user_id", "legacy_owner")
+        entitlement = self._resolve_user_entitlement(
+            user_id=user_id,
+            entitlement_cache=entitlement_cache,
+        )
+        if entitlement is None:
+            return True
+
+        consume_method = getattr(self._repository, "try_consume_check_units", None)
+        if not callable(consume_method):
+            return True
+
+        try:
+            consumed = bool(
+                consume_method(
+                    user_id=user_id,
+                    units=1,
+                    monthly_limit=entitlement.monthly_check_units,
+                    now=context.started_at,
+                )
+            )
+        except Exception:
+            # If billing/usage persistence fails unexpectedly, keep scheduler
+            # progress safe by processing the item instead of dropping checks.
+            return True
+
+        if consumed:
+            return True
+
+        self._defer_item_for_credit_exhaustion(context=context)
+        return False
+
+    def _resolve_user_entitlement(
+        self,
+        *,
+        user_id: str,
+        entitlement_cache: dict[str, UserEntitlement | None],
+    ) -> UserEntitlement | None:
+        if user_id in entitlement_cache:
+            return entitlement_cache[user_id]
+
+        method = getattr(self._repository, "get_user_entitlement", None)
+        if not callable(method):
+            entitlement_cache[user_id] = None
+            return None
+
+        try:
+            entitlement = method(user_id=user_id)
+        except Exception:
+            entitlement = None
+        entitlement_cache[user_id] = entitlement
+        return entitlement
+
+    def _defer_item_for_credit_exhaustion(self, *, context: _ItemRunContext) -> None:
+        now = _to_iso(_utcnow())
+        _, period_end = _usage_period_bounds(now)
+        try:
+            # No scrape ran, so keep last_checked_at unchanged. We only release
+            # the lease and park next_check_at until the next billing cycle.
+            self._repository.save_item(
+                replace(
+                    context.item,
+                    lease_owner=None,
+                    lease_until=None,
+                    last_check_started_at=context.started_at,
+                    last_check_finished_at=now,
+                    updated_at=now,
+                    next_check_at=period_end,
+                )
+            )
+        except Exception:
+            pass
+
+        try:
+            self._repository.finish_check_run(
+                run_id=context.run_id,
+                status="failed",
+                finished_at=now,
+                error="monthly_credit_exhausted",
+            )
+        except Exception:
+            pass
 
     def _start_runs(self, items: list[TrackedItem]) -> tuple[list[_ItemRunContext], int, int]:
         contexts: list[_ItemRunContext] = []
@@ -733,6 +845,19 @@ def _compute_due_lag_seconds(now: datetime, next_check_at: str | None) -> float:
         return 0.0
     scheduled = datetime.fromisoformat(next_check_at.replace("Z", "+00:00"))
     return max(0.0, (now - scheduled).total_seconds())
+
+
+def _usage_period_bounds(now_iso: str) -> tuple[str, str]:
+    now = datetime.fromisoformat(now_iso.replace("Z", "+00:00")).astimezone(UTC)
+    period_start = datetime(year=now.year, month=now.month, day=1, tzinfo=UTC)
+    if now.month == 12:
+        period_end = datetime(year=now.year + 1, month=1, day=1, tzinfo=UTC)
+    else:
+        period_end = datetime(year=now.year, month=now.month + 1, day=1, tzinfo=UTC)
+    return (
+        period_start.isoformat().replace("+00:00", "Z"),
+        period_end.isoformat().replace("+00:00", "Z"),
+    )
 
 
 def _percentile(values: tuple[float, ...], percentile: int) -> float | None:

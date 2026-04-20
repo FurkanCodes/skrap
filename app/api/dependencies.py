@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import UTC, datetime
 from functools import lru_cache
+import time
+from typing import TypeVar
 
 from fastapi import Depends, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -12,14 +12,15 @@ from app.application.scrape_result_cache import ScrapeResultCache
 from app.application.scrape_service import ScrapeBatchService
 from app.application.telegram_integration_service import TelegramIntegrationService
 from app.application.tracking_service import TrackingService
-from app.application.user_service import MeOutput, UserService
+from app.application.user_service import UserService
 from app.core.auth import AuthPrincipal, AuthenticationError, BetterAuthJwtVerifier
 from app.core.config import Settings, get_settings
+from app.core.perf import TimedProxy, log_span, perf_enabled
 from app.infrastructure.postgres_tracking_repository import PostgresTrackingRepository
 from app.infrastructure.scraper_gateway import ScraplingGateway
-from app.tracking import AppUser, UserEntitlement
 
 _http_bearer = HTTPBearer(auto_error=False)
+_Instance = TypeVar("_Instance")
 
 
 def get_app_settings() -> Settings:
@@ -29,11 +30,12 @@ def get_app_settings() -> Settings:
 @lru_cache
 def _get_scrape_service_cached(scrape_concurrency: int) -> ScrapeBatchService:
     gateway = ScraplingGateway()
-    return ScrapeBatchService(
+    service = ScrapeBatchService(
         gateway=gateway,
         max_workers=scrape_concurrency,
         use_spider_runtime=True,
     )
+    return _maybe_profile(service, component="scrape_service")
 
 
 def get_scrape_service(
@@ -45,7 +47,8 @@ def get_scrape_service(
 @lru_cache
 def _get_discovery_service_cached(scrape_concurrency: int) -> DiscoveryBatchService:
     scrape_service = _get_scrape_service_cached(scrape_concurrency)
-    return DiscoveryBatchService(scrape_service=scrape_service)
+    service = DiscoveryBatchService(scrape_service=scrape_service)
+    return _maybe_profile(service, component="discovery_service")
 
 
 def get_discovery_service(
@@ -82,8 +85,15 @@ def _get_tracking_repository_cached(
         min_pool_size=db_pool_min_size,
         max_pool_size=db_pool_max_size,
     )
+    started = time.perf_counter()
     repository.initialize()
-    return repository
+    log_span(
+        component="tracking_repository",
+        operation="initialize",
+        duration_ms=(time.perf_counter() - started) * 1000,
+        always=True,
+    )
+    return _maybe_profile(repository, component="tracking_repository")
 
 
 @lru_cache
@@ -104,7 +114,7 @@ def _get_tracking_service_cached(
     )
 
     scrape_service = _get_scrape_service_cached(scrape_concurrency)
-    return TrackingService(
+    service = TrackingService(
         repository=repository,
         scrape_service=scrape_service,
         default_interval_minutes=default_interval_minutes,
@@ -112,6 +122,7 @@ def _get_tracking_service_cached(
         max_interval_minutes=max_interval_minutes,
         default_snapshot_limit=snapshot_default_limit,
     )
+    return _maybe_profile(service, component="tracking_service")
 
 
 @lru_cache
@@ -128,12 +139,13 @@ def _get_telegram_integration_service_cached(
         db_pool_min_size=db_pool_min_size,
         db_pool_max_size=db_pool_max_size,
     )
-    return TelegramIntegrationService(
+    service = TelegramIntegrationService(
         repository=repository,
         bot_token=bot_token,
         bot_username=bot_username,
         connect_ttl_minutes=connect_ttl_minutes,
     )
+    return _maybe_profile(service, component="telegram_service")
 
 
 def get_tracking_service(
@@ -171,12 +183,13 @@ def _get_jwt_verifier_cached(
     audience: str,
     jwks_cache_ttl_seconds: int,
 ) -> BetterAuthJwtVerifier:
-    return BetterAuthJwtVerifier(
+    verifier = BetterAuthJwtVerifier(
         jwks_url=jwks_url,
         issuer=issuer,
         audience=audience,
         jwks_cache_ttl_seconds=jwks_cache_ttl_seconds,
     )
+    return _maybe_profile(verifier, component="jwt_verifier")
 
 
 def get_jwt_verifier(
@@ -224,14 +237,13 @@ def _get_user_service_cached(
         db_pool_min_size=db_pool_min_size,
         db_pool_max_size=db_pool_max_size,
     )
-    return UserService(repository=repository)
+    service = UserService(repository=repository)
+    return _maybe_profile(service, component="user_service")
 
 
 def get_user_service(
     settings: Settings = Depends(get_app_settings),
 ) -> UserService:
-    if not settings.auth_required:
-        return _get_dev_user_service_cached()
     return _get_user_service_cached(
         database_url=settings.tracking_database_url,
         db_pool_min_size=settings.tracking_db_pool_min_size,
@@ -239,44 +251,7 @@ def get_user_service(
     )
 
 
-@dataclass(frozen=True)
-class _DevUserService:
-    """No-op user service for local/test mode when auth is disabled."""
-
-    def provision_from_principal(self, principal: AuthPrincipal) -> AppUser:
-        now = _utcnow_iso()
-        return AppUser(
-            user_id=principal.subject,
-            auth_provider="better_auth",
-            auth_subject=principal.subject,
-            email=principal.email,
-            display_name=principal.name,
-            created_at=now,
-            updated_at=now,
-        )
-
-    def get_me(self, principal: AuthPrincipal) -> MeOutput:
-        now = _utcnow_iso()
-        return MeOutput(
-            user=self.provision_from_principal(principal),
-            entitlement=UserEntitlement(
-                user_id=principal.subject,
-                plan_key="free",
-                max_active_trackers=1_000_000,
-                min_check_interval_minutes=1,
-                monthly_check_units=1_000_000,
-                allowed_channels="telegram,log",
-                overage_policy="block",
-                created_at=now,
-                updated_at=now,
-            ),
-        )
-
-
-@lru_cache
-def _get_dev_user_service_cached() -> _DevUserService:
-    return _DevUserService()
-
-
-def _utcnow_iso() -> str:
-    return datetime.now(tz=UTC).isoformat().replace("+00:00", "Z")
+def _maybe_profile(instance: _Instance, *, component: str) -> _Instance:
+    if not perf_enabled():
+        return instance
+    return TimedProxy(instance, component=component)  # type: ignore[return-value]

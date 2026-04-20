@@ -16,6 +16,7 @@ from app.api.routers.sites import router as sites_router
 from app.api.routers.telegram import router as telegram_router
 from app.api.routers.tracked_items import router as tracked_items_router
 from app.core.config import get_settings
+from app.core.perf import reset_request_context, set_request_context
 
 
 def _configure_logging() -> None:
@@ -56,6 +57,10 @@ def create_app() -> FastAPI:
     async def add_request_context(request: Request, call_next):
         request_id = request.headers.get("X-Request-ID") or uuid.uuid4().hex
         request.state.request_id = request_id
+        request_token, path_token = set_request_context(
+            request_id=request_id,
+            path=request.url.path,
+        )
         started = time.perf_counter()
         logger = logging.getLogger("scraper_api")
         try:
@@ -70,6 +75,11 @@ def create_app() -> FastAPI:
                 elapsed_ms,
             )
             raise
+        finally:
+            reset_request_context(
+                request_token=request_token,
+                path_token=path_token,
+            )
 
         elapsed_ms = (time.perf_counter() - started) * 1000
         logger.info(

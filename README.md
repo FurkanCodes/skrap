@@ -158,6 +158,69 @@ Lightweight liveness check.
 }
 ```
 
+## GET /api/v1/me
+
+Returns current user profile, active entitlement limits, and current monthly credit usage.
+
+Auth:
+- Requires valid bearer token when `AUTH_REQUIRED=true`.
+- In local/dev mode (`AUTH_REQUIRED=false`), returns deterministic `free` defaults.
+
+### Response
+
+```json
+{
+  "user": {
+    "user_id": "usr_...",
+    "auth_provider": "better_auth",
+    "auth_subject": "auth_sub_...",
+    "email": "user@example.com",
+    "display_name": "User Name",
+    "created_at": "...Z",
+    "updated_at": "...Z"
+  },
+  "entitlement": {
+    "user_id": "usr_...",
+    "plan_key": "free",
+    "max_active_trackers": 5,
+    "min_check_interval_minutes": 180,
+    "monthly_check_units": 1500,
+    "allowed_channels": "telegram",
+    "overage_policy": "block",
+    "created_at": "...Z",
+    "updated_at": "...Z"
+  },
+  "usage": {
+    "user_id": "usr_...",
+    "period_start": "2026-04-01T00:00:00Z",
+    "period_end": "2026-05-01T00:00:00Z",
+    "monthly_check_units": 1500,
+    "consumed_check_units": 240,
+    "remaining_check_units": 1260
+  }
+}
+```
+
+UI usage:
+- Use `entitlement.max_active_trackers` to cap create-track CTA.
+- Use `entitlement.min_check_interval_minutes` as minimum value in interval selector.
+- Show credit meter with `usage.consumed_check_units` and `usage.remaining_check_units`.
+- Use `usage.period_end` for "resets on" messaging.
+
+## Locked Plan Limits
+
+Current launch limits:
+
+| Plan | `plan_key` | Max active trackers | Fastest interval | Monthly credits (`monthly_check_units`) | Channels | Overage |
+|---|---|---:|---:|---:|---|---|
+| Free | `free` | 5 | 180 min | 1500 | telegram | block |
+| Plus | `plus` | 50 | 30 min | 20000 | telegram | block |
+| Pro | `pro` | 200 | 10 min | 100000 | telegram | block |
+
+Credit rule:
+- 1 credit = 1 scheduled product re-check.
+- Credits are consumed by scheduler checks, not by browsing UI.
+
 ## GET /api/v1/sites
 
 Returns supported site adapter keys.
@@ -355,7 +418,7 @@ Supports two bootstrap sources:
 | `sites` | `list[str] \| null` | no | same site filter semantics |
 | `timeout_seconds` | `int \| null` | no | same timeout bounds |
 | `fetch_mode` | `"auto" \| "http" \| "dynamic" \| "stealth"` | no | default `auto` |
-| `check_interval_minutes` | `int` | no | default 60, allowed 5..10080 |
+| `check_interval_minutes` | `int` | no | default 60, allowed `max(5, user_plan_min)` .. 10080 |
 | `target_amount` | `str \| null` | no | null/blank => monitor mode |
 
 ### Important behaviors
@@ -364,6 +427,9 @@ Supports two bootstrap sources:
 - Upsert key is `source_url`.
   - existing row for URL is refreshed, not duplicated.
 - On successful bootstrap, one snapshot is appended.
+- Interval validation is plan-aware:
+  - global minimum is 5 minutes
+  - effective minimum is `max(global minimum, entitlement.min_check_interval_minutes)`
 - With `Idempotency-Key`, same payload can be safely retried.
   - same key + different payload => `409`.
 
@@ -488,7 +554,7 @@ No scrape is triggered.
 | Field | Type | Notes |
 |---|---|---|
 | `status` | `"active" \| "paused" \| null` | pause/resume tracking |
-| `check_interval_minutes` | `int \| null` | must be 5..10080 when provided |
+| `check_interval_minutes` | `int \| null` | must be `max(5, user_plan_min)` .. 10080 when provided |
 | `target_amount` | `str \| null` | provide `null` to clear target and switch to monitor mode |
 
 ### Behavior notes
@@ -692,6 +758,11 @@ High-level relationships:
 ### Tracking bootstrap can update existing tracked item
 - If same `source_url` already tracked, bootstrap refreshes existing item and appends a new snapshot.
 - UI should not assume every bootstrap creates a new `item_id`.
+
+### Monthly credits are enforced by scheduler
+- Scheduler consumes `1` credit for each scheduled re-check attempt.
+- When credits are exhausted (`overage_policy = block`), checks are deferred to the next billing period boundary.
+- Credits are tracked per user in `usage_counters`.
 
 ### Target amount UX
 - Use explicit monitor/alert control in UI.

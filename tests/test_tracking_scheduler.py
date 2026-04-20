@@ -19,11 +19,26 @@ from app.tracking import (
     TrackingBootstrapIdempotencyRecord,
     TrackingCheckRun,
     TrackingCheckRunStatus,
+    UsageCounter,
+    UserEntitlement,
 )
 
 
 def _iso(dt: datetime) -> str:
     return dt.isoformat().replace("+00:00", "Z")
+
+
+def _usage_period_bounds(now_iso: str) -> tuple[str, str]:
+    now = datetime.fromisoformat(now_iso.replace("Z", "+00:00")).astimezone(UTC)
+    period_start = datetime(year=now.year, month=now.month, day=1, tzinfo=UTC)
+    if now.month == 12:
+        period_end = datetime(year=now.year + 1, month=1, day=1, tzinfo=UTC)
+    else:
+        period_end = datetime(year=now.year, month=now.month + 1, day=1, tzinfo=UTC)
+    return (
+        period_start.isoformat().replace("+00:00", "Z"),
+        period_end.isoformat().replace("+00:00", "Z"),
+    )
 
 
 def _item(
@@ -105,6 +120,8 @@ class _InMemoryTrackingRepository:
     notifications_by_id: dict[str, NotificationEvent]
     notifications_by_idempotency_key: dict[str, str]
     active_telegram_chat_id: str | None
+    entitlements_by_user: dict[str, UserEntitlement]
+    usage_counters_by_scope: dict[tuple[str, str, str], UsageCounter]
 
     def initialize(self) -> None:
         return None
@@ -438,6 +455,48 @@ class _InMemoryTrackingRepository:
     def get_active_telegram_chat(self) -> str | None:
         return self.active_telegram_chat_id
 
+    def get_user_entitlement(self, *, user_id: str) -> UserEntitlement | None:
+        return self.entitlements_by_user.get(user_id)
+
+    def get_current_usage_counter(self, *, user_id: str, now: str) -> UsageCounter:
+        period_start, period_end = _usage_period_bounds(now)
+        key = (user_id, period_start, period_end)
+        current = self.usage_counters_by_scope.get(key)
+        if current is not None:
+            return current
+        created = UsageCounter(
+            counter_id=f"usc_{user_id}_{period_start}",
+            user_id=user_id,
+            period_start=period_start,
+            period_end=period_end,
+            consumed_check_units=0,
+            created_at=now,
+            updated_at=now,
+        )
+        self.usage_counters_by_scope[key] = created
+        return created
+
+    def try_consume_check_units(
+        self,
+        *,
+        user_id: str,
+        units: int,
+        monthly_limit: int,
+        now: str,
+    ) -> bool:
+        if units < 1:
+            return True
+        usage = self.get_current_usage_counter(user_id=user_id, now=now)
+        if usage.consumed_check_units + units > max(0, monthly_limit):
+            return False
+        key = (user_id, usage.period_start, usage.period_end)
+        self.usage_counters_by_scope[key] = replace(
+            usage,
+            consumed_check_units=usage.consumed_check_units + units,
+            updated_at=now,
+        )
+        return True
+
     def _upsert_snapshot(self, snapshot: PriceSnapshot) -> None:
         conflict_id = None
         if snapshot.scheduled_for is not None:
@@ -487,6 +546,20 @@ def _build_repo() -> _InMemoryTrackingRepository:
         notifications_by_id={},
         notifications_by_idempotency_key={},
         active_telegram_chat_id=None,
+        entitlements_by_user={
+            "legacy_owner": UserEntitlement(
+                user_id="legacy_owner",
+                plan_key="free",
+                max_active_trackers=5,
+                min_check_interval_minutes=180,
+                monthly_check_units=1_500,
+                allowed_channels="telegram",
+                overage_policy="block",
+                created_at=_iso(datetime.now(tz=UTC)),
+                updated_at=_iso(datetime.now(tz=UTC)),
+            )
+        },
+        usage_counters_by_scope={},
     )
     return repo
 
@@ -721,6 +794,69 @@ def test_scheduler_run_once_failure_keeps_last_good_price() -> None:
     runs = repo.list_check_runs(item.item_id, limit=5)
     assert runs
     assert runs[0].status == "failed"
+
+
+def test_scheduler_defers_when_monthly_credits_are_exhausted() -> None:
+    repo = _build_repo()
+    now = datetime.now(tz=UTC)
+    item = _item(
+        item_id="trk_exhausted",
+        url="https://example.com/exhausted",
+        now=now,
+        next_check_at=_iso(now - timedelta(minutes=1)),
+        last_amount="100.00",
+    )
+    repo.save_item(item)
+    repo.entitlements_by_user["legacy_owner"] = replace(
+        repo.entitlements_by_user["legacy_owner"],
+        monthly_check_units=0,
+        updated_at=_iso(now),
+    )
+
+    scrape_result = PriceResult(
+        url=item.source_url,
+        success=True,
+        amount="80.00",
+        currency="USD",
+        raw_text="$80.00",
+        source="test:exhausted",
+        site_key="generic",
+        adapter_key="generic",
+    )
+    scheduler = TrackingSchedulerService(
+        repository=repo,
+        scrape_runner=_FakeScrapeRunner({item.source_url: scrape_result}),
+        timeout_seconds=30,
+        claim_batch_size=50,
+        max_inflight=4,
+        lease_seconds=180,
+        jitter_percent=0,
+        lease_owner="scheduler-test",
+    )
+
+    outcome = scheduler.run_once()
+
+    assert outcome.claimed_count == 1
+    assert outcome.processed_count == 0
+    assert outcome.skipped_count == 1
+    assert outcome.success_count == 0
+    assert outcome.failure_count == 0
+    assert outcome.failure_class_counts.get("credit_exhausted") == 1
+
+    runs = repo.list_check_runs(item.item_id, limit=5)
+    assert runs
+    assert runs[0].status == "failed"
+    assert runs[0].error == "monthly_credit_exhausted"
+
+    snapshots = repo.list_snapshots(item.item_id, limit=5)
+    assert snapshots == []
+
+    updated = repo.get_item(item.item_id)
+    assert updated is not None
+    assert updated.last_amount == "100.00"
+    assert updated.next_check_at is not None
+    _, period_end = _usage_period_bounds(_iso(now))
+    assert updated.next_check_at == period_end
 
 
 def test_scheduler_due_lag_metrics_are_reported() -> None:

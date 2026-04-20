@@ -13,6 +13,7 @@ from app.tracking.domain import (
     TrackedItem,
     TrackingCheckRun,
     TrackingCheckRunStatus,
+    UsageCounter,
     UserEntitlement,
 )
 
@@ -246,6 +247,19 @@ class TrackingRepository(Protocol):
         ...
 
     def get_user_entitlement(self, *, user_id: str) -> UserEntitlement | None:
+        ...
+
+    def get_current_usage_counter(self, *, user_id: str, now: str) -> UsageCounter:
+        ...
+
+    def try_consume_check_units(
+        self,
+        *,
+        user_id: str,
+        units: int,
+        monthly_limit: int,
+        now: str,
+    ) -> bool:
         ...
 
     def assign_all_legacy_data_to_user(self, *, user_id: str, now: str) -> None:
