@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import re
 from decimal import Decimal, InvalidOperation
-from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
+from urllib.parse import parse_qs, parse_qsl, urlencode, urljoin, urlparse, urlunparse
 
 from .constants import CURRENCY_TOKEN_TO_CODE, PRICE_PATTERN
 from .domain import PriceCandidate
@@ -14,6 +14,8 @@ _TRACKING_QUERY_PARAM_PATTERN = re.compile(
     r"^(utm_|fbclid$|gclid$|yclid$|ref$|tag$|aff$|affiliate$|mc_cid$|mc_eid$)",
     re.IGNORECASE,
 )
+_ALIEXPRESS_ITEM_PATH_PATTERN = re.compile(r"/item/\d+\.html", re.IGNORECASE)
+_ALIEXPRESS_PRODUCT_ID_PATTERN = re.compile(r"\d{10,}")
 
 
 def normalize_currency(token: str | None) -> str | None:
@@ -126,6 +128,39 @@ def normalize_url(url: str, *, keep_fragment: bool = False) -> str:
             parsed.fragment if keep_fragment else "",
         )
     )
+
+
+def normalize_runtime_url(url: str) -> str:
+    """Normalize runtime fetch URL for known non-product deep links.
+
+    Some share links (notably AliExpress BundleDeals pages) include a
+    `productIds` query value instead of a direct product URL. For scraping,
+    rewrite to a canonical product-detail path so dedicated adapters can
+    parse stable title/image/price fields.
+    """
+    parsed = urlparse(url)
+    host = parsed.netloc.lower().removeprefix("www.")
+    if not host.endswith("aliexpress.com"):
+        return url
+
+    if _ALIEXPRESS_ITEM_PATH_PATTERN.search(parsed.path):
+        return url
+
+    query = parse_qs(parsed.query, keep_blank_values=True)
+    raw_product_ids = query.get("productIds") or query.get("productId") or []
+    product_id: str | None = None
+    for raw_value in raw_product_ids:
+        match = _ALIEXPRESS_PRODUCT_ID_PATTERN.search(raw_value)
+        if match:
+            product_id = match.group(0)
+            break
+
+    if not product_id:
+        return url
+
+    scheme = parsed.scheme or "https"
+    netloc = parsed.netloc or "www.aliexpress.com"
+    return urlunparse((scheme, netloc, f"/item/{product_id}.html", "", "", ""))
 
 
 def strip_tracking_query_params(url: str) -> str:

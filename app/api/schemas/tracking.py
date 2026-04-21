@@ -21,6 +21,37 @@ class TrackedItemBootstrapRequest(BaseModel):
         return self
 
 
+class TrackedItemBulkBootstrapItemRequest(BaseModel):
+    url: AnyHttpUrl | None = None
+    scrape_result_ref: str | None = None
+    check_interval_minutes: int | None = Field(default=None, ge=1, le=10080)
+    target_amount: str | None = None
+
+    @model_validator(mode="after")
+    def validate_source(self) -> "TrackedItemBulkBootstrapItemRequest":
+        if self.url is None and not (self.scrape_result_ref or "").strip():
+            raise ValueError("Either 'url' or 'scrape_result_ref' is required")
+        return self
+
+
+class TrackedItemBulkBootstrapRequest(BaseModel):
+    items: list[TrackedItemBulkBootstrapItemRequest] | None = Field(default=None, min_length=1)
+    urls: list[AnyHttpUrl] | None = Field(default=None, min_length=1)
+    sites: list[str] | None = None
+    timeout_seconds: int | None = Field(default=None, ge=1)
+    fetch_mode: Literal["auto", "http", "dynamic", "stealth"] = "auto"
+    check_interval_minutes: int = Field(default=60, ge=1, le=10080)
+    target_amount: str | None = None
+
+    @model_validator(mode="after")
+    def validate_item_sources(self) -> "TrackedItemBulkBootstrapRequest":
+        if self.items is None and self.urls is None:
+            raise ValueError("Either 'items' or 'urls' is required")
+        if self.items is not None and self.urls is not None:
+            raise ValueError("Use either 'items' or 'urls', not both")
+        return self
+
+
 class TrackedItemUpdateRequest(BaseModel):
     status: Literal["active", "paused"] | None = None
     check_interval_minutes: int | None = Field(default=None, ge=1, le=10080)
@@ -78,6 +109,22 @@ class TrackedItemListResponse(BaseModel):
 class TrackedItemBootstrapResponse(BaseModel):
     request_id: str
     item: TrackedItemResponse
+
+
+class TrackedItemBulkBootstrapResult(BaseModel):
+    index: int = Field(ge=0)
+    url: str | None
+    success: bool
+    item: TrackedItemResponse | None = None
+    error: str | None = None
+
+
+class TrackedItemBulkBootstrapResponse(BaseModel):
+    request_id: str
+    total_items: int
+    success_count: int
+    failure_count: int
+    results: list[TrackedItemBulkBootstrapResult]
 
 
 class TrackedItemDetailResponse(BaseModel):

@@ -14,6 +14,10 @@ from app.api.dependencies import (
 )
 from app.api.schemas.tracking import (
     PriceSnapshotResponse,
+    TrackedItemBulkBootstrapItemRequest,
+    TrackedItemBulkBootstrapRequest,
+    TrackedItemBulkBootstrapResponse,
+    TrackedItemBulkBootstrapResult,
     TrackedItemBootstrapRequest,
     TrackedItemBootstrapResponse,
     TrackedItemDetailResponse,
@@ -70,6 +74,23 @@ def _to_item_response(item: TrackedItem) -> TrackedItemResponse:
     return TrackedItemResponse.model_validate(payload)
 
 
+def _resolve_timeout_seconds(
+    *,
+    timeout_seconds: int | None,
+    settings: Settings,
+) -> int:
+    resolved_timeout = timeout_seconds or settings.scrape_timeout_default
+    if resolved_timeout < settings.scrape_timeout_min or resolved_timeout > settings.scrape_timeout_max:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"timeout_seconds must be between {settings.scrape_timeout_min} "
+                f"and {settings.scrape_timeout_max}"
+            ),
+        )
+    return resolved_timeout
+
+
 @router.post("", response_model=TrackedItemBootstrapResponse)
 async def post_tracked_item_bootstrap(
     payload: TrackedItemBootstrapRequest,
@@ -85,15 +106,10 @@ async def post_tracked_item_bootstrap(
     We run an immediate scrape so saved tracking rows always start with
     a concrete baseline price snapshot.
     """
-    timeout_seconds = payload.timeout_seconds or settings.scrape_timeout_default
-    if timeout_seconds < settings.scrape_timeout_min or timeout_seconds > settings.scrape_timeout_max:
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                f"timeout_seconds must be between {settings.scrape_timeout_min} "
-                f"and {settings.scrape_timeout_max}"
-            ),
-        )
+    timeout_seconds = _resolve_timeout_seconds(
+        timeout_seconds=payload.timeout_seconds,
+        settings=settings,
+    )
 
     selected_sites = _normalize_selected_sites(payload.sites, set(service.list_sites()))
     current_user = await run_in_threadpool(user_service.provision_from_principal, principal)
@@ -146,6 +162,137 @@ async def post_tracked_item_bootstrap(
     return TrackedItemBootstrapResponse(
         request_id=request_id,
         item=_to_item_response(item),
+    )
+
+
+@router.post("/bulk", response_model=TrackedItemBulkBootstrapResponse)
+async def post_tracked_items_bulk_bootstrap(
+    payload: TrackedItemBulkBootstrapRequest,
+    request: Request,
+    settings: Settings = Depends(get_app_settings),
+    service: TrackingService = Depends(get_tracking_service),
+    scrape_result_cache: ScrapeResultCache = Depends(get_scrape_result_cache),
+    principal: AuthPrincipal = Depends(get_current_principal),
+    user_service: UserService = Depends(get_user_service),
+) -> TrackedItemBulkBootstrapResponse:
+    """Create multiple tracked items in a single request.
+
+    Supports two request styles:
+    1. `urls`: shared settings for all URLs.
+    2. `items`: per-item source (URL or scrape_result_ref), with optional
+       per-item check interval and target amount overrides.
+    """
+    items = payload.items
+    if items is None:
+        items = [
+            TrackedItemBulkBootstrapItemRequest(url=url)
+            for url in (payload.urls or [])
+        ]
+
+    if len(items) > settings.scrape_max_urls:
+        raise HTTPException(
+            status_code=422,
+            detail=f"At most {settings.scrape_max_urls} URLs are allowed per request",
+        )
+
+    timeout_seconds = _resolve_timeout_seconds(
+        timeout_seconds=payload.timeout_seconds,
+        settings=settings,
+    )
+    selected_sites = _normalize_selected_sites(payload.sites, set(service.list_sites()))
+    current_user = await run_in_threadpool(user_service.provision_from_principal, principal)
+    request_id = str(getattr(request.state, "request_id", ""))
+    idempotency_key = request.headers.get("Idempotency-Key", "").strip()
+
+    results: list[TrackedItemBulkBootstrapResult] = []
+    success_count = 0
+    for index, item_payload in enumerate(items):
+        scrape_result_ref = (item_payload.scrape_result_ref or "").strip() or None
+        pre_fetched_result = None
+        source_url = str(item_payload.url) if item_payload.url is not None else ""
+
+        if scrape_result_ref is not None:
+            pre_fetched_result = await run_in_threadpool(
+                scrape_result_cache.get_result,
+                scrape_result_ref,
+            )
+            if pre_fetched_result is None:
+                results.append(
+                    TrackedItemBulkBootstrapResult(
+                        index=index,
+                        url=source_url or None,
+                        success=False,
+                        error="Invalid or expired scrape_result_ref",
+                    )
+                )
+                continue
+            source_url = pre_fetched_result.url
+
+        check_interval = item_payload.check_interval_minutes or payload.check_interval_minutes
+        target_amount = (
+            item_payload.target_amount
+            if item_payload.target_amount is not None
+            else payload.target_amount
+        )
+        bootstrap_input = TrackingBootstrapInput(
+            request_id=request_id,
+            url=source_url,
+            timeout_seconds=timeout_seconds,
+            selected_sites=selected_sites,
+            fetch_mode=payload.fetch_mode,
+            check_interval_minutes=check_interval,
+            target_amount=target_amount,
+            scrape_result_ref=scrape_result_ref,
+            pre_fetched_result=pre_fetched_result,
+            user_id=current_user.user_id,
+        )
+
+        try:
+            if idempotency_key:
+                item = await run_in_threadpool(
+                    service.bootstrap_idempotent,
+                    payload=bootstrap_input,
+                    idempotency_key=f"{idempotency_key}:{index}",
+                )
+            else:
+                item = await run_in_threadpool(service.bootstrap, bootstrap_input)
+        except TrackingBootstrapError as exc:
+            results.append(
+                TrackedItemBulkBootstrapResult(
+                    index=index,
+                    url=source_url,
+                    success=False,
+                    error=str(exc),
+                )
+            )
+            continue
+        except TrackingServiceError as exc:
+            results.append(
+                TrackedItemBulkBootstrapResult(
+                    index=index,
+                    url=source_url,
+                    success=False,
+                    error=str(exc),
+                )
+            )
+            continue
+
+        success_count += 1
+        results.append(
+            TrackedItemBulkBootstrapResult(
+                index=index,
+                url=source_url,
+                success=True,
+                item=_to_item_response(item),
+            )
+        )
+
+    return TrackedItemBulkBootstrapResponse(
+        request_id=request_id,
+        total_items=len(items),
+        success_count=success_count,
+        failure_count=len(items) - success_count,
+        results=results,
     )
 
 

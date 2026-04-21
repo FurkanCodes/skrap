@@ -41,6 +41,20 @@ def _parse_str_env(name: str, default: str) -> str:
     return value
 
 
+def _parse_bool_env(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    value = raw.strip().lower()
+    if not value:
+        return default
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    raise RuntimeError(f"{name} must be a boolean value")
+
+
 def _parse_origins(value: str) -> list[str]:
     cleaned = value.strip()
     if not cleaned:
@@ -73,6 +87,7 @@ class Settings:
     scheduler_max_inflight: int
     scheduler_lease_seconds: int
     scheduler_jitter_percent: int
+    scheduler_align_checks_to_interval: bool
     scheduler_alert_cooldown_minutes: int
     notifier_poll_seconds: int
     notifier_claim_batch_size: int
@@ -129,6 +144,10 @@ def get_settings() -> Settings:
         scheduler_max_inflight=_parse_int_env("SCHEDULER_MAX_INFLIGHT", 64),
         scheduler_lease_seconds=_parse_int_env("SCHEDULER_LEASE_SECONDS", 180),
         scheduler_jitter_percent=_parse_int_env("SCHEDULER_JITTER_PERCENT", 10),
+        scheduler_align_checks_to_interval=_parse_bool_env(
+            "SCHEDULER_ALIGN_CHECKS_TO_INTERVAL",
+            False,
+        ),
         scheduler_alert_cooldown_minutes=_parse_int_env(
             "SCHEDULER_ALERT_COOLDOWN_MINUTES", 60
         ),

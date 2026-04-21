@@ -9,6 +9,87 @@ from urllib.parse import urljoin, urlparse
 
 from scrapling.parser import Selector
 
+_SITE_DOMAIN_SUFFIXES: dict[str, tuple[str, ...]] = {
+    "a101": ("a101.com.tr",),
+    "aliexpress": ("aliexpress.com",),
+    "amazon": ("amazon.com", "amazon.co.uk", "amazon.de", "amazon.fr", "amazon.es", "amazon.com.tr"),
+    "bestbuy": ("bestbuy.com",),
+    "ciceksepeti": ("ciceksepeti.com",),
+    "costco": ("costco.com",),
+    "ebay": ("ebay.com", "ebay.co.uk", "ebay.de", "ebay.fr", "ebay.es"),
+    "etsy": ("etsy.com",),
+    "hepsiburada": ("hepsiburada.com",),
+    "homedepot": ("homedepot.com",),
+    "ikea": ("ikea.com",),
+    "leroymerlin": ("leroymerlin.fr", "leroymerlin.es", "leroymerlin.it"),
+    "lowes": ("lowes.com",),
+    "mediamarkt": ("mediamarkt.com", "mediamarkt.de", "mediamarkt.es", "mediamarkt.com.tr"),
+    "mediaworld": ("mediaworld.it",),
+    "n11": ("n11.com",),
+    "pttavm": ("pttavm.com",),
+    "shein": ("shein.com",),
+    "target": ("target.com",),
+    "temu": ("temu.com",),
+    "trendyol": ("trendyol.com",),
+    "vatanbilgisayar": ("vatanbilgisayar.com",),
+    "vinted": ("vinted.fr", "vinted.it", "vinted.es"),
+    "zalando": ("zalando.de", "zalando.it", "zalando.es"),
+}
+
+_SITE_TITLE_SELECTORS: dict[str, tuple[str, ...]] = {
+    "a101": ("h1::text",),
+    "aliexpress": ("h1[data-pl='product-title']::text", "h1::text"),
+    "amazon": ("#productTitle::text", "h1#title::text", "h1::text"),
+    "bestbuy": ("h1[data-testid='product-title']::text", "h1::text"),
+    "ciceksepeti": ("h1::text",),
+    "costco": ("h1.product-name::text", "h1::text"),
+    "ebay": ("h1.x-item-title__mainTitle span::text", "h1::text"),
+    "etsy": ("h1[data-buy-box-listing-title='true']::text", "h1::text"),
+    "hepsiburada": ("h1[data-test-id='title']::text", "h1::text"),
+    "homedepot": ("h1[data-testid='product-label']::text", "h1::text"),
+    "ikea": ("h1[data-testid='pip-product-title']::text", "h1::text"),
+    "leroymerlin": ("h1::text",),
+    "lowes": ("h1[data-testid='product-name']::text", "h1::text"),
+    "mediamarkt": ("h1::text",),
+    "mediaworld": ("h1::text",),
+    "n11": ("h1::text",),
+    "pttavm": ("h1.product-detail__name::text", "h1::text"),
+    "shein": ("h1.product-intro__head-name::text", "h1::text"),
+    "target": ("[data-test='product-title']::text", "h1::text"),
+    "temu": ("h1[data-testid='product-name']::text", "h1::text"),
+    "trendyol": (".pr-new-br span::text", "h1::text"),
+    "vatanbilgisayar": ("h1::text",),
+    "vinted": ("h1[data-testid='item-title']::text", "h1::text"),
+    "zalando": ("h1[data-testid='product-name']::text", "h1::text"),
+}
+
+_SITE_IMAGE_SELECTORS: dict[str, tuple[str, ...]] = {
+    "a101": (".pdp-image img::attr(src)", "img::attr(src)"),
+    "aliexpress": (".magnifier-image::attr(src)", "img::attr(src)"),
+    "amazon": ("#landingImage::attr(src)", "img::attr(src)"),
+    "bestbuy": ("img.primary-image::attr(src)", "img::attr(src)"),
+    "ciceksepeti": ("img::attr(src)",),
+    "costco": ("img#lens-image::attr(src)", "img::attr(src)"),
+    "ebay": ("img#icImg::attr(src)", "[data-zoom-src]::attr(data-zoom-src)", "img::attr(src)"),
+    "etsy": ("[data-carousel-pane] img::attr(src)", "img::attr(src)"),
+    "hepsiburada": ("img[data-test-id='image']::attr(src)", "img::attr(src)"),
+    "homedepot": ("img[data-testid='hero-image']::attr(src)", "img::attr(src)"),
+    "ikea": ("img[data-testid='pip-main-image']::attr(src)", "img::attr(src)"),
+    "leroymerlin": ("[data-qa-product-image]::attr(src)", "img::attr(src)"),
+    "lowes": ("img[data-testid='pdp-main-image']::attr(src)", "img::attr(src)"),
+    "mediamarkt": ("img::attr(src)",),
+    "mediaworld": ("img::attr(src)",),
+    "n11": ("img::attr(src)",),
+    "pttavm": (".product-detail-gallery img::attr(src)", "img::attr(src)"),
+    "shein": (".product-intro__thumbs-inner img::attr(src)", "img::attr(src)"),
+    "target": ("img[data-test='product-image']::attr(data-src)", "img[data-test='product-image']::attr(src)", "img::attr(src)"),
+    "temu": ("img::attr(src)",),
+    "trendyol": ("img::attr(src)",),
+    "vatanbilgisayar": (".swiper-slide img::attr(src)", "img::attr(src)"),
+    "vinted": ("[data-testid='item-photo'] img::attr(src)", "img::attr(src)"),
+    "zalando": ("img[data-testid='media-image']::attr(src)", "img::attr(src)"),
+}
+
 
 def _clean_text(value: Any) -> str | None:
     if not isinstance(value, str):
@@ -196,6 +277,76 @@ def _is_n11_host(source_url: str) -> bool:
     return host == "n11.com" or host.endswith(".n11.com")
 
 
+def _is_trendyol_host(source_url: str) -> bool:
+    host = urlparse(source_url).netloc.lower()
+    if host.startswith("www."):
+        host = host[4:]
+    return host == "trendyol.com" or host.endswith(".trendyol.com")
+
+
+def _detect_site_key_from_url(source_url: str) -> str | None:
+    host = urlparse(source_url).netloc.lower()
+    if host.startswith("www."):
+        host = host[4:]
+    for site_key, suffixes in _SITE_DOMAIN_SUFFIXES.items():
+        if any(host == suffix or host.endswith(f".{suffix}") for suffix in suffixes):
+            return site_key
+    return None
+
+
+def _is_trendyol_non_product_image(url: str) -> bool:
+    normalized = url.lower()
+    if normalized.endswith(".svg"):
+        return True
+    noisy_tokens = (
+        "/sfint/prod/fp/",
+        "/web/prod/fp/",
+        "/mweb/production/",
+        "apple-icon",
+        "splash",
+        "logo",
+        "search_",
+        "favorite_",
+        "basket-icon_",
+    )
+    return any(token in normalized for token in noisy_tokens)
+
+
+def _extract_trendyol_image(page: Selector) -> str | None:
+    html = str(getattr(page, "html_content", "") or "")
+    if not html:
+        return None
+
+    candidates = re.findall(
+        r"https://cdn\.dsmcdn\.com/[^\s\"'<>]+?\.(?:jpg|jpeg|png|webp|avif)",
+        html,
+        flags=re.IGNORECASE,
+    )
+    if not candidates:
+        return None
+
+    scored: list[tuple[int, str]] = []
+    for candidate in candidates:
+        normalized = candidate.lower()
+        if _is_trendyol_non_product_image(normalized):
+            continue
+
+        score = 0
+        if "/mnresize/" in normalized:
+            score += 3
+        if "/prod/" in normalized:
+            score += 2
+        if "org_zoom" in normalized:
+            score += 1
+        scored.append((score, candidate))
+
+    if not scored:
+        return None
+
+    scored.sort(key=lambda item: item[0], reverse=True)
+    return scored[0][1]
+
+
 def _gallery_image_rank(url: str) -> int:
     normalized = url.lower()
     if "/375_535/" in normalized:
@@ -330,6 +481,28 @@ def _first_css(page: Selector, selectors: list[str]) -> str | None:
     return None
 
 
+def _apply_site_specific_metadata_fallback(
+    page: Selector,
+    source_url: str,
+    metadata: dict[str, str | None],
+) -> None:
+    site_key = _detect_site_key_from_url(source_url)
+    if not site_key:
+        return
+
+    if metadata["product_name"] is None:
+        title_selectors = list(_SITE_TITLE_SELECTORS.get(site_key, ()))
+        if title_selectors:
+            metadata["product_name"] = _first_css(page, title_selectors)
+
+    if metadata["image_url"] is None:
+        image_selectors = list(_SITE_IMAGE_SELECTORS.get(site_key, ()))
+        if image_selectors:
+            image_candidate = _first_css(page, image_selectors)
+            if image_candidate:
+                metadata["image_url"] = urljoin(source_url, image_candidate)
+
+
 def extract_product_metadata(page: Selector, source_url: str) -> dict[str, str | None]:
     """Extract normalized product metadata from a parsed page."""
     metadata = _extract_from_json_ld(page, source_url)
@@ -358,6 +531,7 @@ def extract_product_metadata(page: Selector, source_url: str) -> dict[str, str |
             "title::text",
         ],
     )
+    _apply_site_specific_metadata_fallback(page, source_url, metadata)
     metadata["brand"] = metadata["brand"] or _first_css(
         page,
         [
@@ -397,6 +571,12 @@ def extract_product_metadata(page: Selector, source_url: str) -> dict[str, str |
         ],
     )
     metadata["image_url"] = urljoin(source_url, image_url) if image_url else None
+    if _is_trendyol_host(source_url) and (
+        metadata["image_url"] is None or _is_trendyol_non_product_image(metadata["image_url"])
+    ):
+        trendyol_image = _extract_trendyol_image(page)
+        if trendyol_image:
+            metadata["image_url"] = trendyol_image
     if _is_n11_host(source_url):
         gallery_image = _extract_gallery_image(page, source_url)
         if gallery_image:

@@ -693,6 +693,30 @@ def test_compute_next_check_at_with_test_interval_uses_fifteen_seconds() -> None
     assert (next_dt - base_dt).total_seconds() == 15
 
 
+def test_compute_next_check_at_aligns_to_shared_boundary_when_enabled() -> None:
+    base = _iso(datetime(2026, 1, 1, 0, 0, 1, 200000, tzinfo=UTC))
+    next_at = compute_next_check_at(
+        base_time=base,
+        interval_minutes=10_079,
+        jitter_percent=50,
+        align_checks_to_interval=True,
+    )
+    next_dt = datetime.fromisoformat(next_at.replace("Z", "+00:00"))
+    assert next_dt == datetime(2026, 1, 1, 0, 0, 15, tzinfo=UTC)
+
+
+def test_compute_next_check_at_aligns_to_next_slot_after_boundary() -> None:
+    base = _iso(datetime(2026, 1, 1, 0, 0, 14, 900000, tzinfo=UTC))
+    next_at = compute_next_check_at(
+        base_time=base,
+        interval_minutes=10_079,
+        jitter_percent=0,
+        align_checks_to_interval=True,
+    )
+    next_dt = datetime.fromisoformat(next_at.replace("Z", "+00:00"))
+    assert next_dt == datetime(2026, 1, 1, 0, 0, 30, tzinfo=UTC)
+
+
 def test_scheduler_run_once_persists_success_snapshot_and_next_check() -> None:
     repo = _build_repo()
     now = datetime.now(tz=UTC)

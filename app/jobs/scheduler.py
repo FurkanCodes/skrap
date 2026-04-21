@@ -128,6 +128,7 @@ def _build_scheduler_service() -> tuple[TrackingSchedulerService, int]:
         max_inflight=settings.scheduler_max_inflight,
         lease_seconds=settings.scheduler_lease_seconds,
         jitter_percent=settings.scheduler_jitter_percent,
+        align_checks_to_interval=settings.scheduler_align_checks_to_interval,
         lease_owner=_resolve_lease_owner(),
         fetch_mode="auto",
         alert_cooldown_minutes=settings.scheduler_alert_cooldown_minutes,

@@ -87,6 +87,7 @@ class TrackingSchedulerService:
         lease_seconds: int,
         jitter_percent: int,
         lease_owner: str,
+        align_checks_to_interval: bool = False,
         fetch_mode: str = "auto",
         alert_cooldown_minutes: int = 60,
         notification_max_attempts: int = 5,
@@ -99,6 +100,7 @@ class TrackingSchedulerService:
         self._max_inflight = max(1, max_inflight)
         self._lease_seconds = max(1, lease_seconds)
         self._jitter_percent = max(0, jitter_percent)
+        self._align_checks_to_interval = align_checks_to_interval
         self._lease_owner = lease_owner
         self._fetch_mode = fetch_mode
         self._alert_cooldown_minutes = max(0, alert_cooldown_minutes)
@@ -381,6 +383,7 @@ class TrackingSchedulerService:
             base_time=finished_at,
             interval_minutes=item.check_interval_minutes,
             jitter_percent=self._jitter_percent,
+            align_checks_to_interval=self._align_checks_to_interval,
         )
 
         if scrape_result.success:
@@ -723,6 +726,7 @@ class TrackingSchedulerService:
             base_time=final_time,
             interval_minutes=current_item.check_interval_minutes,
             jitter_percent=self._jitter_percent,
+            align_checks_to_interval=self._align_checks_to_interval,
         )
         try:
             self._repository.save_item(
@@ -775,6 +779,7 @@ class TrackingSchedulerService:
             base_time=now,
             interval_minutes=current_item.check_interval_minutes,
             jitter_percent=self._jitter_percent,
+            align_checks_to_interval=self._align_checks_to_interval,
         )
         try:
             # Keep `last_checked_at` intact here because no fresh scrape actually
@@ -806,11 +811,22 @@ def compute_next_check_at(
     base_time: str,
     interval_minutes: int,
     jitter_percent: int,
+    align_checks_to_interval: bool = False,
     minimum_delay_seconds: int = 1,
 ) -> str:
     """Compute next check time with bounded jitter to flatten bursty schedules."""
     base_dt = datetime.fromisoformat(base_time.replace("Z", "+00:00"))
     interval_seconds = max(1, _interval_value_to_seconds(interval_minutes))
+
+    if align_checks_to_interval:
+        # Align to shared UTC boundaries so same-interval items can run in lockstep.
+        base_seconds = base_dt.timestamp()
+        next_slot_seconds = (int(base_seconds // interval_seconds) + 1) * interval_seconds
+        if (next_slot_seconds - base_seconds) < float(minimum_delay_seconds):
+            next_slot_seconds += interval_seconds
+        next_dt = datetime.fromtimestamp(next_slot_seconds, tz=UTC)
+        return _to_iso(next_dt)
+
     jitter_ratio = max(0.0, float(jitter_percent) / 100.0)
     max_jitter_seconds = interval_seconds * jitter_ratio
     jitter_seconds = random.uniform(-max_jitter_seconds, max_jitter_seconds)

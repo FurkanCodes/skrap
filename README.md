@@ -728,6 +728,7 @@ High-level relationships:
 | `SCHEDULER_MAX_INFLIGHT` | `64` | max concurrent scrape checks |
 | `SCHEDULER_LEASE_SECONDS` | `180` | claim lease TTL |
 | `SCHEDULER_JITTER_PERCENT` | `10` | next-check jitter |
+| `SCHEDULER_ALIGN_CHECKS_TO_INTERVAL` | `false` | align same-interval checks to shared UTC boundaries |
 | `SCHEDULER_ALERT_COOLDOWN_MINUTES` | `60` | min gap between repeated alerts per rule |
 | `SCHEDULER_LEASE_OWNER` | auto-generated | optional explicit lease owner id |
 

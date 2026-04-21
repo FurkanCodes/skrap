@@ -11,9 +11,9 @@ from app.scraper.extractors.generic import extract_price_listings_from_selector
 from app.scraper.fetching import auto_followup_modes, detect_auto_escalation_signals
 from app.scraper.inputs import parse_fetch_mode, parse_sites_blob, parse_urls_blob
 from app.scraper.metadata import extract_product_metadata
-from app.scraper.parsing import make_item_id
+from app.scraper.parsing import make_item_id, normalize_runtime_url
 from app.scraper.registry import ADAPTERS, detect_site_key, list_supported_sites
-from app.scraper.service import extract_price_from_page
+from app.scraper.service import extract_price_from_page, is_result_qualified, missing_required_result_fields
 
 
 def test_extract_from_meta_tags_single_listing() -> None:
@@ -166,6 +166,26 @@ def test_parse_urls_blob_keeps_commas_inside_url() -> None:
     assert urls == [
         "https://www.akakce.com/ssd/en-ucuz-samsung-9100-pro-mz-vap2t0bw-pci-express-5-0-2-tb-m-2-fiyati,983826204.html"
     ]
+
+
+def test_normalize_runtime_url_rewrites_aliexpress_bundle_product_ids() -> None:
+    source_url = (
+        "https://www.aliexpress.com/ssr/300000512/BundleDeals2?"
+        "spm=a2g0o.home.3fornn.1.1b664618dzbySf&disableNav=YES"
+        "&pha_manifest=ssr&_immersiveMode=true&productIds=1005009475789596"
+    )
+
+    normalized = normalize_runtime_url(source_url)
+
+    assert normalized == "https://www.aliexpress.com/item/1005009475789596.html"
+
+
+def test_normalize_runtime_url_keeps_existing_aliexpress_product_url() -> None:
+    source_url = "https://www.aliexpress.com/item/1005009475789596.html?gatewayAdapt=glo2tur"
+
+    normalized = normalize_runtime_url(source_url)
+
+    assert normalized == source_url
 
 
 def test_item_id_is_stable_for_same_listing_url() -> None:
@@ -401,6 +421,28 @@ def test_detect_site_key() -> None:
     assert detect_site_key("https://www.akakce.com/ssd/a") == "akakce"
     assert detect_site_key("https://newegg.com/p/pl?d=4070") == "newegg"
     assert detect_site_key("https://www.n11.com/urun/iphone-17") == "n11"
+    assert detect_site_key("https://www.amazon.de/dp/B0A123") == "amazon"
+    assert detect_site_key("https://www.target.com/p/sample-product/-/A-123456") == "target"
+    assert detect_site_key("https://www.temu.com/goods.html") == "temu"
+    assert detect_site_key("https://www.etsy.com/listing/123/sample-item") == "etsy"
+    assert detect_site_key("https://www.homedepot.com/p/sample/12345") == "homedepot"
+    assert detect_site_key("https://www.bestbuy.com/site/sample/123.p") == "bestbuy"
+    assert detect_site_key("https://www.costco.com/sample-product.html") == "costco"
+    assert detect_site_key("https://www.lowes.com/pd/sample/1000") == "lowes"
+    assert detect_site_key("https://www.aliexpress.com/item/1005000.html") == "aliexpress"
+    assert detect_site_key("https://www.shein.com/product-p-12345.html") == "shein"
+    assert detect_site_key("https://www.ikea.com/de/de/p/sample-00000001/") == "ikea"
+    assert detect_site_key("https://www.leroymerlin.fr/produits/sample.html") == "leroymerlin"
+    assert detect_site_key("https://www.zalando.de/sample-product.html") == "zalando"
+    assert detect_site_key("https://www.mediamarkt.com.tr/tr/product/_sample-12345.html") == "mediamarkt"
+    assert detect_site_key("https://www.mediaworld.it/it/product/_sample-123.html") == "mediaworld"
+    assert detect_site_key("https://www.vinted.fr/items/123456789-sample") == "vinted"
+    assert detect_site_key("https://www.trendyol.com/sample-product-p-12345") == "trendyol"
+    assert detect_site_key("https://www.hepsiburada.com/sample-urun-p-HBV000000000") == "hepsiburada"
+    assert detect_site_key("https://www.pttavm.com/sample-urun-p-12345") == "pttavm"
+    assert detect_site_key("https://www.vatanbilgisayar.com/sample-urun.html") == "vatanbilgisayar"
+    assert detect_site_key("https://www.ciceksepeti.com/sample-urun-kc123456") == "ciceksepeti"
+    assert detect_site_key("https://www.a101.com.tr/sample-urun") == "a101"
     assert detect_site_key("https://example.com/product") == "generic"
 
 
@@ -521,6 +563,62 @@ def test_extract_price_from_page_includes_metadata_fields() -> None:
     assert result.extracted_at is not None
 
 
+def test_extract_product_metadata_uses_site_fallback_selectors_when_og_missing() -> None:
+    page = Selector(
+        """
+        <html>
+          <body>
+            <div data-test='product-title'>Target Fallback Product</div>
+            <img data-test='product-image' data-src='/images/target-product.jpg'>
+            <div data-test='product-price'>$149.99</div>
+          </body>
+        </html>
+        """
+    )
+
+    result = extract_price_from_page(page, "https://www.target.com/p/sample/-/A-123456")
+
+    assert result.success is True
+    assert result.product_name == "Target Fallback Product"
+    assert result.image_url == "https://www.target.com/images/target-product.jpg"
+    assert result.amount == "149.99"
+    assert result.adapter_key == "target"
+
+
+def test_result_qualification_requires_title_image_and_price() -> None:
+    complete = extract_price_from_page(
+        Selector(
+            """
+            <html>
+              <head>
+                <meta property='og:title' content='Complete Product'>
+                <meta property='og:image' content='https://cdn.example.com/complete.jpg'>
+              </head>
+              <body><span>$19.99</span></body>
+            </html>
+            """
+        ),
+        "https://example.com/products/complete",
+    )
+    missing = extract_price_from_page(
+        Selector(
+            """
+            <html>
+              <body>
+                <span class='price'>$19.99</span>
+              </body>
+            </html>
+            """
+        ),
+        "https://example.com/products/missing-metadata",
+    )
+
+    assert is_result_qualified(complete) is True
+    assert missing_required_result_fields(complete) == []
+    assert is_result_qualified(missing) is False
+    assert missing_required_result_fields(missing) == ["product_name", "image_url"]
+
+
 def test_extract_product_metadata_prefers_embedded_product_state_over_site_org() -> None:
     source_url = "https://www.n11.com/urun/example-phone?magaza=n11&renk=siyah"
     page = Selector(
@@ -635,6 +733,36 @@ def test_extract_product_metadata_upgrades_active_n11_thumbnail_to_high_res() ->
     assert (
         metadata["image_url"]
         == "https://n11scdn.akamaized.net/a1/375_535/09/19/62/43/IMG-4331282096654046141.jpg"
+    )
+
+
+def test_extract_product_metadata_replaces_trendyol_icon_svg_with_product_image() -> None:
+    source_url = "https://www.trendyol.com/example/product-p-123"
+    page = Selector(
+        """
+        <html>
+          <head>
+            <meta property="og:title" content="Example Trendyol Product">
+            <meta property="og:image" content="https://cdn.dsmcdn.com/sfint/prod/fp/search_1761135568801.svg">
+          </head>
+          <body>
+            <script>
+              window.__PRODUCT_DETAIL_APP_INITIAL_STATE__ = {
+                "images": [
+                  "https://cdn.dsmcdn.com/mnresize/620/920/ty1854/prod/QC_ENRICHMENT/20260414/10/b5ca5fdc-7e69-30ed-996a-cd4546f07d99/1_org_zoom.jpg"
+                ]
+              };
+            </script>
+          </body>
+        </html>
+        """
+    )
+
+    metadata = extract_product_metadata(page, source_url)
+
+    assert (
+        metadata["image_url"]
+        == "https://cdn.dsmcdn.com/mnresize/620/920/ty1854/prod/QC_ENRICHMENT/20260414/10/b5ca5fdc-7e69-30ed-996a-cd4546f07d99/1_org_zoom.jpg"
     )
 
 

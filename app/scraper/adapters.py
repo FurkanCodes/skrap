@@ -34,6 +34,63 @@ class GenericAdapter(SiteAdapter):
         return extract_price_listings_from_selector(page)
 
 
+def _extract_candidates_from_selectors(
+    page: Selector,
+    *,
+    selectors: tuple[str, ...],
+    source_prefix: str,
+    default_currency: str | None = None,
+) -> list[PriceCandidate]:
+    candidates: list[PriceCandidate] = []
+    for index, selector in enumerate(selectors):
+        for raw_value in page.css(selector).getall():
+            text = " ".join(str(raw_value).split()).strip()
+            if not text:
+                continue
+            parsed = scan_price_in_text(
+                text,
+                source=f"{source_prefix}:selector:{index}",
+                require_currency=False,
+            )
+            if not parsed:
+                continue
+            candidates.append(
+                PriceCandidate(
+                    raw_text=parsed.raw_text,
+                    amount=parsed.amount,
+                    currency=parsed.currency or default_currency,
+                    source=f"{source_prefix}:selector:{index}",
+                )
+            )
+    return deduplicate_candidates(candidates)
+
+
+class ConfiguredSiteAdapter(SiteAdapter):
+    """Selector-driven adapter for websites with predictable price nodes."""
+
+    def __init__(
+        self,
+        *,
+        key: str,
+        price_selectors: tuple[str, ...],
+        default_currency: str | None = None,
+    ) -> None:
+        self.key = key
+        self._price_selectors = price_selectors
+        self._default_currency = default_currency
+
+    def extract(self, page: Selector, url: str) -> list[PriceCandidate]:
+        candidates = _extract_candidates_from_selectors(
+            page,
+            selectors=self._price_selectors,
+            source_prefix=self.key,
+            default_currency=self._default_currency,
+        )
+        if candidates:
+            return candidates
+        return extract_price_listings_from_selector(page)
+
+
 class AkakceAdapter(SiteAdapter):
     """Akakce-specific listing parser with seller cleanup rules."""
 

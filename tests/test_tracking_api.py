@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 from fastapi.testclient import TestClient
@@ -28,6 +28,7 @@ class FakeTrackingService:
     snapshots: dict[str, list[PriceSnapshot]]
     bootstrap_calls: int = 0
     last_bootstrap_payload: TrackingBootstrapInput | None = None
+    bootstrap_payloads: list[TrackingBootstrapInput] = field(default_factory=list)
 
     def list_sites(self) -> dict[str, str]:
         return {
@@ -39,12 +40,14 @@ class FakeTrackingService:
     def bootstrap(self, payload: TrackingBootstrapInput) -> TrackedItem:
         self.bootstrap_calls += 1
         self.last_bootstrap_payload = payload
+        self.bootstrap_payloads.append(payload)
         if "fail" in payload.url:
             raise TrackingBootstrapError("bootstrap failed: price_not_found")
 
         now = _now_iso()
+        suffix = str(self.bootstrap_calls)
         item = TrackedItem(
-            item_id="trk_test_1",
+            item_id=f"trk_test_{suffix}",
             source_url=payload.url,
             canonical_url=payload.url,
             product_id="prd_test",
@@ -71,7 +74,7 @@ class FakeTrackingService:
         self.items[item.item_id] = item
         self.snapshots[item.item_id] = [
             PriceSnapshot(
-                snapshot_id="snp_test_1",
+                snapshot_id=f"snp_test_{suffix}",
                 item_id=item.item_id,
                 checked_at=now,
                 success=True,
@@ -90,7 +93,7 @@ class FakeTrackingService:
         payload: TrackingBootstrapInput,
         idempotency_key: str,
     ) -> TrackedItem:
-        if idempotency_key == "conflict":
+        if idempotency_key.startswith("conflict"):
             raise TrackingServiceError(
                 "Idempotency-Key reuse with different payload is not allowed"
             )
@@ -327,6 +330,128 @@ def test_tracked_items_bootstrap_maps_bootstrap_errors() -> None:
 
     assert response.status_code == 422
     assert response.json()["detail"] == "bootstrap failed: price_not_found"
+
+
+def test_tracked_items_bulk_bootstrap_creates_multiple_items_from_urls() -> None:
+    service = FakeTrackingService(items={}, snapshots={})
+    client = _build_client(service)
+
+    response = client.post(
+        "/api/v1/tracked-items/bulk",
+        json={
+            "urls": [
+                "https://example.com/products/bulk-1",
+                "https://example.com/products/bulk-2",
+            ],
+            "sites": ["generic"],
+            "check_interval_minutes": 45,
+            "target_amount": "89.99",
+        },
+    )
+    _clear_overrides()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total_items"] == 2
+    assert body["success_count"] == 2
+    assert body["failure_count"] == 0
+    assert body["results"][0]["success"] is True
+    assert body["results"][0]["item"]["item_id"] == "trk_test_1"
+    assert body["results"][1]["success"] is True
+    assert body["results"][1]["item"]["item_id"] == "trk_test_2"
+    assert service.bootstrap_calls == 2
+
+
+def test_tracked_items_bulk_bootstrap_supports_item_overrides_and_scrape_ref() -> None:
+    service = FakeTrackingService(items={}, snapshots={})
+    cached_result = PriceResult(
+        url="https://example.com/products/from-cache",
+        success=True,
+        product_id="prd_cached",
+        site_key="generic",
+        adapter_key="generic",
+        amount="49.99",
+        currency="USD",
+        raw_text="$49.99",
+        source="test:cache",
+    )
+    cache = FakeScrapeResultCache(result_by_ref={"result-ref-1": cached_result})
+    client = _build_client(service, fake_scrape_cache=cache)
+
+    response = client.post(
+        "/api/v1/tracked-items/bulk",
+        json={
+            "items": [
+                {"scrape_result_ref": "result-ref-1", "target_amount": "41.00"},
+                {
+                    "url": "https://example.com/products/bulk-override",
+                    "check_interval_minutes": 15,
+                },
+            ],
+            "check_interval_minutes": 30,
+            "target_amount": "99.00",
+        },
+    )
+    _clear_overrides()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["success_count"] == 2
+    assert service.bootstrap_calls == 2
+    assert service.bootstrap_payloads[0].url == "https://example.com/products/from-cache"
+    assert service.bootstrap_payloads[0].check_interval_minutes == 30
+    assert service.bootstrap_payloads[0].target_amount == "41.00"
+    assert service.bootstrap_payloads[0].scrape_result_ref == "result-ref-1"
+    assert service.bootstrap_payloads[1].url == "https://example.com/products/bulk-override"
+    assert service.bootstrap_payloads[1].check_interval_minutes == 15
+    assert service.bootstrap_payloads[1].target_amount == "99.00"
+
+
+def test_tracked_items_bulk_bootstrap_returns_partial_failures() -> None:
+    service = FakeTrackingService(items={}, snapshots={})
+    cache = FakeScrapeResultCache(result_by_ref={})
+    client = _build_client(service, fake_scrape_cache=cache)
+
+    response = client.post(
+        "/api/v1/tracked-items/bulk",
+        json={
+            "items": [
+                {"scrape_result_ref": "missing-result-ref"},
+                {"url": "https://example.com/fail-product"},
+                {"url": "https://example.com/products/success-product"},
+            ],
+            "sites": ["generic"],
+        },
+    )
+    _clear_overrides()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total_items"] == 3
+    assert body["success_count"] == 1
+    assert body["failure_count"] == 2
+    assert body["results"][0]["success"] is False
+    assert body["results"][0]["error"] == "Invalid or expired scrape_result_ref"
+    assert body["results"][1]["success"] is False
+    assert body["results"][1]["error"] == "bootstrap failed: price_not_found"
+    assert body["results"][2]["success"] is True
+    assert body["results"][2]["item"]["source_url"] == "https://example.com/products/success-product"
+
+
+def test_tracked_items_bulk_bootstrap_rejects_over_max_urls() -> None:
+    service = FakeTrackingService(items={}, snapshots={})
+    client = _build_client(service)
+
+    response = client.post(
+        "/api/v1/tracked-items/bulk",
+        json={
+            "urls": [f"https://example.com/products/{index}" for index in range(51)],
+        },
+    )
+    _clear_overrides()
+
+    assert response.status_code == 422
+    assert "At most 50 URLs are allowed per request" in response.json()["detail"]
 
 
 def test_tracked_items_list_detail_patch_delete_flow() -> None:

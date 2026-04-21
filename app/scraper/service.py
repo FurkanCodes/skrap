@@ -19,12 +19,35 @@ from .domain import PriceListing, PriceResult
 from .fetching import auto_followup_modes, detect_auto_escalation_signals, fetch_page_with_mode
 from .inputs import parse_fetch_mode
 from .metadata import extract_product_metadata
-from .parsing import make_item_id, make_product_id, normalize_url
+from .parsing import make_item_id, make_product_id, normalize_runtime_url, normalize_url
 from .registry import ADAPTERS, detect_site_key, list_supported_sites
+
+REQUIRED_RESULT_FIELDS: tuple[str, ...] = ("amount", "product_name", "image_url")
 
 
 def _utc_now_iso() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
+
+
+def _is_present(value: str | None) -> bool:
+    return bool((value or "").strip())
+
+
+def missing_required_result_fields(result: PriceResult) -> list[str]:
+    """Return required field names missing from a scrape result."""
+    missing: list[str] = []
+    if not _is_present(result.amount):
+        missing.append("amount")
+    if not _is_present(result.product_name):
+        missing.append("product_name")
+    if not _is_present(result.image_url):
+        missing.append("image_url")
+    return missing
+
+
+def is_result_qualified(result: PriceResult) -> bool:
+    """Check if a result has required output fields for on-demand adapters."""
+    return result.success and not missing_required_result_fields(result)
 
 
 def _resolve_primary_listings(
@@ -75,8 +98,9 @@ def fetch_price(
     The function keeps the high-level policy in one place so API and other
     callers get identical behavior.
     """
-    product_id = make_product_id(url)
-    site_key = detect_site_key(url)
+    runtime_url = normalize_runtime_url(url)
+    product_id = make_product_id(runtime_url)
+    site_key = detect_site_key(runtime_url)
     adapter_key = site_key if site_key in ADAPTERS else "generic"
     extracted_at = _utc_now_iso()
 
@@ -84,7 +108,7 @@ def fetch_price(
         normalized_fetch_mode = parse_fetch_mode(fetch_mode)
     except ValueError as exc:
         return PriceResult(
-            url=url,
+            url=runtime_url,
             success=False,
             product_id=product_id,
             site_key=site_key,
@@ -95,7 +119,7 @@ def fetch_price(
 
     if selected_sites is not None and adapter_key not in selected_sites:
         return PriceResult(
-            url=url,
+            url=runtime_url,
             success=False,
             product_id=product_id,
             site_key=site_key,
@@ -110,7 +134,7 @@ def fetch_price(
 
     for mode in modes_to_try:
         try:
-            page = fetch_page_with_mode(url, timeout=timeout, mode=mode)
+            page = fetch_page_with_mode(runtime_url, timeout=timeout, mode=mode)
         except Exception as exc:
             attempted_fetch_errors.append(f"{mode}: {exc}")
             if normalized_fetch_mode == "auto" and mode == "http":
@@ -121,7 +145,7 @@ def fetch_price(
         fetched_any_page = True
         extracted = extract_price_from_page(
             page=page,
-            url=url,
+            url=runtime_url,
             selected_sites=selected_sites,
             product_id=product_id,
             site_key=site_key,
@@ -140,7 +164,7 @@ def fetch_price(
 
     if fetched_any_page:
         return PriceResult(
-            url=url,
+            url=runtime_url,
             success=False,
             product_id=product_id,
             site_key=site_key,
@@ -151,7 +175,7 @@ def fetch_price(
 
     error_detail = "; ".join(attempted_fetch_errors) if attempted_fetch_errors else "unknown"
     return PriceResult(
-        url=url,
+        url=runtime_url,
         success=False,
         product_id=product_id,
         site_key=site_key,
@@ -200,12 +224,6 @@ def extract_price_from_page(
     adapter = ADAPTERS[resolved_adapter_key]
     candidates = adapter.extract(page, url)
     used_adapter = adapter.key
-
-    if not candidates and adapter.key != "generic":
-        generic_allowed = selected_sites is None or "generic" in selected_sites
-        if generic_allowed:
-            candidates = ADAPTERS["generic"].extract(page, url)
-            used_adapter = "generic"
 
     if not candidates:
         return PriceResult(
@@ -282,9 +300,12 @@ def scrape_prices(
 
 
 __all__ = [
+    "REQUIRED_RESULT_FIELDS",
     "SUPPORTED_FETCH_MODES",
     "extract_price_from_page",
     "fetch_price",
+    "is_result_qualified",
     "list_supported_sites",
+    "missing_required_result_fields",
     "scrape_prices",
 ]
