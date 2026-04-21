@@ -1122,7 +1122,7 @@ def test_scheduler_includes_affiliate_template_link_in_notification_payload() ->
     assert payload["listing_url"] == "https://merchant.example.com/buy/123"
     assert payload["affiliate_url"] == "https://go.example.com/out?u=https%3A%2F%2Fexample.com%2Fproduct%2F123"
 
-def test_scheduler_monitor_mode_notifies_even_when_price_unchanged() -> None:
+def test_scheduler_monitor_mode_does_not_notify_when_price_unchanged() -> None:
     repo = _build_repo()
     now = datetime.now(tz=UTC)
     due_time = _iso(now - timedelta(minutes=1))
@@ -1162,29 +1162,55 @@ def test_scheduler_monitor_mode_notifies_even_when_price_unchanged() -> None:
     assert repo.list_alert_events(item.item_id, limit=10) == []
 
     notifications = repo.list_notification_events(item.item_id, limit=10)
-    assert len(notifications) == 1
-    assert notifications[0].alert_event_id is None
-    first_payload = json.loads(notifications[0].payload)
-    assert first_payload["notification_type"] == "monitor"
-    assert first_payload["current_amount"] == "95.00"
+    assert notifications == []
 
-    # Re-run at a new schedule tick: unchanged price still creates a new
-    # monitor notification because the user explicitly selected monitor mode.
-    updated = repo.get_item(item.item_id)
-    assert updated is not None
-    repo.save_item(
-        replace(
-            updated,
-            next_check_at=_iso(now - timedelta(minutes=2)),
-            lease_owner=None,
-            lease_until=None,
-        )
+
+def test_scheduler_monitor_mode_notifies_when_price_drops() -> None:
+    repo = _build_repo()
+    now = datetime.now(tz=UTC)
+    due_time = _iso(now - timedelta(minutes=1))
+    item = _item(
+        item_id="trk_monitor_drop",
+        url="https://example.com/monitor-drop",
+        now=now,
+        next_check_at=due_time,
+        last_amount="95.00",
+        target_amount=None,  # monitor mode
     )
-    second = scheduler.run_once()
-    assert second.success_count == 1
+    repo.save_item(item)
+
+    scrape_result = PriceResult(
+        url=item.source_url,
+        success=True,
+        amount="90.00",
+        currency="USD",
+        raw_text="$90.00",
+        source="test:monitor-drop",
+        site_key="generic",
+        adapter_key="generic",
+    )
+    scheduler = TrackingSchedulerService(
+        repository=repo,
+        scrape_runner=_FakeScrapeRunner({item.source_url: scrape_result}),
+        timeout_seconds=30,
+        claim_batch_size=50,
+        max_inflight=4,
+        lease_seconds=180,
+        jitter_percent=0,
+        lease_owner="scheduler-test",
+    )
+
+    outcome = scheduler.run_once()
+    assert outcome.success_count == 1
+    assert repo.list_alert_events(item.item_id, limit=10) == []
 
     notifications = repo.list_notification_events(item.item_id, limit=10)
-    assert len(notifications) == 2
+    assert len(notifications) == 1
+    assert notifications[0].alert_event_id is None
+    payload = json.loads(notifications[0].payload)
+    assert payload["notification_type"] == "price_drop"
+    assert payload["previous_amount"] == "95.00"
+    assert payload["current_amount"] == "90.00"
 
 
 def test_scheduler_does_not_notify_when_item_is_paused_during_inflight_run() -> None:

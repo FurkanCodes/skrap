@@ -158,33 +158,49 @@ def _parse_payload(raw: str) -> dict:
 def _render_telegram_message(payload: dict) -> str:
     notification_type = str(payload.get("notification_type", "alert")).strip().lower()
     current = str(payload.get("current_amount", "?")).strip() or "?"
+    previous = str(payload.get("previous_amount", "?")).strip() or "?"
     target = str(payload.get("target_amount", "?")).strip() or "?"
     currency = str(payload.get("currency", "")).strip()
     item_id = str(payload.get("item_id", "")).strip()
+    product_name = str(payload.get("product_name", "")).strip()
+    tracking_mode = str(payload.get("tracking_mode", "")).strip().lower()
     triggered_at = str(payload.get("triggered_at", "")).strip()
     affiliate_url = str(payload.get("affiliate_url", "")).strip()
     listing_url = str(payload.get("listing_url", "")).strip()
     product_url = str(payload.get("product_url", "")).strip()
 
     currency_suffix = f" {currency}" if currency else ""
-    if notification_type == "monitor":
+    if notification_type == "price_drop":
         lines = [
-            "Price monitor update",
-            f"Current: {current}{currency_suffix}",
+            "Price dropped",
+            f"Previous: {previous}{currency_suffix}",
+            f"Now: {current}{currency_suffix}",
         ]
+    elif notification_type == "tracking_started":
+        lines = ["Tracking started"]
+        if current != "?":
+            lines.append(f"Current price: {current}{currency_suffix}")
+        if target != "?":
+            lines.append(f"Target price: {target}{currency_suffix}")
+        if tracking_mode == "monitor":
+            lines.append("I will notify you when the price drops.")
+        else:
+            lines.append("I will notify you when your target price is reached.")
     else:
         lines = [
-            "Price alert triggered",
+            "Target reached",
             f"Current: {current}{currency_suffix}",
             f"Target: {target}{currency_suffix}",
         ]
+    if product_name:
+        lines.insert(1, f"Item: {product_name}")
     if affiliate_url:
-        lines.append(f"Affiliate: {affiliate_url}")
+        lines.append(f"Buy: {affiliate_url}")
     if listing_url:
         lines.append(f"Listing: {listing_url}")
     if product_url:
         lines.append(f"Product: {product_url}")
-    if item_id:
+    if item_id and not product_name:
         lines.append(f"Item: {item_id}")
     if triggered_at:
         lines.append(f"At: {triggered_at}")

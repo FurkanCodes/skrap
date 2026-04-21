@@ -8,11 +8,18 @@ import json
 
 from app.application.scrape_service import ScrapeBatchInput, ScrapeBatchService
 from app.scraper import PriceResult
-from app.tracking import PriceSnapshot, TrackedItem, TrackingRepository, TrackingStatus
+from app.tracking import (
+    NotificationEvent,
+    PriceSnapshot,
+    TrackedItem,
+    TrackingRepository,
+    TrackingStatus,
+)
 
 _LEGACY_USER_ID = "legacy_owner"
 _TEST_INTERVAL_15_SECONDS_SENTINEL = 10_079
 _TEST_INTERVAL_15_SECONDS_VALUE = 15
+_DEFAULT_NOTIFICATION_MAX_ATTEMPTS = 5
 
 
 class TrackingServiceError(RuntimeError):
@@ -152,6 +159,7 @@ class TrackingService:
         checked_at = _utcnow_iso()
         source_url = result.url
         existing = self._get_item_by_source_url_for_user(source_url=source_url, user_id=user_id)
+        is_new_item = existing is None
         if existing is None:
             self._enforce_tracker_capacity(
                 user_id=user_id,
@@ -213,6 +221,12 @@ class TrackingService:
                 error=None,
             )
         )
+        if is_new_item:
+            self._enqueue_tracking_started_notification(
+                item=saved,
+                result=result,
+                triggered_at=checked_at,
+            )
         return saved
 
     def bootstrap_idempotent(
@@ -390,6 +404,78 @@ class TrackingService:
                 now=now,
             )
 
+    def _enqueue_tracking_started_notification(
+        self,
+        *,
+        item: TrackedItem,
+        result: PriceResult,
+        triggered_at: str,
+    ) -> None:
+        enqueue_method = getattr(self._repository, "enqueue_notification_event", None)
+        if not callable(enqueue_method):
+            return
+
+        active_chat_id = self._get_active_telegram_chat(user_id=item.user_id)
+        if not active_chat_id:
+            return
+
+        product_url = (
+            (result.canonical_url or "").strip()
+            or (result.url or "").strip()
+            or (item.canonical_url or "").strip()
+            or (item.source_url or "").strip()
+            or None
+        )
+        payload = {
+            "notification_type": "tracking_started",
+            "item_id": item.item_id,
+            "tracking_mode": item.tracking_mode,
+            "current_amount": item.last_amount,
+            "target_amount": item.target_amount,
+            "currency": item.currency,
+            "triggered_at": triggered_at,
+            "chat_id": active_chat_id,
+        }
+        if item.product_name:
+            payload["product_name"] = item.product_name
+        if product_url:
+            payload["product_url"] = product_url
+
+        notification = NotificationEvent(
+            notification_id=_new_notification_event_id(),
+            idempotency_key=_build_notification_idempotency_key(
+                event_key=f"tracking_started:{item.item_id}",
+                channel="telegram",
+            ),
+            alert_event_id=None,
+            item_id=item.item_id,
+            channel="telegram",
+            payload=json.dumps(payload, separators=(",", ":"), sort_keys=True),
+            status="queued",
+            attempt_count=0,
+            max_attempts=_DEFAULT_NOTIFICATION_MAX_ATTEMPTS,
+            next_attempt_at=triggered_at,
+            last_attempt_at=None,
+            sent_at=None,
+            provider_name=None,
+            provider_message_id=None,
+            last_error=None,
+            lease_owner=None,
+            lease_until=None,
+            created_at=triggered_at,
+            updated_at=triggered_at,
+        )
+        enqueue_method(notification)
+
+    def _get_active_telegram_chat(self, *, user_id: str) -> str | None:
+        method = getattr(self._repository, "get_active_telegram_chat", None)
+        if method is None:
+            return None
+        try:
+            return method(user_id=user_id)
+        except TypeError:
+            return method()
+
 
 @dataclass(frozen=True)
 class _FallbackEntitlement:
@@ -415,6 +501,10 @@ def _new_item_id() -> str:
 def _new_snapshot_id() -> str:
     """Generate opaque snapshot IDs."""
     return f"snp_{uuid.uuid4().hex[:20]}"
+
+
+def _new_notification_event_id() -> str:
+    return f"nev_{uuid.uuid4().hex[:20]}"
 
 
 def _normalize_target_amount(value: str | None) -> str | None:
@@ -452,3 +542,7 @@ def _build_bootstrap_request_hash(payload: TrackingBootstrapInput) -> str:
     }
     serialized = json.dumps(normalized, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _build_notification_idempotency_key(*, event_key: str, channel: str) -> str:
+    return f"{event_key}:{channel}"

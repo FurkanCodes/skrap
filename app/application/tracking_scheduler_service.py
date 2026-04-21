@@ -432,9 +432,10 @@ class TrackingSchedulerService:
                 # Preserve the latest status and suppress notifications.
                 pass
             elif item.tracking_mode == "monitor":
-                self._emit_monitor_notification(
+                self._emit_price_drop_notification(
                     item_before=item,
                     snapshot=snapshot,
+                    previous_amount=item.last_amount,
                     current_amount=scrape_result.amount,
                     product_url=product_url,
                     listing_url=listing_url,
@@ -544,16 +545,24 @@ class TrackingSchedulerService:
             listing_url=listing_url,
         )
 
-    def _emit_monitor_notification(
+    def _emit_price_drop_notification(
         self,
         *,
         item_before: TrackedItem,
         snapshot: PriceSnapshot,
+        previous_amount: str | None,
         current_amount: str | None,
         product_url: str | None,
         listing_url: str | None,
     ) -> None:
-        """Queue one monitor notification for each successful scheduler check."""
+        """Queue one notification when monitor mode detects a price drop."""
+        previous = _parse_decimal(previous_amount)
+        current = _parse_decimal(current_amount)
+        if previous is None or current is None:
+            return
+        if current >= previous:
+            return
+
         now = snapshot.checked_at
         active_chat_id = self._get_active_telegram_chat(
             user_id=getattr(item_before, "user_id", "legacy_owner")
@@ -564,14 +573,17 @@ class TrackingSchedulerService:
             template=self._affiliate_link_template,
         )
         payload = {
-            "notification_type": "monitor",
+            "notification_type": "price_drop",
             "item_id": item_before.item_id,
             "snapshot_id": snapshot.snapshot_id,
-            "rule_type": "monitor",
-            "current_amount": current_amount,
+            "rule_type": "price_drop",
+            "previous_amount": _decimal_to_str(previous),
+            "current_amount": _decimal_to_str(current),
             "currency": snapshot.currency or item_before.currency,
             "triggered_at": snapshot.checked_at,
         }
+        if item_before.product_name:
+            payload["product_name"] = item_before.product_name
         if product_url:
             payload["product_url"] = product_url
         if listing_url:
@@ -584,7 +596,7 @@ class TrackingSchedulerService:
         notification = NotificationEvent(
             notification_id=_new_notification_event_id(),
             idempotency_key=_build_notification_idempotency_key(
-                event_key=_build_monitor_notification_event_key(
+                event_key=_build_price_drop_notification_event_key(
                     item_id=item_before.item_id,
                     scheduled_for=snapshot.scheduled_for,
                     checked_at=snapshot.checked_at,
@@ -936,14 +948,14 @@ def _build_alert_idempotency_key(*, item_id: str, rule_type: str, snapshot_id: s
 def _build_notification_idempotency_key(*, event_key: str, channel: str) -> str:
     return f"{event_key}:{channel}"
 
-def _build_monitor_notification_event_key(
+def _build_price_drop_notification_event_key(
     *,
     item_id: str,
     scheduled_for: str | None,
     checked_at: str,
 ) -> str:
     marker = scheduled_for or checked_at
-    return f"monitor:{item_id}:{marker}"
+    return f"price_drop:{item_id}:{marker}"
 
 
 def _resolve_product_url(item: TrackedItem, scrape_result: PriceResult) -> str | None:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -15,6 +16,7 @@ from app.application.tracking_service import (
 )
 from app.scraper import PriceListing, PriceResult
 from app.tracking import (
+    NotificationEvent,
     PriceSnapshot,
     TrackedItem,
     TrackingBootstrapIdempotencyRecord,
@@ -26,6 +28,8 @@ class _FakeRepository:
     items: dict[str, TrackedItem]
     snapshots: list[PriceSnapshot]
     idempotency_records: dict[str, TrackingBootstrapIdempotencyRecord]
+    notification_events: list[NotificationEvent]
+    active_telegram_chat_by_user: dict[str, str]
 
     def initialize(self) -> None:
         pass
@@ -80,6 +84,13 @@ class _FakeRepository:
             updated_at=now,
         )
 
+    def enqueue_notification_event(self, event: NotificationEvent) -> bool:
+        self.notification_events.append(event)
+        return True
+
+    def get_active_telegram_chat(self, *, user_id: str) -> str | None:
+        return self.active_telegram_chat_by_user.get(user_id)
+
 
 @dataclass
 class _FakeScrapeService:
@@ -99,7 +110,13 @@ class _FakeScrapeService:
 
 
 def _build_service(result: PriceResult) -> tuple[TrackingService, _FakeRepository]:
-    repository = _FakeRepository(items={}, snapshots=[], idempotency_records={})
+    repository = _FakeRepository(
+        items={},
+        snapshots=[],
+        idempotency_records={},
+        notification_events=[],
+        active_telegram_chat_by_user={},
+    )
     service = TrackingService(
         repository=repository,
         scrape_service=_FakeScrapeService(result=result),
@@ -218,6 +235,63 @@ def test_bootstrap_without_target_starts_monitor_mode() -> None:
     assert item.target_amount is None
     assert item.tracking_mode == "monitor"
     assert item.alerts_enabled is False
+
+
+def test_bootstrap_new_item_enqueues_tracking_started_notification_when_chat_connected() -> None:
+    service, repository = _build_service(_success_result())
+    repository.active_telegram_chat_by_user["legacy_owner"] = "12345"
+
+    item = service.bootstrap(
+        TrackingBootstrapInput(
+            request_id="req_tracking_started",
+            url="https://example.com/p/start",
+            timeout_seconds=20,
+            selected_sites=None,
+            fetch_mode="auto",
+            check_interval_minutes=60,
+            target_amount=None,
+        )
+    )
+
+    assert len(repository.notification_events) == 1
+    notification = repository.notification_events[0]
+    assert notification.channel == "telegram"
+    payload = json.loads(notification.payload)
+    assert payload["notification_type"] == "tracking_started"
+    assert payload["item_id"] == item.item_id
+    assert payload["chat_id"] == "12345"
+    assert payload["tracking_mode"] == "monitor"
+
+
+def test_bootstrap_existing_item_does_not_enqueue_tracking_started_notification() -> None:
+    service, repository = _build_service(_success_result("https://example.com/p/existing"))
+    repository.active_telegram_chat_by_user["legacy_owner"] = "12345"
+
+    first = service.bootstrap(
+        TrackingBootstrapInput(
+            request_id="req_first",
+            url="https://example.com/p/existing",
+            timeout_seconds=20,
+            selected_sites=None,
+            fetch_mode="auto",
+            check_interval_minutes=60,
+            target_amount=None,
+        )
+    )
+    second = service.bootstrap(
+        TrackingBootstrapInput(
+            request_id="req_second",
+            url="https://example.com/p/existing",
+            timeout_seconds=20,
+            selected_sites=None,
+            fetch_mode="auto",
+            check_interval_minutes=60,
+            target_amount=None,
+        )
+    )
+
+    assert first.item_id == second.item_id
+    assert len(repository.notification_events) == 1
 
 
 def test_bootstrap_rejects_failed_scrape() -> None:
