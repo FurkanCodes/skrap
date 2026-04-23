@@ -4,13 +4,18 @@ from dataclasses import dataclass, replace
 
 from fastapi.testclient import TestClient
 
-from app.api.dependencies import get_app_settings, get_telegram_integration_service
+from app.api.dependencies import (
+    get_app_settings,
+    get_current_principal,
+    get_telegram_integration_service,
+)
 from app.application.telegram_integration_service import (
     TelegramConnectStartOutput,
     TelegramConnectStatusOutput,
     TelegramIntegrationError,
     TelegramWebhookSetupOutput,
 )
+from app.core.auth import AuthPrincipal
 from app.core.config import get_settings
 from app.main import app
 
@@ -75,6 +80,13 @@ class _FailingTelegramService:
 
 def _build_client(service: object, *, webhook_secret: str | None = "") -> TestClient:
     app.dependency_overrides[get_telegram_integration_service] = lambda: service
+    app.dependency_overrides[get_current_principal] = lambda: AuthPrincipal(
+        subject="usr_123",
+        email="user@example.com",
+        name="Test User",
+        issuer="test",
+        audience="test",
+    )
     if webhook_secret is not None:
         settings = replace(get_settings(), telegram_webhook_secret=webhook_secret)
         app.dependency_overrides[get_app_settings] = lambda: settings

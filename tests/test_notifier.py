@@ -95,6 +95,23 @@ def test_render_alert_message_uses_target_reached_template() -> None:
     assert "Target: 100.00 USD" in message
 
 
+def test_render_price_increase_message_includes_rise_values() -> None:
+    payload = {
+        "notification_type": "price_increase",
+        "product_name": "Growing Item",
+        "previous_amount": "90.00",
+        "current_amount": "100.00",
+        "currency": "USD",
+    }
+
+    message = _render_telegram_message(payload)
+
+    assert "Price increased" in message
+    assert "Previous: 90.00 USD" in message
+    assert "Now: 100.00 USD" in message
+    assert "Item: Growing Item" in message
+
+
 def test_render_tracking_started_message_includes_onboarding_text() -> None:
     payload = {
         "notification_type": "tracking_started",
@@ -112,6 +129,23 @@ def test_render_tracking_started_message_includes_onboarding_text() -> None:
     assert "Current price: 90.00 USD" in message
     assert "I will notify you when the price drops." in message
     assert "Product: https://example.com/p/1" in message
+
+
+def test_render_tracking_stopped_message_includes_last_price() -> None:
+    payload = {
+        "notification_type": "tracking_stopped",
+        "product_name": "Paused Item",
+        "current_amount": "90.00",
+        "target_amount": "80.00",
+        "currency": "USD",
+    }
+
+    message = _render_telegram_message(payload)
+
+    assert "Tracking stopped" in message
+    assert "Item: Paused Item" in message
+    assert "Last price: 90.00 USD" in message
+    assert "Target price: 80.00 USD" in message
 
 
 def test_extract_telegram_retry_after_seconds_prefers_parameters() -> None:

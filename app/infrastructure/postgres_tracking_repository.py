@@ -46,6 +46,7 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
         status TEXT NOT NULL CHECK (status IN ('active', 'paused')),
         check_interval_minutes INTEGER NOT NULL CHECK (check_interval_minutes >= 1),
         target_amount TEXT,
+        notify_on_price_increase BOOLEAN NOT NULL DEFAULT FALSE,
         created_at TIMESTAMPTZ NOT NULL,
         updated_at TIMESTAMPTZ NOT NULL,
         last_checked_at TIMESTAMPTZ,
@@ -462,6 +463,12 @@ class PostgresTrackingRepository:
                         """
                         ALTER TABLE tracked_items
                         ADD COLUMN IF NOT EXISTS user_id TEXT
+                        """
+                    )
+                    conn.execute(
+                        """
+                        ALTER TABLE tracked_items
+                        ADD COLUMN IF NOT EXISTS notify_on_price_increase BOOLEAN NOT NULL DEFAULT FALSE
                         """
                     )
                     conn.execute(
@@ -1042,6 +1049,7 @@ class PostgresTrackingRepository:
                     status,
                     check_interval_minutes,
                     target_amount,
+                    notify_on_price_increase,
                     created_at,
                     updated_at,
                     last_checked_at,
@@ -1072,6 +1080,7 @@ class PostgresTrackingRepository:
                     %(status)s,
                     %(check_interval_minutes)s,
                     %(target_amount)s,
+                    %(notify_on_price_increase)s,
                     %(created_at)s,
                     %(updated_at)s,
                     %(last_checked_at)s,
@@ -1100,6 +1109,7 @@ class PostgresTrackingRepository:
                     status = EXCLUDED.status,
                     check_interval_minutes = EXCLUDED.check_interval_minutes,
                     target_amount = EXCLUDED.target_amount,
+                    notify_on_price_increase = EXCLUDED.notify_on_price_increase,
                     updated_at = EXCLUDED.updated_at,
                     last_checked_at = EXCLUDED.last_checked_at,
                     next_check_at = EXCLUDED.next_check_at,
@@ -1142,6 +1152,7 @@ class PostgresTrackingRepository:
                         status,
                         check_interval_minutes,
                         target_amount,
+                        notify_on_price_increase,
                         created_at,
                         updated_at,
                         last_checked_at,
@@ -1172,6 +1183,7 @@ class PostgresTrackingRepository:
                         %(status)s,
                         %(check_interval_minutes)s,
                         %(target_amount)s,
+                        %(notify_on_price_increase)s,
                         %(created_at)s,
                         %(updated_at)s,
                         %(last_checked_at)s,
@@ -1200,6 +1212,7 @@ class PostgresTrackingRepository:
                         status = EXCLUDED.status,
                         check_interval_minutes = EXCLUDED.check_interval_minutes,
                         target_amount = EXCLUDED.target_amount,
+                        notify_on_price_increase = EXCLUDED.notify_on_price_increase,
                         updated_at = EXCLUDED.updated_at,
                         last_checked_at = EXCLUDED.last_checked_at,
                         next_check_at = EXCLUDED.next_check_at,
@@ -2025,6 +2038,7 @@ class PostgresTrackingRepository:
             "status": item.status,
             "check_interval_minutes": item.check_interval_minutes,
             "target_amount": item.target_amount,
+            "notify_on_price_increase": bool(item.notify_on_price_increase),
             "created_at": _parse_timestamp(item.created_at),
             "updated_at": _parse_timestamp(item.updated_at),
             "last_checked_at": _parse_timestamp(item.last_checked_at),
@@ -2059,6 +2073,7 @@ class PostgresTrackingRepository:
             status=str(row["status"]),
             check_interval_minutes=int(row["check_interval_minutes"]),
             target_amount=_as_str(row.get("target_amount")),
+            notify_on_price_increase=bool(row.get("notify_on_price_increase", False)),
             created_at=_format_timestamp(row.get("created_at")),
             updated_at=_format_timestamp(row.get("updated_at")),
             last_checked_at=_format_timestamp(row.get("last_checked_at")),

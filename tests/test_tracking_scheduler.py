@@ -50,6 +50,7 @@ def _item(
     next_check_at: str | None = None,
     last_amount: str | None = "100.00",
     target_amount: str | None = None,
+    notify_on_price_increase: bool = False,
 ) -> TrackedItem:
     stamp = _iso(now)
     return TrackedItem(
@@ -73,6 +74,7 @@ def _item(
         status=status,
         check_interval_minutes=60,
         target_amount=target_amount,
+        notify_on_price_increase=notify_on_price_increase,
         created_at=stamp,
         updated_at=stamp,
         last_checked_at=stamp,
@@ -1163,6 +1165,95 @@ def test_scheduler_monitor_mode_does_not_notify_when_price_unchanged() -> None:
 
     notifications = repo.list_notification_events(item.item_id, limit=10)
     assert notifications == []
+
+
+def test_scheduler_monitor_mode_does_not_notify_when_price_increases_without_setting() -> None:
+    repo = _build_repo()
+    now = datetime.now(tz=UTC)
+    due_time = _iso(now - timedelta(minutes=1))
+    item = _item(
+        item_id="trk_monitor_no_increase_notify",
+        url="https://example.com/monitor-increase-disabled",
+        now=now,
+        next_check_at=due_time,
+        last_amount="95.00",
+        target_amount=None,
+        notify_on_price_increase=False,
+    )
+    repo.save_item(item)
+
+    scrape_result = PriceResult(
+        url=item.source_url,
+        success=True,
+        amount="99.00",
+        currency="USD",
+        raw_text="$99.00",
+        source="test:monitor-increase-disabled",
+        site_key="generic",
+        adapter_key="generic",
+    )
+    scheduler = TrackingSchedulerService(
+        repository=repo,
+        scrape_runner=_FakeScrapeRunner({item.source_url: scrape_result}),
+        timeout_seconds=30,
+        claim_batch_size=50,
+        max_inflight=4,
+        lease_seconds=180,
+        jitter_percent=0,
+        lease_owner="scheduler-test",
+    )
+
+    outcome = scheduler.run_once()
+    assert outcome.success_count == 1
+    notifications = repo.list_notification_events(item.item_id, limit=10)
+    assert notifications == []
+
+
+def test_scheduler_monitor_mode_notifies_when_price_increases_with_setting_enabled() -> None:
+    repo = _build_repo()
+    now = datetime.now(tz=UTC)
+    due_time = _iso(now - timedelta(minutes=1))
+    item = _item(
+        item_id="trk_monitor_increase_enabled",
+        url="https://example.com/monitor-increase-enabled",
+        now=now,
+        next_check_at=due_time,
+        last_amount="95.00",
+        target_amount=None,
+        notify_on_price_increase=True,
+    )
+    repo.save_item(item)
+
+    scrape_result = PriceResult(
+        url=item.source_url,
+        success=True,
+        amount="101.00",
+        currency="USD",
+        raw_text="$101.00",
+        source="test:monitor-increase-enabled",
+        site_key="generic",
+        adapter_key="generic",
+    )
+    scheduler = TrackingSchedulerService(
+        repository=repo,
+        scrape_runner=_FakeScrapeRunner({item.source_url: scrape_result}),
+        timeout_seconds=30,
+        claim_batch_size=50,
+        max_inflight=4,
+        lease_seconds=180,
+        jitter_percent=0,
+        lease_owner="scheduler-test",
+    )
+
+    outcome = scheduler.run_once()
+    assert outcome.success_count == 1
+
+    notifications = repo.list_notification_events(item.item_id, limit=10)
+    assert len(notifications) == 1
+    payload = json.loads(notifications[0].payload)
+    assert payload["notification_type"] == "price_increase"
+    assert payload["previous_amount"] == "95.00"
+    assert payload["current_amount"] == "101.00"
 
 
 def test_scheduler_monitor_mode_notifies_when_price_drops() -> None:

@@ -6,8 +6,10 @@ import uuid
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api.dependencies import warm_application_dependencies
 from app.api.routers.discover import router as discover_router
 from app.api.routers.health import router as health_router
 from app.api.routers.me import router as me_router
@@ -31,6 +33,7 @@ async def lifespan(app: FastAPI):
     settings = get_settings()
     logger = logging.getLogger("scraper_api")
     logger.info("application_startup api_prefix=%s", settings.api_prefix)
+    await run_in_threadpool(warm_application_dependencies, settings)
     yield
     logger.info("application_shutdown")
 

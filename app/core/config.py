@@ -4,6 +4,7 @@ import os
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
+from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 
@@ -64,8 +65,17 @@ def _parse_origins(value: str) -> list[str]:
     return [item.strip() for item in cleaned.split(",") if item.strip()]
 
 
+def _parse_csv(value: str, *, default: tuple[str, ...]) -> tuple[str, ...]:
+    cleaned = value.strip()
+    if not cleaned:
+        return default
+    parsed = tuple(item.strip() for item in cleaned.split(",") if item.strip())
+    return parsed or default
+
+
 @dataclass(frozen=True)
 class Settings:
+    environment: str
     api_prefix: str
     cors_allow_origins: list[str]
     scrape_timeout_default: int
@@ -114,7 +124,9 @@ class Settings:
     better_auth_jwks_url: str
     better_auth_jwt_issuer: str
     better_auth_jwt_audience: str
+    better_auth_jwt_algorithms: tuple[str, ...]
     better_auth_jwks_cache_ttl_seconds: int
+    better_auth_jwks_timeout_seconds: float
 
 
 @lru_cache
@@ -126,6 +138,7 @@ def get_settings() -> Settings:
         or "postgresql://postgres:postgres@127.0.0.1:5432/postgres"
     )
     settings = Settings(
+        environment=_parse_str_env("ENVIRONMENT", "development").lower(),
         api_prefix=os.getenv("API_PREFIX", "/api/v1"),
         cors_allow_origins=_parse_origins(os.getenv("CORS_ALLOW_ORIGINS", "*")),
         scrape_timeout_default=_parse_int_env("SCRAPE_TIMEOUT_DEFAULT", 30),
@@ -205,8 +218,15 @@ def get_settings() -> Settings:
         better_auth_jwks_url=_parse_str_env("BETTER_AUTH_JWKS_URL", ""),
         better_auth_jwt_issuer=_parse_str_env("BETTER_AUTH_JWT_ISSUER", ""),
         better_auth_jwt_audience=_parse_str_env("BETTER_AUTH_JWT_AUDIENCE", ""),
+        better_auth_jwt_algorithms=_parse_csv(
+            _parse_str_env("BETTER_AUTH_JWT_ALGORITHMS", ""),
+            default=("EdDSA",),
+        ),
         better_auth_jwks_cache_ttl_seconds=_parse_int_env(
             "BETTER_AUTH_JWKS_CACHE_TTL_SECONDS", 300
+        ),
+        better_auth_jwks_timeout_seconds=float(
+            _parse_str_env("BETTER_AUTH_JWKS_TIMEOUT_SECONDS", "2")
         ),
     )
 
@@ -307,7 +327,24 @@ def get_settings() -> Settings:
             raise RuntimeError("BETTER_AUTH_JWT_ISSUER is required when AUTH_REQUIRED=true")
         if not settings.better_auth_jwt_audience:
             raise RuntimeError("BETTER_AUTH_JWT_AUDIENCE is required when AUTH_REQUIRED=true")
+        if settings.environment == "production":
+            _require_https_url("BETTER_AUTH_JWKS_URL", settings.better_auth_jwks_url)
+            _require_https_url("BETTER_AUTH_JWT_ISSUER", settings.better_auth_jwt_issuer)
+    if settings.environment == "production" and "*" in settings.cors_allow_origins:
+        raise RuntimeError(
+            "CORS_ALLOW_ORIGINS must be explicit in production when credentials are enabled"
+        )
+    if not settings.better_auth_jwt_algorithms:
+        raise RuntimeError("BETTER_AUTH_JWT_ALGORITHMS must not be empty")
     if settings.better_auth_jwks_cache_ttl_seconds < 30:
         raise RuntimeError("BETTER_AUTH_JWKS_CACHE_TTL_SECONDS must be >= 30")
+    if settings.better_auth_jwks_timeout_seconds <= 0:
+        raise RuntimeError("BETTER_AUTH_JWKS_TIMEOUT_SECONDS must be > 0")
 
     return settings
+
+
+def _require_https_url(name: str, value: str) -> None:
+    parsed = urlparse(value)
+    if parsed.scheme != "https":
+        raise RuntimeError(f"{name} must use https in production")

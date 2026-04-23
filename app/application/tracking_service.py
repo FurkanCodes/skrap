@@ -41,6 +41,7 @@ class TrackingBootstrapInput:
     fetch_mode: str
     check_interval_minutes: int
     target_amount: str | None
+    notify_on_price_increase: bool | None = None
     scrape_result_ref: str | None = None
     pre_fetched_result: PriceResult | None = None
     user_id: str | None = None
@@ -55,6 +56,8 @@ class TrackingUpdateInput:
     check_interval_minutes: int | None
     target_amount: str | None
     target_amount_provided: bool
+    notify_on_price_increase: bool | None = None
+    notify_on_price_increase_provided: bool = False
     user_id: str | None = None
 
 
@@ -171,6 +174,11 @@ class TrackingService:
         target_amount = existing.target_amount if existing is not None else None
         if payload.target_amount is not None:
             target_amount = _normalize_target_amount(payload.target_amount)
+        notify_on_price_increase = (
+            existing.notify_on_price_increase if existing is not None else False
+        )
+        if payload.notify_on_price_increase is not None:
+            notify_on_price_increase = bool(payload.notify_on_price_increase)
 
         status: TrackingStatus = existing.status if existing is not None else "active"
 
@@ -196,6 +204,7 @@ class TrackingService:
             status=status,
             check_interval_minutes=interval,
             target_amount=target_amount,
+            notify_on_price_increase=notify_on_price_increase,
             created_at=created_at,
             updated_at=checked_at,
             last_checked_at=checked_at,
@@ -282,13 +291,18 @@ class TrackingService:
         target_amount = current.target_amount
         if payload.target_amount_provided:
             target_amount = _normalize_target_amount(payload.target_amount)
+        notify_on_price_increase = current.notify_on_price_increase
+        if payload.notify_on_price_increase_provided and payload.notify_on_price_increase is not None:
+            notify_on_price_increase = bool(payload.notify_on_price_increase)
 
         updated_at = _utcnow_iso()
+        next_status = payload.status or current.status
         updated = replace(
             current,
-            status=payload.status or current.status,
+            status=next_status,
             check_interval_minutes=interval,
             target_amount=target_amount,
+            notify_on_price_increase=notify_on_price_increase,
             updated_at=updated_at,
             next_check_at=(
                 _add_interval_iso(updated_at, interval)
@@ -296,7 +310,13 @@ class TrackingService:
                 else current.next_check_at
             ),
         )
-        return self._repository.save_item(updated)
+        saved = self._repository.save_item(updated)
+        if current.status == "active" and saved.status == "paused":
+            self._enqueue_tracking_stopped_notification(
+                item=saved,
+                triggered_at=updated_at,
+            )
+        return saved
 
     def delete_item(self, item_id: str, *, user_id: str | None = None) -> bool:
         """Delete tracked item and related snapshots (FK cascade)."""
@@ -467,6 +487,62 @@ class TrackingService:
         )
         enqueue_method(notification)
 
+    def _enqueue_tracking_stopped_notification(
+        self,
+        *,
+        item: TrackedItem,
+        triggered_at: str,
+    ) -> None:
+        enqueue_method = getattr(self._repository, "enqueue_notification_event", None)
+        if not callable(enqueue_method):
+            return
+
+        active_chat_id = self._get_active_telegram_chat(user_id=item.user_id)
+        if not active_chat_id:
+            return
+
+        product_url = (item.canonical_url or "").strip() or (item.source_url or "").strip() or None
+        payload = {
+            "notification_type": "tracking_stopped",
+            "item_id": item.item_id,
+            "tracking_mode": item.tracking_mode,
+            "current_amount": item.last_amount,
+            "target_amount": item.target_amount,
+            "currency": item.currency,
+            "triggered_at": triggered_at,
+            "chat_id": active_chat_id,
+        }
+        if item.product_name:
+            payload["product_name"] = item.product_name
+        if product_url:
+            payload["product_url"] = product_url
+
+        notification = NotificationEvent(
+            notification_id=_new_notification_event_id(),
+            idempotency_key=_build_notification_idempotency_key(
+                event_key=f"tracking_stopped:{item.item_id}:{triggered_at}",
+                channel="telegram",
+            ),
+            alert_event_id=None,
+            item_id=item.item_id,
+            channel="telegram",
+            payload=json.dumps(payload, separators=(",", ":"), sort_keys=True),
+            status="queued",
+            attempt_count=0,
+            max_attempts=_DEFAULT_NOTIFICATION_MAX_ATTEMPTS,
+            next_attempt_at=triggered_at,
+            last_attempt_at=None,
+            sent_at=None,
+            provider_name=None,
+            provider_message_id=None,
+            last_error=None,
+            lease_owner=None,
+            lease_until=None,
+            created_at=triggered_at,
+            updated_at=triggered_at,
+        )
+        enqueue_method(notification)
+
     def _get_active_telegram_chat(self, *, user_id: str) -> str | None:
         method = getattr(self._repository, "get_active_telegram_chat", None)
         if method is None:
@@ -539,6 +615,7 @@ def _build_bootstrap_request_hash(payload: TrackingBootstrapInput) -> str:
         "fetch_mode": payload.fetch_mode,
         "check_interval_minutes": payload.check_interval_minutes,
         "target_amount": _normalize_target_amount(payload.target_amount),
+        "notify_on_price_increase": payload.notify_on_price_increase,
     }
     serialized = json.dumps(normalized, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()

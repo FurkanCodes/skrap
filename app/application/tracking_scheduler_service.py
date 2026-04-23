@@ -445,8 +445,8 @@ class TrackingSchedulerService:
                 # User may have paused the tracker while this check was in-flight.
                 # Preserve the latest status and suppress notifications.
                 pass
-            elif item.tracking_mode == "monitor":
-                self._emit_price_drop_notification(
+            else:
+                self._emit_price_increase_notification_if_enabled(
                     item_before=item,
                     snapshot=snapshot,
                     previous_amount=item.last_amount,
@@ -454,14 +454,23 @@ class TrackingSchedulerService:
                     product_url=product_url,
                     listing_url=listing_url,
                 )
-            else:
-                self._emit_alert_if_crossed(
-                    item_before=item,
-                    snapshot=snapshot,
-                    current_amount=scrape_result.amount,
-                    product_url=product_url,
-                    listing_url=listing_url,
-                )
+                if item.tracking_mode == "monitor":
+                    self._emit_price_drop_notification(
+                        item_before=item,
+                        snapshot=snapshot,
+                        previous_amount=item.last_amount,
+                        current_amount=scrape_result.amount,
+                        product_url=product_url,
+                        listing_url=listing_url,
+                    )
+                else:
+                    self._emit_alert_if_crossed(
+                        item_before=item,
+                        snapshot=snapshot,
+                        current_amount=scrape_result.amount,
+                        product_url=product_url,
+                        listing_url=listing_url,
+                    )
             self._repository.finish_check_run(
                 run_id=context.run_id,
                 status="succeeded",
@@ -610,10 +619,92 @@ class TrackingSchedulerService:
         notification = NotificationEvent(
             notification_id=_new_notification_event_id(),
             idempotency_key=_build_notification_idempotency_key(
-                event_key=_build_price_drop_notification_event_key(
+                event_key=_build_price_change_notification_event_key(
                     item_id=item_before.item_id,
                     scheduled_for=snapshot.scheduled_for,
                     checked_at=snapshot.checked_at,
+                    change_type="drop",
+                ),
+                channel=channel,
+            ),
+            alert_event_id=None,
+            item_id=item_before.item_id,
+            channel=channel,
+            payload=json.dumps(payload, separators=(",", ":"), sort_keys=True),
+            status="queued",
+            attempt_count=0,
+            max_attempts=self._notification_max_attempts,
+            next_attempt_at=now,
+            last_attempt_at=None,
+            sent_at=None,
+            provider_name=None,
+            provider_message_id=None,
+            last_error=None,
+            lease_owner=None,
+            lease_until=None,
+            created_at=now,
+            updated_at=now,
+        )
+        self._repository.enqueue_notification_event(notification)
+
+    def _emit_price_increase_notification_if_enabled(
+        self,
+        *,
+        item_before: TrackedItem,
+        snapshot: PriceSnapshot,
+        previous_amount: str | None,
+        current_amount: str | None,
+        product_url: str | None,
+        listing_url: str | None,
+    ) -> None:
+        if not item_before.notify_on_price_increase:
+            return
+
+        previous = _parse_decimal(previous_amount)
+        current = _parse_decimal(current_amount)
+        if previous is None or current is None:
+            return
+        if current <= previous:
+            return
+
+        now = snapshot.checked_at
+        active_chat_id = self._get_active_telegram_chat(
+            user_id=getattr(item_before, "user_id", "legacy_owner")
+        )
+        channel = "telegram" if active_chat_id else "log"
+        affiliate_url = _build_affiliate_url(
+            product_url=product_url,
+            template=self._affiliate_link_template,
+        )
+        payload = {
+            "notification_type": "price_increase",
+            "item_id": item_before.item_id,
+            "snapshot_id": snapshot.snapshot_id,
+            "rule_type": "price_increase",
+            "previous_amount": _decimal_to_str(previous),
+            "current_amount": _decimal_to_str(current),
+            "currency": snapshot.currency or item_before.currency,
+            "triggered_at": snapshot.checked_at,
+        }
+        if item_before.product_name:
+            payload["product_name"] = item_before.product_name
+        if product_url:
+            payload["product_url"] = product_url
+        if listing_url:
+            payload["listing_url"] = listing_url
+        if affiliate_url:
+            payload["affiliate_url"] = affiliate_url
+        if active_chat_id is not None:
+            payload["chat_id"] = active_chat_id
+
+        notification = NotificationEvent(
+            notification_id=_new_notification_event_id(),
+            idempotency_key=_build_notification_idempotency_key(
+                event_key=_build_price_change_notification_event_key(
+                    item_id=item_before.item_id,
+                    scheduled_for=snapshot.scheduled_for,
+                    checked_at=snapshot.checked_at,
+                    change_type="increase",
                 ),
                 channel=channel,
             ),
@@ -962,14 +1053,15 @@ def _build_alert_idempotency_key(*, item_id: str, rule_type: str, snapshot_id: s
 def _build_notification_idempotency_key(*, event_key: str, channel: str) -> str:
     return f"{event_key}:{channel}"
 
-def _build_price_drop_notification_event_key(
+def _build_price_change_notification_event_key(
     *,
     item_id: str,
     scheduled_for: str | None,
     checked_at: str,
+    change_type: str,
 ) -> str:
     marker = scheduled_for or checked_at
-    return f"price_drop:{item_id}:{marker}"
+    return f"price_{change_type}:{item_id}:{marker}"
 
 
 def _resolve_product_url(item: TrackedItem, scrape_result: PriceResult) -> str | None:

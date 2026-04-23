@@ -170,6 +170,7 @@ def test_bootstrap_creates_item_and_snapshot() -> None:
     assert item.item_id.startswith("trk_")
     assert item.check_interval_minutes == 45
     assert item.target_amount == "9.00"
+    assert item.notify_on_price_increase is False
     assert item.tracking_mode == "alert"
     assert item.alerts_enabled is True
     assert repository.list_snapshots(item.item_id, limit=10)
@@ -233,8 +234,28 @@ def test_bootstrap_without_target_starts_monitor_mode() -> None:
     )
 
     assert item.target_amount is None
+    assert item.notify_on_price_increase is False
     assert item.tracking_mode == "monitor"
     assert item.alerts_enabled is False
+
+
+def test_bootstrap_can_enable_price_increase_notifications() -> None:
+    service, _ = _build_service(_success_result("https://example.com/p/price-increase"))
+
+    item = service.bootstrap(
+        TrackingBootstrapInput(
+            request_id="req_monitor_increase",
+            url="https://example.com/p/price-increase",
+            timeout_seconds=20,
+            selected_sites=None,
+            fetch_mode="auto",
+            check_interval_minutes=60,
+            target_amount=None,
+            notify_on_price_increase=True,
+        )
+    )
+
+    assert item.notify_on_price_increase is True
 
 
 def test_bootstrap_new_item_enqueues_tracking_started_notification_when_chat_connected() -> None:
@@ -333,6 +354,8 @@ def test_update_item_applies_patch_fields() -> None:
             check_interval_minutes=120,
             target_amount="8.50",
             target_amount_provided=True,
+            notify_on_price_increase=True,
+            notify_on_price_increase_provided=True,
         )
     )
 
@@ -340,6 +363,7 @@ def test_update_item_applies_patch_fields() -> None:
     assert updated.status == "paused"
     assert updated.check_interval_minutes == 120
     assert updated.target_amount == "8.50"
+    assert updated.notify_on_price_increase is True
     assert updated.tracking_mode == "alert"
 
 
@@ -364,6 +388,8 @@ def test_update_item_can_clear_target_and_switch_to_monitor_mode() -> None:
             check_interval_minutes=None,
             target_amount="   ",
             target_amount_provided=True,
+            notify_on_price_increase=None,
+            notify_on_price_increase_provided=False,
         )
     )
 
@@ -371,6 +397,44 @@ def test_update_item_can_clear_target_and_switch_to_monitor_mode() -> None:
     assert updated.target_amount is None
     assert updated.tracking_mode == "monitor"
     assert updated.alerts_enabled is False
+
+
+def test_update_item_paused_transition_enqueues_tracking_stopped_notification() -> None:
+    service, repository = _build_service(_success_result("https://example.com/p/paused-notify"))
+    repository.active_telegram_chat_by_user["legacy_owner"] = "12345"
+    item = service.bootstrap(
+        TrackingBootstrapInput(
+            request_id="req_paused_notify",
+            url="https://example.com/p/paused-notify",
+            timeout_seconds=20,
+            selected_sites=None,
+            fetch_mode="auto",
+            check_interval_minutes=60,
+            target_amount=None,
+        )
+    )
+    assert len(repository.notification_events) == 1
+    repository.notification_events.clear()
+
+    updated = service.update_item(
+        TrackingUpdateInput(
+            item_id=item.item_id,
+            status="paused",
+            check_interval_minutes=None,
+            target_amount=None,
+            target_amount_provided=False,
+        )
+    )
+
+    assert updated is not None
+    assert updated.status == "paused"
+    assert len(repository.notification_events) == 1
+    notification = repository.notification_events[0]
+    assert notification.channel == "telegram"
+    payload = json.loads(notification.payload)
+    assert payload["notification_type"] == "tracking_stopped"
+    assert payload["item_id"] == item.item_id
+    assert payload["chat_id"] == "12345"
 
 
 def test_update_item_rejects_interval_outside_bounds() -> None:

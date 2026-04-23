@@ -205,6 +205,12 @@ def _render_telegram_message(payload: dict) -> str:
             f"Previous: {previous}{currency_suffix}",
             f"Now: {current}{currency_suffix}",
         ]
+    elif notification_type == "price_increase":
+        lines = [
+            "Price increased",
+            f"Previous: {previous}{currency_suffix}",
+            f"Now: {current}{currency_suffix}",
+        ]
     elif notification_type == "tracking_started":
         lines = ["Tracking started"]
         if current != "?":
@@ -215,6 +221,12 @@ def _render_telegram_message(payload: dict) -> str:
             lines.append("I will notify you when the price drops.")
         else:
             lines.append("I will notify you when your target price is reached.")
+    elif notification_type == "tracking_stopped":
+        lines = ["Tracking stopped"]
+        if current != "?":
+            lines.append(f"Last price: {current}{currency_suffix}")
+        if target != "?":
+            lines.append(f"Target price: {target}{currency_suffix}")
     else:
         lines = [
             "Target reached",

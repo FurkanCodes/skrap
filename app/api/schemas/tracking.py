@@ -13,6 +13,7 @@ class TrackedItemBootstrapRequest(BaseModel):
     fetch_mode: Literal["auto", "http", "dynamic", "stealth"] = "auto"
     check_interval_minutes: int = Field(default=60, ge=1, le=10080)
     target_amount: str | None = None
+    notify_on_price_increase: bool | None = None
 
     @model_validator(mode="after")
     def validate_source(self) -> "TrackedItemBootstrapRequest":
@@ -26,6 +27,7 @@ class TrackedItemBulkBootstrapItemRequest(BaseModel):
     scrape_result_ref: str | None = None
     check_interval_minutes: int | None = Field(default=None, ge=1, le=10080)
     target_amount: str | None = None
+    notify_on_price_increase: bool | None = None
 
     @model_validator(mode="after")
     def validate_source(self) -> "TrackedItemBulkBootstrapItemRequest":
@@ -42,6 +44,7 @@ class TrackedItemBulkBootstrapRequest(BaseModel):
     fetch_mode: Literal["auto", "http", "dynamic", "stealth"] = "auto"
     check_interval_minutes: int = Field(default=60, ge=1, le=10080)
     target_amount: str | None = None
+    notify_on_price_increase: bool | None = None
 
     @model_validator(mode="after")
     def validate_item_sources(self) -> "TrackedItemBulkBootstrapRequest":
@@ -56,6 +59,7 @@ class TrackedItemUpdateRequest(BaseModel):
     status: Literal["active", "paused"] | None = None
     check_interval_minutes: int | None = Field(default=None, ge=1, le=10080)
     target_amount: str | None = None
+    notify_on_price_increase: bool | None = None
 
 
 class PriceSnapshotResponse(BaseModel):
@@ -93,6 +97,7 @@ class TrackedItemResponse(BaseModel):
     alerts_enabled: bool
     check_interval_minutes: int
     target_amount: str | None
+    notify_on_price_increase: bool
     created_at: str
     updated_at: str
     last_checked_at: str | None

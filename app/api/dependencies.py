@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from functools import lru_cache
+import logging
 import time
 from typing import TypeVar
 
@@ -21,6 +22,7 @@ from app.infrastructure.scraper_gateway import ScraplingGateway
 
 _http_bearer = HTTPBearer(auto_error=False)
 _Instance = TypeVar("_Instance")
+_logger = logging.getLogger("scraper_api.auth")
 
 
 def get_app_settings() -> Settings:
@@ -181,13 +183,17 @@ def _get_jwt_verifier_cached(
     jwks_url: str,
     issuer: str,
     audience: str,
+    algorithms: tuple[str, ...],
     jwks_cache_ttl_seconds: int,
+    jwks_timeout_seconds: float,
 ) -> BetterAuthJwtVerifier:
     verifier = BetterAuthJwtVerifier(
         jwks_url=jwks_url,
         issuer=issuer,
         audience=audience,
+        algorithms=algorithms,
         jwks_cache_ttl_seconds=jwks_cache_ttl_seconds,
+        jwks_timeout_seconds=jwks_timeout_seconds,
     )
     return _maybe_profile(verifier, component="jwt_verifier")
 
@@ -199,7 +205,9 @@ def get_jwt_verifier(
         jwks_url=settings.better_auth_jwks_url,
         issuer=settings.better_auth_jwt_issuer,
         audience=settings.better_auth_jwt_audience,
+        algorithms=settings.better_auth_jwt_algorithms,
         jwks_cache_ttl_seconds=settings.better_auth_jwks_cache_ttl_seconds,
+        jwks_timeout_seconds=settings.better_auth_jwks_timeout_seconds,
     )
 
 
@@ -223,7 +231,8 @@ def get_current_principal(
     try:
         return verifier.verify(credentials.credentials)
     except AuthenticationError as exc:
-        raise HTTPException(status_code=401, detail=str(exc)) from exc
+        _logger.info("auth_failed reason=%s", exc.reason)
+        raise HTTPException(status_code=401, detail="Invalid bearer token") from exc
 
 
 @lru_cache
@@ -248,6 +257,77 @@ def get_user_service(
         database_url=settings.tracking_database_url,
         db_pool_min_size=settings.tracking_db_pool_min_size,
         db_pool_max_size=settings.tracking_db_pool_max_size,
+    )
+
+
+def warm_application_dependencies(settings: Settings) -> None:
+    """Best-effort cold-path warmup for auth and DB-backed services."""
+    if settings.auth_required:
+        _soft_warm(
+            "jwt_verifier",
+            lambda: _get_jwt_verifier_cached(
+                jwks_url=settings.better_auth_jwks_url,
+                issuer=settings.better_auth_jwt_issuer,
+                audience=settings.better_auth_jwt_audience,
+                algorithms=settings.better_auth_jwt_algorithms,
+                jwks_cache_ttl_seconds=settings.better_auth_jwks_cache_ttl_seconds,
+                jwks_timeout_seconds=settings.better_auth_jwks_timeout_seconds,
+            ).warm(),
+        )
+
+    _soft_warm(
+        "tracking_repository",
+        lambda: _get_tracking_repository_cached(
+            database_url=settings.tracking_database_url,
+            db_pool_min_size=settings.tracking_db_pool_min_size,
+            db_pool_max_size=settings.tracking_db_pool_max_size,
+        ),
+    )
+    _soft_warm(
+        "tracking_service",
+        lambda: _get_tracking_service_cached(
+            scrape_concurrency=settings.scrape_concurrency,
+            database_url=settings.tracking_database_url,
+            db_pool_min_size=settings.tracking_db_pool_min_size,
+            db_pool_max_size=settings.tracking_db_pool_max_size,
+            default_interval_minutes=settings.tracking_interval_default_minutes,
+            min_interval_minutes=settings.tracking_interval_min_minutes,
+            max_interval_minutes=settings.tracking_interval_max_minutes,
+            snapshot_default_limit=settings.tracking_snapshot_default_limit,
+        ),
+    )
+    _soft_warm(
+        "telegram_service",
+        lambda: _get_telegram_integration_service_cached(
+            database_url=settings.tracking_database_url,
+            db_pool_min_size=settings.tracking_db_pool_min_size,
+            db_pool_max_size=settings.tracking_db_pool_max_size,
+            bot_token=settings.telegram_bot_token,
+            bot_username=settings.telegram_bot_username,
+            connect_ttl_minutes=settings.telegram_connect_ttl_minutes,
+        ),
+    )
+    _soft_warm(
+        "user_service",
+        lambda: _get_user_service_cached(
+            database_url=settings.tracking_database_url,
+            db_pool_min_size=settings.tracking_db_pool_min_size,
+            db_pool_max_size=settings.tracking_db_pool_max_size,
+        ),
+    )
+
+
+def _soft_warm(name: str, fn) -> None:  # noqa: ANN001
+    started = time.perf_counter()
+    try:
+        fn()
+    except Exception:
+        _logger.warning("warmup_failed dependency=%s", name, exc_info=True)
+        return
+    _logger.info(
+        "warmup_complete dependency=%s duration_ms=%.2f",
+        name,
+        (time.perf_counter() - started) * 1000,
     )
 
 
