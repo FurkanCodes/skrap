@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import random
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
@@ -55,6 +56,7 @@ class NotificationWorkerService:
         base_backoff_seconds: int,
         backoff_max_seconds: int,
         retry_jitter_percent: int,
+        max_inflight: int = 1,
     ) -> None:
         self._repository = repository
         self._sender = sender
@@ -65,6 +67,7 @@ class NotificationWorkerService:
         self._base_backoff_seconds = max(1, base_backoff_seconds)
         self._backoff_max_seconds = max(self._base_backoff_seconds, backoff_max_seconds)
         self._retry_jitter_percent = max(0, retry_jitter_percent)
+        self._max_inflight = max(1, max_inflight)
 
     def run_once(self) -> NotificationWorkerCycleResult:
         started = time.perf_counter()
@@ -91,6 +94,7 @@ class NotificationWorkerService:
         dead_count = 0
         failure_count = 0
         max_attempt_depth = 0
+        active_events: list[NotificationEvent] = []
         for event in claimed:
             if not self._is_item_active(event.item_id):
                 now_iso = _to_iso(_utcnow())
@@ -108,16 +112,16 @@ class NotificationWorkerService:
                 dead_count += 1
                 continue
 
-            try:
-                send_result = self._sender.send(event)
-            except Exception as exc:
-                send_result = NotificationSendResult(
-                    success=False,
-                    provider_name="internal",
-                    error=f"internal_send_error: {exc}",
-                    retryable=True,
-                )
+            active_events.append(event)
 
+        send_result_by_id = self._send_events(active_events)
+        for event in active_events:
+            send_result = send_result_by_id.get(event.notification_id) or NotificationSendResult(
+                success=False,
+                provider_name="internal",
+                error="internal_send_error: missing_send_result",
+                retryable=True,
+            )
             attempt_count = event.attempt_count + 1
             max_attempt_depth = max(max_attempt_depth, attempt_count)
             now_iso = _to_iso(_utcnow())
@@ -184,6 +188,48 @@ class NotificationWorkerService:
             max_attempt_depth=max_attempt_depth,
             duration_seconds=max(0.0, time.perf_counter() - started),
         )
+
+    def _send_events(self, events: list[NotificationEvent]) -> dict[str, NotificationSendResult]:
+        if not events:
+            return {}
+        if self._max_inflight <= 1 or len(events) <= 1:
+            return {
+                event.notification_id: self._send_with_guard(event)
+                for event in events
+            }
+
+        results: dict[str, NotificationSendResult] = {}
+        max_workers = min(self._max_inflight, len(events))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(self._send_with_guard, event): event.notification_id
+                for event in events
+            }
+            for future in as_completed(futures):
+                notification_id = futures[future]
+                try:
+                    results[notification_id] = future.result()
+                except Exception as exc:
+                    # `_send_with_guard` is defensive and should not raise.
+                    # Keep a fallback in case future internals fail.
+                    results[notification_id] = NotificationSendResult(
+                        success=False,
+                        provider_name="internal",
+                        error=f"internal_send_error: {exc}",
+                        retryable=True,
+                    )
+        return results
+
+    def _send_with_guard(self, event: NotificationEvent) -> NotificationSendResult:
+        try:
+            return self._sender.send(event)
+        except Exception as exc:
+            return NotificationSendResult(
+                success=False,
+                provider_name="internal",
+                error=f"internal_send_error: {exc}",
+                retryable=True,
+            )
 
     def _is_item_active(self, item_id: str) -> bool:
         get_item = getattr(self._repository, "get_item", None)

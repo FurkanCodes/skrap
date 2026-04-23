@@ -55,10 +55,13 @@ def _event(
 @dataclass
 class _FakeSender:
     result_by_notification_id: dict[str, NotificationSendResult]
+    raise_for_notification_ids: set[str] = field(default_factory=set)
     sent_notification_ids: list[str] = field(default_factory=list)
 
     def send(self, event: NotificationEvent) -> NotificationSendResult:
         self.sent_notification_ids.append(event.notification_id)
+        if event.notification_id in self.raise_for_notification_ids:
+            raise RuntimeError("sender exploded")
         return self.result_by_notification_id[event.notification_id]
 
 
@@ -332,3 +335,103 @@ def test_notification_worker_drops_event_when_item_is_paused() -> None:
     assert saved.status == "dead"
     assert saved.last_error == "item_inactive"
     assert sender.sent_notification_ids == []
+
+
+def test_notification_worker_processes_batch_in_parallel_when_inflight_enabled() -> None:
+    now = datetime.now(tz=UTC)
+    events = {
+        "nev_1": _event(notification_id="nev_1", now=now),
+        "nev_2": _event(notification_id="nev_2", now=now),
+        "nev_3": _event(notification_id="nev_3", now=now),
+    }
+    repository = _InMemoryNotificationRepository(events_by_id=events.copy())
+    sender = _FakeSender(
+        result_by_notification_id={
+            notification_id: NotificationSendResult(
+                success=True,
+                provider_name="log",
+                provider_message_id=f"msg-{notification_id}",
+                retryable=False,
+            )
+            for notification_id in events
+        }
+    )
+    service = NotificationWorkerService(
+        repository=repository,
+        sender=sender,
+        claim_batch_size=10,
+        lease_seconds=30,
+        lease_owner="notifier-test",
+        max_attempts=5,
+        base_backoff_seconds=10,
+        backoff_max_seconds=300,
+        retry_jitter_percent=0,
+        max_inflight=3,
+    )
+
+    result = service.run_once()
+
+    assert result.claimed_count == 3
+    assert result.sent_count == 3
+    assert result.retry_count == 0
+    assert result.dead_count == 0
+    assert result.failure_count == 0
+    assert set(sender.sent_notification_ids) == {"nev_1", "nev_2", "nev_3"}
+    for event in repository.events_by_id.values():
+        assert event.status == "sent"
+        assert event.sent_at is not None
+
+
+def test_notification_worker_parallel_send_exception_becomes_retryable_failure() -> None:
+    now = datetime.now(tz=UTC)
+    success_event = _event(notification_id="nev_ok", now=now)
+    failing_event = _event(notification_id="nev_boom", now=now)
+    repository = _InMemoryNotificationRepository(
+        events_by_id={
+            success_event.notification_id: success_event,
+            failing_event.notification_id: failing_event,
+        }
+    )
+    sender = _FakeSender(
+        result_by_notification_id={
+            success_event.notification_id: NotificationSendResult(
+                success=True,
+                provider_name="log",
+                provider_message_id="msg-ok",
+                retryable=False,
+            ),
+            failing_event.notification_id: NotificationSendResult(
+                success=True,
+                provider_name="log",
+                provider_message_id="msg-unused",
+                retryable=False,
+            ),
+        },
+        raise_for_notification_ids={failing_event.notification_id},
+    )
+    service = NotificationWorkerService(
+        repository=repository,
+        sender=sender,
+        claim_batch_size=10,
+        lease_seconds=30,
+        lease_owner="notifier-test",
+        max_attempts=5,
+        base_backoff_seconds=10,
+        backoff_max_seconds=300,
+        retry_jitter_percent=0,
+        max_inflight=2,
+    )
+
+    result = service.run_once()
+
+    assert result.claimed_count == 2
+    assert result.sent_count == 1
+    assert result.retry_count == 1
+    assert result.dead_count == 0
+    assert result.failure_count == 1
+    saved_success = repository.events_by_id[success_event.notification_id]
+    assert saved_success.status == "sent"
+    saved_failure = repository.events_by_id[failing_event.notification_id]
+    assert saved_failure.status == "failed"
+    assert saved_failure.last_error is not None
+    assert "internal_send_error" in saved_failure.last_error

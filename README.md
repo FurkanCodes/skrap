@@ -95,7 +95,7 @@ Notes:
 ./.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
 ```
 
-### 4. (Recommended) Start scheduler and notifier in separate terminals
+### 4. Start background workers in separate terminals
 
 ```bash
 ./.venv/bin/python -m app.jobs.scheduler
@@ -103,6 +103,16 @@ Notes:
 
 ```bash
 ./.venv/bin/python -m app.jobs.notifier
+```
+
+Queue split mode (recommended for scale):
+
+```bash
+./.venv/bin/python -m app.jobs.scheduler_dispatcher
+```
+
+```bash
+./.venv/bin/python -m app.jobs.scheduler_worker
 ```
 
 ### 5. Open docs
@@ -659,12 +669,32 @@ Execution semantics:
 - lease-based reclaim on worker crash,
 - dedupe key: `item_id + scheduled_for`.
 
+## Scheduler Dispatcher (`python -m app.jobs.scheduler_dispatcher`)
+
+Responsibilities:
+- claim due active items with lease,
+- enqueue dispatch jobs to Redis stream,
+- release claimed leases if queue write fails.
+
+Execution semantics:
+- at-least-once enqueue intent,
+- worker processing is decoupled from dispatcher polling cadence.
+
+## Scheduler Worker (`python -m app.jobs.scheduler_worker`)
+
+Responsibilities:
+- claim dispatch jobs from Redis stream consumer group,
+- process claimed tracking checks via scheduler service,
+- acknowledge stream entries on success/stale skip,
+- reclaim stale pending jobs via idle-time auto-claim.
+
 ## Notifier (`python -m app.jobs.notifier`)
 
 Responsibilities:
 - claim due notification outbox rows,
-- send through sender adapter,
+- send through sender adapter with bounded parallelism,
 - finalize as `sent`, retry (`failed` + backoff), or `dead`.
+- apply Telegram send pacing and honor Telegram `retry_after` backpressure hints.
 
 Current sender:
 - `LoggingNotificationSender` only (writes payload to logs).
@@ -731,6 +761,13 @@ High-level relationships:
 | `SCHEDULER_ALIGN_CHECKS_TO_INTERVAL` | `false` | align same-interval checks to shared UTC boundaries |
 | `SCHEDULER_ALERT_COOLDOWN_MINUTES` | `60` | min gap between repeated alerts per rule |
 | `SCHEDULER_LEASE_OWNER` | auto-generated | optional explicit lease owner id |
+| `SCHEDULER_QUEUE_REDIS_URL` | `redis://127.0.0.1:6379/0` | Redis URL used by dispatcher/worker queue |
+| `SCHEDULER_QUEUE_STREAM_KEY` | `tracking:scheduler:jobs` | Redis stream key for scheduler dispatch jobs |
+| `SCHEDULER_QUEUE_CONSUMER_GROUP` | `tracking-scheduler-workers` | Redis consumer group name |
+| `SCHEDULER_QUEUE_MAX_STREAM_LENGTH` | `1000000` | approximate max stream length trimming target |
+| `SCHEDULER_WORKER_CLAIM_BATCH_SIZE` | `64` | max dispatch jobs claimed per worker cycle |
+| `SCHEDULER_WORKER_BLOCK_SECONDS` | `5` | blocking wait for new stream messages |
+| `SCHEDULER_WORKER_PENDING_IDLE_SECONDS` | `60` | min idle seconds before auto-claiming pending jobs |
 
 ## Notifier settings
 
@@ -743,7 +780,16 @@ High-level relationships:
 | `NOTIFIER_BASE_BACKOFF_SECONDS` | `30` | exponential backoff base |
 | `NOTIFIER_BACKOFF_MAX_SECONDS` | `3600` | max retry delay |
 | `NOTIFIER_RETRY_JITTER_PERCENT` | `10` | retry jitter |
+| `NOTIFIER_MAX_INFLIGHT` | `16` | max parallel sends per notifier cycle |
+| `TELEGRAM_SENDER_MIN_INTERVAL_MS` | `50` | per-worker minimum delay between Telegram API sends |
 | `NOTIFIER_LEASE_OWNER` | auto-generated | optional explicit lease owner id |
+
+## Notifier Sharding
+
+Use simple process-level sharding for scale:
+- Run multiple notifier processes (`python -m app.jobs.notifier`) on different hosts/containers.
+- Set a distinct `NOTIFIER_LEASE_OWNER` per process for clearer logs/forensics.
+- Keep one shared Postgres DB; `claim_due_notification_events` + `SKIP LOCKED` naturally distributes work.
 
 ## Operational Notes and Edge Cases
 
@@ -783,7 +829,7 @@ High-level relationships:
 - No auth: all endpoints are open in current MVP state.
 - Notification sender is log-only (no email/SMS provider yet).
 - No dedicated REST endpoints yet for alert/notification history exposure.
-- No distributed queue yet; scheduler/notifier are DB-driven workers.
+- Redis-backed scheduler queue split is available, but monolithic scheduler path is still supported for compatibility.
 
 ---
 

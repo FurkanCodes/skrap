@@ -116,6 +116,17 @@ class TrackingSchedulerService:
             lease_until=_to_iso(now + timedelta(seconds=self._lease_seconds)),
             limit=self._claim_batch_size,
         )
+        return self.run_for_claimed_items(claimed, now=now, cycle_started=started)
+
+    def run_for_claimed_items(
+        self,
+        claimed: list[TrackedItem],
+        *,
+        now: datetime | None = None,
+        cycle_started: float | None = None,
+    ) -> SchedulerCycleResult:
+        started = cycle_started if cycle_started is not None else time.perf_counter()
+        reference_now = now if now is not None else _utcnow()
         if not claimed:
             duration = max(0.0, time.perf_counter() - started)
             return SchedulerCycleResult(
@@ -128,7 +139,10 @@ class TrackingSchedulerService:
                 fetch_mode=self._fetch_mode,
             )
 
-        due_lag_seconds = tuple(_compute_due_lag_seconds(now, item.next_check_at) for item in claimed)
+        due_lag_seconds = tuple(
+            _compute_due_lag_seconds(reference_now, item.next_check_at)
+            for item in claimed
+        )
         contexts, pre_scrape_failures, skipped_count = self._start_runs(claimed)
         site_success_counts: defaultdict[str, int] = defaultdict(int)
         site_failure_counts: defaultdict[str, int] = defaultdict(int)

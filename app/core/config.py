@@ -89,6 +89,13 @@ class Settings:
     scheduler_jitter_percent: int
     scheduler_align_checks_to_interval: bool
     scheduler_alert_cooldown_minutes: int
+    scheduler_queue_redis_url: str
+    scheduler_queue_stream_key: str
+    scheduler_queue_consumer_group: str
+    scheduler_queue_max_stream_length: int
+    scheduler_worker_claim_batch_size: int
+    scheduler_worker_block_seconds: int
+    scheduler_worker_pending_idle_seconds: int
     notifier_poll_seconds: int
     notifier_claim_batch_size: int
     notifier_lease_seconds: int
@@ -96,6 +103,8 @@ class Settings:
     notifier_base_backoff_seconds: int
     notifier_backoff_max_seconds: int
     notifier_retry_jitter_percent: int
+    notifier_max_inflight: int
+    telegram_sender_min_interval_ms: int
     telegram_bot_token: str
     telegram_bot_username: str
     telegram_webhook_secret: str
@@ -151,6 +160,31 @@ def get_settings() -> Settings:
         scheduler_alert_cooldown_minutes=_parse_int_env(
             "SCHEDULER_ALERT_COOLDOWN_MINUTES", 60
         ),
+        scheduler_queue_redis_url=(
+            _parse_str_env("SCHEDULER_QUEUE_REDIS_URL", "")
+            or _parse_str_env("REDIS_URL", "")
+            or "redis://127.0.0.1:6379/0"
+        ),
+        scheduler_queue_stream_key=_parse_str_env(
+            "SCHEDULER_QUEUE_STREAM_KEY",
+            "tracking:scheduler:jobs",
+        ),
+        scheduler_queue_consumer_group=_parse_str_env(
+            "SCHEDULER_QUEUE_CONSUMER_GROUP",
+            "tracking-scheduler-workers",
+        ),
+        scheduler_queue_max_stream_length=_parse_int_env(
+            "SCHEDULER_QUEUE_MAX_STREAM_LENGTH", 1_000_000
+        ),
+        scheduler_worker_claim_batch_size=_parse_int_env(
+            "SCHEDULER_WORKER_CLAIM_BATCH_SIZE", 64
+        ),
+        scheduler_worker_block_seconds=_parse_int_env(
+            "SCHEDULER_WORKER_BLOCK_SECONDS", 5
+        ),
+        scheduler_worker_pending_idle_seconds=_parse_int_env(
+            "SCHEDULER_WORKER_PENDING_IDLE_SECONDS", 60
+        ),
         notifier_poll_seconds=_parse_int_env("NOTIFIER_POLL_SECONDS", 5),
         notifier_claim_batch_size=_parse_int_env("NOTIFIER_CLAIM_BATCH_SIZE", 100),
         notifier_lease_seconds=_parse_int_env("NOTIFIER_LEASE_SECONDS", 120),
@@ -158,6 +192,10 @@ def get_settings() -> Settings:
         notifier_base_backoff_seconds=_parse_int_env("NOTIFIER_BASE_BACKOFF_SECONDS", 30),
         notifier_backoff_max_seconds=_parse_int_env("NOTIFIER_BACKOFF_MAX_SECONDS", 3600),
         notifier_retry_jitter_percent=_parse_int_env("NOTIFIER_RETRY_JITTER_PERCENT", 10),
+        notifier_max_inflight=_parse_int_env("NOTIFIER_MAX_INFLIGHT", 16),
+        telegram_sender_min_interval_ms=_parse_int_env(
+            "TELEGRAM_SENDER_MIN_INTERVAL_MS", 50
+        ),
         telegram_bot_token=_parse_str_env("TELEGRAM_BOT_TOKEN", ""),
         telegram_bot_username=_parse_str_env("TELEGRAM_BOT_USERNAME", ""),
         telegram_webhook_secret=_parse_str_env("TELEGRAM_WEBHOOK_SECRET", ""),
@@ -226,6 +264,20 @@ def get_settings() -> Settings:
         raise RuntimeError("SCHEDULER_JITTER_PERCENT must be between 0 and 50")
     if settings.scheduler_alert_cooldown_minutes < 0:
         raise RuntimeError("SCHEDULER_ALERT_COOLDOWN_MINUTES must be >= 0")
+    if not settings.scheduler_queue_redis_url:
+        raise RuntimeError("SCHEDULER_QUEUE_REDIS_URL must not be empty")
+    if not settings.scheduler_queue_stream_key:
+        raise RuntimeError("SCHEDULER_QUEUE_STREAM_KEY must not be empty")
+    if not settings.scheduler_queue_consumer_group:
+        raise RuntimeError("SCHEDULER_QUEUE_CONSUMER_GROUP must not be empty")
+    if settings.scheduler_queue_max_stream_length < 1:
+        raise RuntimeError("SCHEDULER_QUEUE_MAX_STREAM_LENGTH must be >= 1")
+    if settings.scheduler_worker_claim_batch_size < 1:
+        raise RuntimeError("SCHEDULER_WORKER_CLAIM_BATCH_SIZE must be >= 1")
+    if settings.scheduler_worker_block_seconds < 1:
+        raise RuntimeError("SCHEDULER_WORKER_BLOCK_SECONDS must be >= 1")
+    if settings.scheduler_worker_pending_idle_seconds < 1:
+        raise RuntimeError("SCHEDULER_WORKER_PENDING_IDLE_SECONDS must be >= 1")
     if settings.notifier_poll_seconds < 1:
         raise RuntimeError("NOTIFIER_POLL_SECONDS must be >= 1")
     if settings.notifier_claim_batch_size < 1:
@@ -242,6 +294,10 @@ def get_settings() -> Settings:
         )
     if settings.notifier_retry_jitter_percent < 0 or settings.notifier_retry_jitter_percent > 50:
         raise RuntimeError("NOTIFIER_RETRY_JITTER_PERCENT must be between 0 and 50")
+    if settings.notifier_max_inflight < 1:
+        raise RuntimeError("NOTIFIER_MAX_INFLIGHT must be >= 1")
+    if settings.telegram_sender_min_interval_ms < 0:
+        raise RuntimeError("TELEGRAM_SENDER_MIN_INTERVAL_MS must be >= 0")
     if settings.telegram_connect_ttl_minutes < 1 or settings.telegram_connect_ttl_minutes > 120:
         raise RuntimeError("TELEGRAM_CONNECT_TTL_MINUTES must be between 1 and 120")
     if settings.auth_required:

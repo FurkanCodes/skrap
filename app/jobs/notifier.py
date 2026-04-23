@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import socket
+import threading
 import time
 
 import httpx
@@ -56,8 +58,11 @@ class LoggingNotificationSender:
 class TelegramNotificationSender:
     """Telegram Bot API sender for `channel=telegram` notification events."""
 
-    def __init__(self, *, bot_token: str) -> None:
+    def __init__(self, *, bot_token: str, min_interval_ms: int = 0) -> None:
         self._bot_token = bot_token.strip()
+        self._min_interval_seconds = max(0.0, float(min_interval_ms) / 1000.0)
+        self._rate_lock = threading.Lock()
+        self._next_allowed_monotonic = 0.0
 
     def send(self, event: NotificationEvent) -> NotificationSendResult:
         if not self._bot_token:
@@ -81,6 +86,7 @@ class TelegramNotificationSender:
             )
 
         message_text = _render_telegram_message(payload)
+        self._acquire_send_slot()
         api_url = f"https://api.telegram.org/bot{self._bot_token}/sendMessage"
         try:
             response = httpx.post(
@@ -117,7 +123,12 @@ class TelegramNotificationSender:
             )
 
         description = str(response_payload.get("description", "telegram_send_failed")).strip()
+        retry_after_seconds = _extract_telegram_retry_after_seconds(response_payload, description)
+        if retry_after_seconds is not None:
+            self._defer_sends_for(seconds=retry_after_seconds)
         retryable = _is_retryable_telegram_status(response.status_code, description)
+        if retry_after_seconds is not None:
+            description = f"{description} (retry_after={retry_after_seconds}s)"
         return NotificationSendResult(
             success=False,
             provider_name="telegram",
@@ -125,6 +136,24 @@ class TelegramNotificationSender:
             error=f"telegram_error_{response.status_code}: {description}",
             retryable=retryable,
         )
+
+    def _acquire_send_slot(self) -> None:
+        wait_seconds = 0.0
+        with self._rate_lock:
+            now = time.monotonic()
+            if self._next_allowed_monotonic > now:
+                wait_seconds = self._next_allowed_monotonic - now
+                now = self._next_allowed_monotonic
+            self._next_allowed_monotonic = now + self._min_interval_seconds
+        if wait_seconds > 0:
+            time.sleep(wait_seconds)
+
+    def _defer_sends_for(self, *, seconds: int) -> None:
+        delay_seconds = max(1.0, float(seconds))
+        with self._rate_lock:
+            resume_at = time.monotonic() + delay_seconds
+            if resume_at > self._next_allowed_monotonic:
+                self._next_allowed_monotonic = resume_at
 
 
 class MultiplexNotificationSender:
@@ -224,6 +253,31 @@ def _is_retryable_telegram_status(status_code: int, description: str) -> bool:
     return False
 
 
+_TELEGRAM_RETRY_AFTER_PATTERN = re.compile(r"retry after\s+(\d+)", re.IGNORECASE)
+
+
+def _extract_telegram_retry_after_seconds(payload: dict, description: str) -> int | None:
+    parameters = payload.get("parameters")
+    if isinstance(parameters, dict):
+        raw_value = parameters.get("retry_after")
+        if raw_value is not None:
+            try:
+                parsed = int(raw_value)
+            except (TypeError, ValueError):
+                parsed = 0
+            if parsed > 0:
+                return parsed
+
+    match = _TELEGRAM_RETRY_AFTER_PATTERN.search(description)
+    if not match:
+        return None
+    try:
+        parsed = int(match.group(1))
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
 def _resolve_lease_owner() -> str:
     configured = os.getenv("NOTIFIER_LEASE_OWNER", "").strip()
     if configured:
@@ -232,7 +286,7 @@ def _resolve_lease_owner() -> str:
     return f"{host}-{os.getpid()}"
 
 
-def _build_worker_service() -> tuple[NotificationWorkerService, int]:
+def _build_worker_service() -> tuple[NotificationWorkerService, int, int]:
     settings = get_settings()
     repository = PostgresTrackingRepository(
         database_url=settings.tracking_database_url,
@@ -246,6 +300,7 @@ def _build_worker_service() -> tuple[NotificationWorkerService, int]:
             log_sender=LoggingNotificationSender(),
             telegram_sender=TelegramNotificationSender(
                 bot_token=settings.telegram_bot_token,
+                min_interval_ms=settings.telegram_sender_min_interval_ms,
             ),
         ),
         claim_batch_size=settings.notifier_claim_batch_size,
@@ -255,16 +310,21 @@ def _build_worker_service() -> tuple[NotificationWorkerService, int]:
         base_backoff_seconds=settings.notifier_base_backoff_seconds,
         backoff_max_seconds=settings.notifier_backoff_max_seconds,
         retry_jitter_percent=settings.notifier_retry_jitter_percent,
+        max_inflight=settings.notifier_max_inflight,
     )
-    return worker_service, settings.notifier_poll_seconds
+    return worker_service, settings.notifier_poll_seconds, settings.notifier_max_inflight
 
 
 def main() -> None:
     _configure_logging()
     logger = logging.getLogger("scraper_api.notifier")
-    worker_service, poll_seconds = _build_worker_service()
+    worker_service, poll_seconds, max_inflight = _build_worker_service()
 
-    logger.info("notifier_started poll_seconds=%s", poll_seconds)
+    logger.info(
+        "notifier_started poll_seconds=%s max_inflight=%s",
+        poll_seconds,
+        max_inflight,
+    )
     while True:
         started = time.perf_counter()
         try:

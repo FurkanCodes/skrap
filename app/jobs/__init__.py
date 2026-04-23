@@ -1,1 +1,1 @@
-"""Background job runtimes (scheduler/worker entrypoints)."""
+"""Background job runtimes (scheduler/dispatcher/worker/notifier entrypoints)."""
