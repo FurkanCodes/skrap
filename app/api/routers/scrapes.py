@@ -5,10 +5,18 @@ from dataclasses import asdict
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 
-from app.api.dependencies import get_app_settings, get_scrape_result_cache, get_scrape_service
+from app.api.dependencies import (
+    get_app_settings,
+    get_current_principal,
+    get_scrape_result_cache,
+    get_scrape_service,
+    require_rate_limit,
+    validate_server_fetch_urls,
+)
 from app.api.schemas.scrapes import PriceResultResponse, ScrapeBatchRequest, ScrapeBatchResponse
 from app.application.scrape_result_cache import ScrapeResultCache
 from app.application.scrape_service import ScrapeBatchInput, ScrapeBatchService
+from app.core.auth import AuthPrincipal
 from app.core.config import Settings
 
 router = APIRouter(prefix="/scrapes", tags=["scrapes"])
@@ -37,11 +45,16 @@ def _normalize_selected_sites(raw_sites: list[str] | None, supported_sites: set[
 async def post_scrape_batch(
     payload: ScrapeBatchRequest,
     request: Request,
+    _principal: AuthPrincipal = Depends(get_current_principal),
+    _rate_limit: None = Depends(
+        require_rate_limit(bucket="scrapes", limit_attr="rate_limit_scrape_requests")
+    ),
     settings: Settings = Depends(get_app_settings),
     service: ScrapeBatchService = Depends(get_scrape_service),
     cache: ScrapeResultCache = Depends(get_scrape_result_cache),
 ) -> ScrapeBatchResponse:
     request_urls = [str(url) for url in payload.urls]
+    validate_server_fetch_urls(request_urls, settings=settings)
     if len(request_urls) > settings.scrape_max_urls:
         raise HTTPException(status_code=422, detail=f"At most {settings.scrape_max_urls} URLs are allowed per request")
 

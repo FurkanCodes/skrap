@@ -5,7 +5,13 @@ from dataclasses import asdict
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 
-from app.api.dependencies import get_app_settings, get_discovery_service
+from app.api.dependencies import (
+    get_app_settings,
+    get_current_principal,
+    get_discovery_service,
+    require_rate_limit,
+    validate_server_fetch_urls,
+)
 from app.api.schemas.scrapes import (
     DiscoverBatchRequest,
     DiscoverBatchResponse,
@@ -17,6 +23,7 @@ from app.application.discovery_service import (
     DiscoveryBatchService,
     DiscoveryPhaseError,
 )
+from app.core.auth import AuthPrincipal
 from app.core.config import Settings
 
 router = APIRouter(prefix="/discover", tags=["discover"])
@@ -45,10 +52,15 @@ def _normalize_selected_sites(raw_sites: list[str] | None, supported_sites: set[
 async def post_discover_batch(
     payload: DiscoverBatchRequest,
     request: Request,
+    _principal: AuthPrincipal = Depends(get_current_principal),
+    _rate_limit: None = Depends(
+        require_rate_limit(bucket="discover", limit_attr="rate_limit_discover_requests")
+    ),
     settings: Settings = Depends(get_app_settings),
     service: DiscoveryBatchService = Depends(get_discovery_service),
 ) -> DiscoverBatchResponse:
     start_urls = [str(url) for url in payload.start_urls]
+    validate_server_fetch_urls(start_urls, settings=settings)
     if len(start_urls) > settings.scrape_max_urls:
         raise HTTPException(status_code=422, detail=f"At most {settings.scrape_max_urls} URLs are allowed per request")
 

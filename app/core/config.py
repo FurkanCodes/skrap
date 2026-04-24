@@ -73,6 +73,14 @@ def _parse_csv(value: str, *, default: tuple[str, ...]) -> tuple[str, ...]:
     return parsed or default
 
 
+def _parse_int_csv(value: str, *, default: tuple[int, ...]) -> tuple[int, ...]:
+    cleaned = value.strip()
+    if not cleaned:
+        return default
+    parsed = tuple(int(item.strip()) for item in cleaned.split(",") if item.strip())
+    return parsed or default
+
+
 @dataclass(frozen=True)
 class Settings:
     environment: str
@@ -85,6 +93,16 @@ class Settings:
     scrape_concurrency: int
     scrape_result_cache_ttl_seconds: int
     scrape_result_cache_max_batches: int
+    server_fetch_allowed_ports: tuple[int, ...]
+    server_fetch_allow_private_networks: bool
+    server_fetch_resolve_dns: bool
+    rate_limit_enabled: bool
+    rate_limit_redis_url: str
+    rate_limit_window_seconds: int
+    rate_limit_default_requests: int
+    rate_limit_scrape_requests: int
+    rate_limit_discover_requests: int
+    rate_limit_fail_open: bool
     tracking_database_url: str
     tracking_db_pool_min_size: int
     tracking_db_pool_max_size: int
@@ -131,14 +149,20 @@ class Settings:
 
 @lru_cache
 def get_settings() -> Settings:
+    environment = _parse_str_env("ENVIRONMENT", "development").lower()
     tracking_database_url = (
         _parse_str_env("TRACKING_DATABASE_URL", "")
         or _parse_str_env("SUPABASE_DB_URL", "")
         or _parse_str_env("DATABASE_URL", "")
         or "postgresql://postgres:postgres@127.0.0.1:5432/postgres"
     )
+    scheduler_queue_redis_url = (
+        _parse_str_env("SCHEDULER_QUEUE_REDIS_URL", "")
+        or _parse_str_env("REDIS_URL", "")
+        or "redis://127.0.0.1:6379/0"
+    )
     settings = Settings(
-        environment=_parse_str_env("ENVIRONMENT", "development").lower(),
+        environment=environment,
         api_prefix=os.getenv("API_PREFIX", "/api/v1"),
         cors_allow_origins=_parse_origins(os.getenv("CORS_ALLOW_ORIGINS", "*")),
         scrape_timeout_default=_parse_int_env("SCRAPE_TIMEOUT_DEFAULT", 30),
@@ -148,6 +172,34 @@ def get_settings() -> Settings:
         scrape_concurrency=_parse_int_env("SCRAPE_CONCURRENCY", 5),
         scrape_result_cache_ttl_seconds=_parse_int_env("SCRAPE_RESULT_CACHE_TTL_SECONDS", 900),
         scrape_result_cache_max_batches=_parse_int_env("SCRAPE_RESULT_CACHE_MAX_BATCHES", 500),
+        server_fetch_allowed_ports=_parse_int_csv(
+            _parse_str_env("SERVER_FETCH_ALLOWED_PORTS", ""),
+            default=(80, 443),
+        ),
+        server_fetch_allow_private_networks=_parse_bool_env(
+            "SERVER_FETCH_ALLOW_PRIVATE_NETWORKS",
+            False,
+        ),
+        server_fetch_resolve_dns=_parse_bool_env(
+            "SERVER_FETCH_RESOLVE_DNS",
+            environment == "production",
+        ),
+        rate_limit_enabled=_parse_bool_env(
+            "RATE_LIMIT_ENABLED",
+            environment == "production",
+        ),
+        rate_limit_redis_url=(
+            _parse_str_env("RATE_LIMIT_REDIS_URL", "")
+            or scheduler_queue_redis_url
+        ),
+        rate_limit_window_seconds=_parse_int_env("RATE_LIMIT_WINDOW_SECONDS", 60),
+        rate_limit_default_requests=_parse_int_env("RATE_LIMIT_DEFAULT_REQUESTS", 120),
+        rate_limit_scrape_requests=_parse_int_env("RATE_LIMIT_SCRAPE_REQUESTS", 20),
+        rate_limit_discover_requests=_parse_int_env("RATE_LIMIT_DISCOVER_REQUESTS", 10),
+        rate_limit_fail_open=_parse_bool_env(
+            "RATE_LIMIT_FAIL_OPEN",
+            environment != "production",
+        ),
         tracking_database_url=tracking_database_url,
         tracking_db_pool_min_size=_parse_int_env("TRACKING_DB_POOL_MIN_SIZE", 1),
         tracking_db_pool_max_size=_parse_int_env("TRACKING_DB_POOL_MAX_SIZE", 10),
@@ -173,11 +225,7 @@ def get_settings() -> Settings:
         scheduler_alert_cooldown_minutes=_parse_int_env(
             "SCHEDULER_ALERT_COOLDOWN_MINUTES", 60
         ),
-        scheduler_queue_redis_url=(
-            _parse_str_env("SCHEDULER_QUEUE_REDIS_URL", "")
-            or _parse_str_env("REDIS_URL", "")
-            or "redis://127.0.0.1:6379/0"
-        ),
+        scheduler_queue_redis_url=scheduler_queue_redis_url,
         scheduler_queue_stream_key=_parse_str_env(
             "SCHEDULER_QUEUE_STREAM_KEY",
             "tracking:scheduler:jobs",
@@ -250,6 +298,20 @@ def get_settings() -> Settings:
         raise RuntimeError("SCRAPE_RESULT_CACHE_TTL_SECONDS must be >= 60")
     if settings.scrape_result_cache_max_batches < 1:
         raise RuntimeError("SCRAPE_RESULT_CACHE_MAX_BATCHES must be >= 1")
+    if not settings.server_fetch_allowed_ports:
+        raise RuntimeError("SERVER_FETCH_ALLOWED_PORTS must not be empty")
+    if any(port < 1 or port > 65535 for port in settings.server_fetch_allowed_ports):
+        raise RuntimeError("SERVER_FETCH_ALLOWED_PORTS must contain valid TCP ports")
+    if settings.rate_limit_enabled and not settings.rate_limit_redis_url:
+        raise RuntimeError("RATE_LIMIT_REDIS_URL is required when rate limiting is enabled")
+    if settings.rate_limit_window_seconds < 1:
+        raise RuntimeError("RATE_LIMIT_WINDOW_SECONDS must be >= 1")
+    if settings.rate_limit_default_requests < 1:
+        raise RuntimeError("RATE_LIMIT_DEFAULT_REQUESTS must be >= 1")
+    if settings.rate_limit_scrape_requests < 1:
+        raise RuntimeError("RATE_LIMIT_SCRAPE_REQUESTS must be >= 1")
+    if settings.rate_limit_discover_requests < 1:
+        raise RuntimeError("RATE_LIMIT_DISCOVER_REQUESTS must be >= 1")
     if settings.tracking_db_pool_min_size < 1:
         raise RuntimeError("TRACKING_DB_POOL_MIN_SIZE must be >= 1")
     if settings.tracking_db_pool_max_size < settings.tracking_db_pool_min_size:

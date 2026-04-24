@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from functools import lru_cache
+import hashlib
 import logging
 import time
-from typing import TypeVar
+from typing import Callable, TypeVar
 
-from fastapi import Depends, HTTPException
+from fastapi import Depends, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.application.discovery_service import DiscoveryBatchService
@@ -17,16 +18,108 @@ from app.application.user_service import UserService
 from app.core.auth import AuthPrincipal, AuthenticationError, BetterAuthJwtVerifier
 from app.core.config import Settings, get_settings
 from app.core.perf import TimedProxy, log_span, perf_enabled
+from app.core.url_security import (
+    ServerFetchUrlPolicy,
+    UnsafeServerFetchUrlError,
+    validate_server_fetch_url,
+)
 from app.infrastructure.postgres_tracking_repository import PostgresTrackingRepository
+from app.infrastructure.redis_rate_limiter import (
+    RateLimitUnavailable,
+    RedisFixedWindowRateLimiter,
+)
 from app.infrastructure.scraper_gateway import ScraplingGateway
 
 _http_bearer = HTTPBearer(auto_error=False)
 _Instance = TypeVar("_Instance")
 _logger = logging.getLogger("scraper_api.auth")
+_rate_limit_logger = logging.getLogger("scraper_api.rate_limit")
 
 
 def get_app_settings() -> Settings:
     return get_settings()
+
+
+@lru_cache
+def _get_rate_limiter_cached(redis_url: str) -> RedisFixedWindowRateLimiter:
+    return RedisFixedWindowRateLimiter(redis_url=redis_url)
+
+
+def get_rate_limiter(
+    settings: Settings = Depends(get_app_settings),
+) -> RedisFixedWindowRateLimiter | None:
+    if not settings.rate_limit_enabled:
+        return None
+    return _get_rate_limiter_cached(settings.rate_limit_redis_url)
+
+
+def require_rate_limit(
+    *,
+    bucket: str,
+    limit_attr: str = "rate_limit_default_requests",
+) -> Callable[..., None]:
+    def _dependency(
+        request: Request,
+        principal: AuthPrincipal = Depends(get_current_principal),
+        settings: Settings = Depends(get_app_settings),
+        limiter: RedisFixedWindowRateLimiter | None = Depends(get_rate_limiter),
+    ) -> None:
+        if limiter is None:
+            return
+        limit = int(getattr(settings, limit_attr))
+        subject = _rate_limit_subject(principal=principal, request=request)
+        try:
+            result = limiter.check(
+                bucket=bucket,
+                subject=subject,
+                limit=limit,
+                window_seconds=settings.rate_limit_window_seconds,
+            )
+        except RateLimitUnavailable:
+            _rate_limit_logger.warning("rate_limit_unavailable bucket=%s", bucket, exc_info=True)
+            if settings.rate_limit_fail_open:
+                return
+            raise HTTPException(status_code=503, detail="Rate limit store unavailable") from None
+
+        if result.allowed:
+            return
+
+        _rate_limit_logger.info("rate_limited bucket=%s subject=%s", bucket, subject)
+        raise HTTPException(
+            status_code=429,
+            detail="Rate limit exceeded",
+            headers={
+                "Retry-After": str(result.retry_after_seconds),
+                "X-RateLimit-Limit": str(result.limit),
+                "X-RateLimit-Remaining": str(result.remaining),
+            },
+        )
+
+    return _dependency
+
+
+def _rate_limit_subject(*, principal: AuthPrincipal, request: Request) -> str:
+    raw_subject = f"user:{principal.provider}:{principal.subject}"
+    if not principal.subject:
+        client_host = request.client.host if request.client is not None else "unknown"
+        raw_subject = f"ip:{client_host}"
+    return hashlib.sha256(raw_subject.encode("utf-8")).hexdigest()[:32]
+
+
+def validate_server_fetch_urls(urls: list[str], *, settings: Settings) -> None:
+    policy = ServerFetchUrlPolicy(
+        allowed_ports=settings.server_fetch_allowed_ports,
+        allow_private_networks=settings.server_fetch_allow_private_networks,
+        resolve_dns=settings.server_fetch_resolve_dns,
+    )
+    for url in urls:
+        try:
+            validate_server_fetch_url(url, policy=policy)
+        except UnsafeServerFetchUrlError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail=f"URL is not allowed for server-side fetching: {exc}",
+            ) from exc
 
 
 @lru_cache

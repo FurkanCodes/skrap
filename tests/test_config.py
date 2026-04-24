@@ -52,6 +52,9 @@ def test_localhost_http_auth_urls_are_allowed_in_development(
     assert settings.better_auth_jwt_issuer == "http://127.0.0.1:3000"
     assert settings.better_auth_jwt_algorithms == ("EdDSA",)
     assert settings.better_auth_jwks_timeout_seconds == 2.0
+    assert settings.rate_limit_enabled is False
+    assert settings.rate_limit_fail_open is True
+    assert settings.server_fetch_allowed_ports == (80, 443)
 
 
 def test_production_rejects_wildcard_cors_with_credentials(
@@ -63,3 +66,19 @@ def test_production_rejects_wildcard_cors_with_credentials(
 
     with pytest.raises(RuntimeError, match="CORS_ALLOW_ORIGINS must be explicit"):
         get_settings()
+
+
+def test_production_enables_rate_limit_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    monkeypatch.setenv("AUTH_REQUIRED", "false")
+    monkeypatch.setenv("CORS_ALLOW_ORIGINS", "https://app.example.com")
+    monkeypatch.setenv("SCHEDULER_QUEUE_REDIS_URL", "redis://redis:6379/0")
+
+    settings = get_settings()
+
+    assert settings.rate_limit_enabled is True
+    assert settings.rate_limit_redis_url == "redis://redis:6379/0"
+    assert settings.rate_limit_fail_open is False
+    assert settings.server_fetch_resolve_dns is True

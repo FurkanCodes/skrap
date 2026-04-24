@@ -9,6 +9,16 @@ class HealthResponse(BaseModel):
     status: str
 
 
+class ComponentHealthResponse(BaseModel):
+    status: Literal["ok", "error", "skipped"]
+    error: str | None = None
+
+
+class ReadinessResponse(BaseModel):
+    status: Literal["ok", "error"]
+    checks: dict[str, ComponentHealthResponse]
+
+
 class SiteInfoResponse(BaseModel):
     key: str
     description: str

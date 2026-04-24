@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 from fastapi.testclient import TestClient
 
-from app.api.dependencies import get_discovery_service, get_scrape_service
+from app.api.dependencies import get_current_principal, get_discovery_service, get_scrape_service
 from app.application.discovery_service import (
     DiscoveryBatchInput,
     DiscoveryBatchOutput,
@@ -12,6 +12,7 @@ from app.application.discovery_service import (
 )
 from app.application.scrape_service import ScrapeBatchInput, ScrapeBatchOutput
 from app.main import app
+from app.core.auth import AuthPrincipal
 from app.scraper import PriceListing, PriceResult
 from app.scraper.discovery import DiscoveryStats
 
@@ -157,6 +158,13 @@ def _build_client(
         app.dependency_overrides[get_scrape_service] = lambda: fake_scrape_service
     if fake_discovery_service is not None:
         app.dependency_overrides[get_discovery_service] = lambda: fake_discovery_service
+    app.dependency_overrides[get_current_principal] = lambda: AuthPrincipal(
+        subject="subject_test",
+        email="test@example.com",
+        name="Test",
+        issuer="test",
+        audience="test",
+    )
     return TestClient(app)
 
 
@@ -235,6 +243,20 @@ def test_scrapes_endpoint_rejects_unknown_site_key() -> None:
 
     assert response.status_code == 422
     assert "Unsupported site key" in response.json()["detail"]
+
+
+def test_scrapes_endpoint_rejects_private_network_url() -> None:
+    client = _build_client(fake_scrape_service=FakeScrapeService())
+    response = client.post(
+        "/api/v1/scrapes",
+        json={
+            "urls": ["http://127.0.0.1/product-a"],
+        },
+    )
+    _clear_overrides()
+
+    assert response.status_code == 422
+    assert "server-side fetching" in response.json()["detail"]
 
 
 def test_scrapes_endpoint_uses_auto_fetch_mode_by_default() -> None:
