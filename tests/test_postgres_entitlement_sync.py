@@ -80,6 +80,14 @@ def test_initialize_registers_plan_entitlement_sync_triggers(monkeypatch) -> Non
     assert "SET\n    plan_key = plan_key" in executed
 
 
+def test_launch_plan_definitions_match_product_limits() -> None:
+    assert repository_module._PLAN_DEFINITIONS == (
+        ("free", "Free", 5, 720, 500, "telegram", "block"),
+        ("plus", "Plus", 25, 120, 10_000, "telegram", "block"),
+        ("pro", "Pro", 100, 30, 50_000, "telegram", "block"),
+    )
+
+
 def test_sync_function_sql_copies_all_limit_fields() -> None:
     sync_function_sql = repository_module._SYNC_BILLING_ENTITLEMENT_FROM_PLAN_FUNCTION_SQL
 
@@ -88,4 +96,3 @@ def test_sync_function_sql_copies_all_limit_fields() -> None:
     assert "NEW.monthly_check_units := selected_plan.monthly_check_units;" in sync_function_sql
     assert "NEW.allowed_channels := selected_plan.allowed_channels;" in sync_function_sql
     assert "NEW.overage_policy := selected_plan.overage_policy;" in sync_function_sql
-

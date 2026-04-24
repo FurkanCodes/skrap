@@ -57,8 +57,8 @@ That means users can trade breadth for speed:
 
 - Price: `$0`
 - Active trackers: `5`
-- Monthly credits: `1,500`
-- Fastest interval: `180 minutes`
+- Monthly credits: `500`
+- Fastest interval: `720 minutes`
 - Channels: `Telegram`
 - Overage policy: `Block`
 - Monetization: affiliate links allowed in notifications
@@ -71,9 +71,9 @@ Who it is for:
 ### Plus
 
 - Price: `$9/month` or `$90/year`
-- Active trackers: `50`
-- Monthly credits: `20,000`
-- Fastest interval: `30 minutes`
+- Active trackers: `25`
+- Monthly credits: `10,000`
+- Fastest interval: `120 minutes`
 - Channels: `Telegram`
 - Overage policy: `Block`
 - Monetization: subscription revenue first; affiliate behavior on this tier remains open
@@ -86,10 +86,10 @@ Who it is for:
 
 ### Pro
 
-- Price: `$24/month` or `$240/year`
-- Active trackers: `200`
-- Monthly credits: `100,000`
-- Fastest interval: `10 minutes`
+- Price: `$19/month`
+- Active trackers: `100`
+- Monthly credits: `50,000`
+- Fastest interval: `30 minutes`
 - Channels: `Telegram`
 - Overage policy: `Block`
 - Monetization: subscription revenue first; affiliate behavior on this tier remains open
@@ -203,9 +203,9 @@ This is the direct mapping to existing entitlement fields:
 
 | Plan | `plan_key` | `max_active_trackers` | `min_check_interval_minutes` | `monthly_check_units` | `allowed_channels` | `overage_policy` |
 |---|---|---:|---:|---:|---|---|
-| Free | `free` | 5 | 180 | 1500 | `telegram` | `block` |
-| Plus | `plus` | 50 | 30 | 20000 | `telegram` | `block` |
-| Pro | `pro` | 200 | 10 | 100000 | `telegram` | `block` |
+| Free | `free` | 5 | 720 | 500 | `telegram` | `block` |
+| Plus | `plus` | 25 | 120 | 10000 | `telegram` | `block` |
+| Pro | `pro` | 100 | 30 | 50000 | `telegram` | `block` |
 
 ## Product Decisions To Implement Next
 

@@ -195,8 +195,8 @@ Auth:
     "user_id": "usr_...",
     "plan_key": "free",
     "max_active_trackers": 5,
-    "min_check_interval_minutes": 180,
-    "monthly_check_units": 1500,
+    "min_check_interval_minutes": 720,
+    "monthly_check_units": 500,
     "allowed_channels": "telegram",
     "overage_policy": "block",
     "created_at": "...Z",
@@ -206,9 +206,9 @@ Auth:
     "user_id": "usr_...",
     "period_start": "2026-04-01T00:00:00Z",
     "period_end": "2026-05-01T00:00:00Z",
-    "monthly_check_units": 1500,
+    "monthly_check_units": 500,
     "consumed_check_units": 240,
-    "remaining_check_units": 1260
+    "remaining_check_units": 260
   }
 }
 ```
@@ -225,9 +225,9 @@ Current launch limits:
 
 | Plan | `plan_key` | Max active trackers | Fastest interval | Monthly credits (`monthly_check_units`) | Channels | Overage |
 |---|---|---:|---:|---:|---|---|
-| Free | `free` | 5 | 180 min | 1500 | telegram | block |
-| Plus | `plus` | 50 | 30 min | 20000 | telegram | block |
-| Pro | `pro` | 200 | 10 min | 100000 | telegram | block |
+| Free | `free` | 5 | 720 min | 500 | telegram | block |
+| Plus | `plus` | 25 | 120 min | 10000 | telegram | block |
+| Pro | `pro` | 100 | 30 min | 50000 | telegram | block |
 
 Credit rule:
 - 1 credit = 1 scheduled product re-check.

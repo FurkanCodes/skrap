@@ -34,8 +34,8 @@ def _build_entitlement(now: str) -> UserEntitlement:
         user_id="usr_test",
         plan_key="free",
         max_active_trackers=5,
-        min_check_interval_minutes=180,
-        monthly_check_units=1500,
+        min_check_interval_minutes=720,
+        monthly_check_units=500,
         allowed_channels="telegram",
         overage_policy="block",
         created_at=now,
@@ -93,9 +93,9 @@ def test_me_endpoint_includes_usage_updated_at() -> None:
         user_id="usr_test",
         period_start=_iso(now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)),
         period_end=_iso((now.replace(day=1, hour=0, minute=0, second=0, microsecond=0) + timedelta(days=31))),
-        monthly_check_units=1500,
+        monthly_check_units=500,
         consumed_check_units=10,
-        remaining_check_units=1490,
+        remaining_check_units=490,
         updated_at=_iso(now),
     )
     app.dependency_overrides[get_user_service] = lambda: _FakeUserService([usage])
@@ -121,18 +121,18 @@ def test_me_usage_stream_emits_events_only_on_usage_change(monkeypatch) -> None:
         user_id="usr_test",
         period_start=_iso(now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)),
         period_end=_iso((now.replace(day=1, hour=0, minute=0, second=0, microsecond=0) + timedelta(days=31))),
-        monthly_check_units=1500,
+        monthly_check_units=500,
         consumed_check_units=1,
-        remaining_check_units=1499,
+        remaining_check_units=499,
         updated_at=_iso(now),
     )
     usage_b = MeUsageOutput(
         user_id="usr_test",
         period_start=usage_a.period_start,
         period_end=usage_a.period_end,
-        monthly_check_units=1500,
+        monthly_check_units=500,
         consumed_check_units=2,
-        remaining_check_units=1498,
+        remaining_check_units=498,
         updated_at=_iso(now + timedelta(seconds=5)),
     )
     async def _collect() -> list[str]:
@@ -165,9 +165,9 @@ def test_me_usage_stream_emits_heartbeat_when_usage_unchanged(monkeypatch) -> No
         user_id="usr_test",
         period_start=_iso(now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)),
         period_end=_iso((now.replace(day=1, hour=0, minute=0, second=0, microsecond=0) + timedelta(days=31))),
-        monthly_check_units=1500,
+        monthly_check_units=500,
         consumed_check_units=3,
-        remaining_check_units=1497,
+        remaining_check_units=497,
         updated_at=_iso(now),
     )
     async def _collect() -> list[str]:
