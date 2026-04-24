@@ -5,6 +5,8 @@ Backend service for product price extraction, URL discovery, item tracking, and 
 This README is written as a UI-facing API contract guide.
 It documents every public endpoint, payload shape, validation rule, and the expected frontend usage flows.
 
+Production deployment runbook: [Dealvinci Coolify Production Setup](docs/deploy-coolify-dealvinci.md).
+
 ## Table of Contents
 1. [What This API Does](#what-this-api-does)
 2. [Architecture at a Glance](#architecture-at-a-glance)
