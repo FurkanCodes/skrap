@@ -129,10 +129,18 @@ JAVASCRIPT_HINTS = (
 
 PROTECTION_HINTS = (
     "captcha",
-    "cloudflare",
     "access denied",
     "attention required",
     "bot detection",
+)
+
+CLOUDFLARE_HINTS = (
+    "cloudflare",
+    "turnstile",
+    "cf-chl",
+    "cf_clearance",
+    "checking your browser",
+    "verify you are human",
 )
 
 MAX_DOM_ELEMENTS = 300

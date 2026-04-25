@@ -7,7 +7,12 @@ import logging
 from scrapling.fetchers import AsyncDynamicSession, AsyncStealthySession, FetcherSession
 from scrapling.spiders import Request, Response, SessionManager, Spider
 
-from .fetching import auto_remaining_modes, detect_auto_escalation_signals, initial_auto_fetch_mode
+from .fetching import (
+    auto_remaining_modes,
+    detect_auto_escalation_signals,
+    initial_auto_fetch_mode,
+    normalize_internal_fetch_mode,
+)
 from .inputs import parse_fetch_mode
 from .domain import PriceResult
 from .parsing import make_product_id, normalize_runtime_url
@@ -16,9 +21,11 @@ from .registry import ADAPTERS, detect_site_key
 from .service import extract_price_from_page
 
 MODE_TO_SESSION_ID = {
-    "http": "http",
-    "dynamic": "dynamic",
-    "stealth": "stealth",
+    "http_direct": "http_direct",
+    "http_proxy": "http_proxy",
+    "dynamic_proxy": "dynamic",
+    "stealth_proxy": "stealth",
+    "stealth_cf_proxy": "stealth_cf",
 }
 _logger = logging.getLogger("scraper_api.scraper")
 
@@ -61,7 +68,7 @@ class PriceScrapeSpider(Spider):
         # HTTP timeout is in seconds; browser sessions use milliseconds.
         proxy_rotator = get_scrape_proxy_rotator()
         browser_proxy_kwargs = {"proxy_rotator": proxy_rotator} if proxy_rotator is not None else {}
-        browser_retries = get_proxy_retry_count()
+        browser_retries = get_proxy_retry_count(default=1)
         _logger.info(
             "scrape_spider_sessions_configured proxy_enabled=%s browser_retries=%s timeout_seconds=%s concurrency=%s",
             proxy_rotator is not None,
@@ -80,6 +87,29 @@ class PriceScrapeSpider(Spider):
             ),
         )
         manager.add(
+            "http_direct",
+            FetcherSession(
+                timeout=self._timeout_seconds,
+                retries=2,
+                retry_delay=1,
+                stealthy_headers=True,
+                follow_redirects="safe",
+            ),
+        )
+        if proxy_rotator is not None:
+            manager.add(
+                "http_proxy",
+                FetcherSession(
+                    timeout=self._timeout_seconds,
+                    retries=browser_retries,
+                    retry_delay=1,
+                    stealthy_headers=True,
+                    follow_redirects="safe",
+                    proxy_rotator=proxy_rotator,
+                ),
+                lazy=True,
+            )
+        manager.add(
             "dynamic",
             AsyncDynamicSession(
                 headless=True,
@@ -93,6 +123,25 @@ class PriceScrapeSpider(Spider):
         )
         manager.add(
             "stealth",
+            AsyncStealthySession(
+                headless=True,
+                disable_resources=True,
+                network_idle=False,
+                wait=1000,
+                solve_cloudflare=False,
+                block_webrtc=True,
+                hide_canvas=True,
+                locale="tr-TR",
+                timezone_id="Europe/Istanbul",
+                timeout=max(60000, self._timeout_seconds * 1000),
+                retries=1,
+                retry_delay=1,
+                **browser_proxy_kwargs,
+            ),
+            lazy=True,
+        )
+        manager.add(
+            "stealth_cf",
             AsyncStealthySession(
                 headless=True,
                 disable_resources=False,
@@ -113,7 +162,11 @@ class PriceScrapeSpider(Spider):
 
     async def start_requests(self):
         for url in self.start_urls:
-            initial_mode = initial_auto_fetch_mode(url) if self._fetch_mode == "auto" else self._fetch_mode
+            initial_mode = (
+                initial_auto_fetch_mode(url)
+                if self._fetch_mode == "auto"
+                else normalize_internal_fetch_mode(self._fetch_mode)
+            )
             initial_sid = MODE_TO_SESSION_ID[initial_mode]
             _logger.info(
                 "scrape_spider_request_start url=%s fetch_mode=%s mode=%s sid=%s",

@@ -10,6 +10,7 @@ from fastapi import Depends, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.application.discovery_service import DiscoveryBatchService
+from app.application.scrape_job_service import ScrapeJobService
 from app.application.scrape_result_cache import ScrapeResultCache
 from app.application.scrape_service import ScrapeBatchService
 from app.application.telegram_integration_service import TelegramIntegrationService
@@ -150,6 +151,29 @@ def get_discovery_service(
     settings: Settings = Depends(get_app_settings),
 ) -> DiscoveryBatchService:
     return _get_discovery_service_cached(settings.scrape_concurrency)
+
+
+@lru_cache
+def _get_scrape_job_service_cached(
+    scrape_concurrency: int,
+    ttl_seconds: int,
+    max_jobs: int,
+) -> ScrapeJobService:
+    return ScrapeJobService(
+        max_workers=scrape_concurrency,
+        ttl_seconds=ttl_seconds,
+        max_jobs=max_jobs,
+    )
+
+
+def get_scrape_job_service(
+    settings: Settings = Depends(get_app_settings),
+) -> ScrapeJobService:
+    return _get_scrape_job_service_cached(
+        scrape_concurrency=settings.scrape_concurrency,
+        ttl_seconds=settings.scrape_result_cache_ttl_seconds,
+        max_jobs=settings.scrape_result_cache_max_batches,
+    )
 
 
 @lru_cache

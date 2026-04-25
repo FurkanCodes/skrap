@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Literal
 
 from pydantic import AnyHttpUrl, BaseModel, Field
@@ -107,3 +108,21 @@ class DiscoverBatchResponse(BaseModel):
     success_count: int
     failure_count: int
     results: list[PriceResultResponse]
+
+
+class ScrapeJobCreateResponse(BaseModel):
+    job_id: str
+    request_id: str
+    status: Literal["queued", "running", "succeeded", "failed", "expired"]
+
+
+class ScrapeJobStatusResponse(BaseModel):
+    job_id: str
+    request_id: str
+    kind: Literal["scrapes", "discover"]
+    status: Literal["queued", "running", "succeeded", "failed", "expired"]
+    progress: float
+    result: ScrapeBatchResponse | DiscoverBatchResponse | None = None
+    error: str | None = None
+    created_at: datetime
+    updated_at: datetime

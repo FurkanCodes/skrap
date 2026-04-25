@@ -13,6 +13,7 @@ from app.api.dependencies import warm_application_dependencies
 from app.api.routers.discover import router as discover_router
 from app.api.routers.health import router as health_router
 from app.api.routers.me import router as me_router
+from app.api.routers.scrape_jobs import router as scrape_jobs_router
 from app.api.routers.scrapes import router as scrapes_router
 from app.api.routers.sites import router as sites_router
 from app.api.routers.telegram import router as telegram_router
@@ -100,6 +101,7 @@ def create_app() -> FastAPI:
     app.include_router(sites_router, prefix=settings.api_prefix)
     app.include_router(discover_router, prefix=settings.api_prefix)
     app.include_router(scrapes_router, prefix=settings.api_prefix)
+    app.include_router(scrape_jobs_router, prefix=settings.api_prefix)
     app.include_router(me_router, prefix=settings.api_prefix)
     app.include_router(tracked_items_router, prefix=settings.api_prefix)
     app.include_router(telegram_router, prefix=settings.api_prefix)

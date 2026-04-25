@@ -8,7 +8,11 @@ from scrapling.parser import Selector
 from app.scraper.adapters import AkakceAdapter, N11Adapter
 from app.scraper.domain import PriceCandidate
 from app.scraper.extractors.generic import extract_price_listings_from_selector
-from app.scraper.fetching import auto_followup_modes, detect_auto_escalation_signals, initial_auto_fetch_mode
+from app.scraper.fetching import (
+    auto_remaining_modes,
+    detect_auto_escalation_signals,
+    initial_auto_fetch_mode,
+)
 from app.scraper.inputs import parse_fetch_mode, parse_sites_blob, parse_urls_blob
 from app.scraper.metadata import extract_product_metadata
 from app.scraper.parsing import make_item_id, normalize_runtime_url
@@ -481,15 +485,21 @@ def test_auto_escalation_signals_and_followup_order() -> None:
 
     assert protection_signals == {"protection"}
     assert js_signals == {"javascript"}
-    assert auto_followup_modes(protection_signals) == ["stealth", "dynamic"]
-    assert auto_followup_modes(js_signals) == ["dynamic", "stealth"]
+    assert auto_remaining_modes("http_direct", signals=protection_signals, proxy_enabled=True)[:2] == [
+        "http_proxy",
+        "stealth_proxy",
+    ]
+    assert auto_remaining_modes("http_direct", signals=js_signals, proxy_enabled=False) == [
+        "dynamic_proxy",
+        "stealth_proxy",
+    ]
 
 
 def test_auto_mode_starts_protected_sites_with_stealth() -> None:
-    assert initial_auto_fetch_mode("https://www.akakce.com/ssd/example,123.html") == "http"
-    assert initial_auto_fetch_mode("https://www.mediamarkt.com.tr/tr/product/example.html") == "http"
-    assert initial_auto_fetch_mode("https://www.teknosa.com/example-p-123") == "http"
-    assert initial_auto_fetch_mode("https://example.com/product") == "http"
+    assert initial_auto_fetch_mode("https://www.akakce.com/ssd/example,123.html") == "http_direct"
+    assert initial_auto_fetch_mode("https://www.mediamarkt.com.tr/tr/product/example.html") == "http_direct"
+    assert initial_auto_fetch_mode("https://www.teknosa.com/example-p-123") == "http_direct"
+    assert initial_auto_fetch_mode("https://example.com/product") == "http_direct"
 
 
 def test_http_fetch_does_not_use_configured_proxy_rotator(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -513,7 +523,7 @@ def test_http_fetch_does_not_use_configured_proxy_rotator(monkeypatch: pytest.Mo
     assert "proxy_rotator" not in captured
 
 
-def test_stealth_fetch_uses_challenge_friendly_browser_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_regular_stealth_fetch_avoids_cloudflare_solver(monkeypatch: pytest.MonkeyPatch) -> None:
     from app.scraper import fetching
 
     captured: dict[str, object] = {}
@@ -531,12 +541,35 @@ def test_stealth_fetch_uses_challenge_friendly_browser_settings(monkeypatch: pyt
     assert isinstance(page, Selector)
     assert captured["url"] == "https://example.com/protected"
     assert captured["timeout"] == 60000
-    assert captured["disable_resources"] is False
-    assert captured["network_idle"] is True
-    assert captured["solve_cloudflare"] is True
+    assert captured["disable_resources"] is True
+    assert captured["network_idle"] is False
+    assert captured["solve_cloudflare"] is False
+    assert captured["retries"] == 1
     assert captured["hide_canvas"] is True
     assert captured["locale"] == "tr-TR"
     assert captured["timezone_id"] == "Europe/Istanbul"
+
+
+def test_cloudflare_stealth_fetch_uses_solver(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.scraper import fetching
+
+    captured: dict[str, object] = {}
+
+    def _fake_fetch(url: str, **kwargs: object) -> Selector:
+        captured["url"] = url
+        captured.update(kwargs)
+        return Selector("<html></html>")
+
+    monkeypatch.setattr(fetching, "get_scrape_proxy_rotator", lambda: None)
+    monkeypatch.setattr(fetching.StealthyFetcher, "fetch", _fake_fetch)
+
+    page = fetching.fetch_page_with_mode("https://example.com/protected", timeout=10, mode="stealth_cf_proxy")
+
+    assert isinstance(page, Selector)
+    assert captured["url"] == "https://example.com/protected"
+    assert captured["disable_resources"] is False
+    assert captured["network_idle"] is True
+    assert captured["solve_cloudflare"] is True
 
 
 def test_dynamic_fetch_passes_configured_proxy_rotator(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -582,7 +615,7 @@ def test_stealth_fetch_passes_configured_proxy_rotator(monkeypatch: pytest.Monke
     assert isinstance(page, Selector)
     assert captured["url"] == "https://example.com/protected"
     assert captured["proxy_rotator"] is proxy_rotator
-    assert captured["retries"] == 8
+    assert captured["retries"] == 1
 
 
 def test_find_fallback_is_bounded() -> None:

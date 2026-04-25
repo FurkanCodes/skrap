@@ -8,12 +8,19 @@ from fastapi.concurrency import run_in_threadpool
 from app.api.dependencies import (
     get_app_settings,
     get_current_principal,
+    get_scrape_job_service,
     get_scrape_result_cache,
     get_scrape_service,
     require_rate_limit,
     validate_server_fetch_urls,
 )
-from app.api.schemas.scrapes import PriceResultResponse, ScrapeBatchRequest, ScrapeBatchResponse
+from app.api.schemas.scrapes import (
+    PriceResultResponse,
+    ScrapeBatchRequest,
+    ScrapeBatchResponse,
+    ScrapeJobCreateResponse,
+)
+from app.application.scrape_job_service import ScrapeJobService
 from app.application.scrape_result_cache import ScrapeResultCache
 from app.application.scrape_service import ScrapeBatchInput, ScrapeBatchService
 from app.core.auth import AuthPrincipal
@@ -41,18 +48,13 @@ def _normalize_selected_sites(raw_sites: list[str] | None, supported_sites: set[
     return normalized or None
 
 
-@router.post("", response_model=ScrapeBatchResponse)
-async def post_scrape_batch(
+def _build_scrape_input(
     payload: ScrapeBatchRequest,
     request: Request,
-    _principal: AuthPrincipal = Depends(get_current_principal),
-    _rate_limit: None = Depends(
-        require_rate_limit(bucket="scrapes", limit_attr="rate_limit_scrape_requests")
-    ),
-    settings: Settings = Depends(get_app_settings),
-    service: ScrapeBatchService = Depends(get_scrape_service),
-    cache: ScrapeResultCache = Depends(get_scrape_result_cache),
-) -> ScrapeBatchResponse:
+    *,
+    settings: Settings,
+    service: ScrapeBatchService,
+) -> ScrapeBatchInput:
     request_urls = [str(url) for url in payload.urls]
     validate_server_fetch_urls(request_urls, settings=settings)
     if len(request_urls) > settings.scrape_max_urls:
@@ -70,7 +72,7 @@ async def post_scrape_batch(
 
     selected_sites = _normalize_selected_sites(payload.sites, set(service.list_sites()))
     request_id = str(getattr(request.state, "request_id", ""))
-    batch_input = ScrapeBatchInput(
+    return ScrapeBatchInput(
         request_id=request_id,
         urls=request_urls,
         timeout_seconds=timeout_seconds,
@@ -78,8 +80,13 @@ async def post_scrape_batch(
         fetch_mode=payload.fetch_mode,
     )
 
-    output = await run_in_threadpool(service.scrape, batch_input)
-    cached_refs = await run_in_threadpool(cache.store, output.results)
+
+def _to_scrape_response(
+    output,
+    *,
+    cache: ScrapeResultCache,
+) -> ScrapeBatchResponse:
+    cached_refs = cache.store(output.results)
     results = []
     for item, result_ref in zip(output.results, cached_refs.result_refs, strict=False):
         payload_data = asdict(item)
@@ -93,4 +100,54 @@ async def post_scrape_batch(
         success_count=output.success_count,
         failure_count=output.failure_count,
         results=results,
+    )
+
+
+@router.post("", response_model=ScrapeBatchResponse)
+async def post_scrape_batch(
+    payload: ScrapeBatchRequest,
+    request: Request,
+    _principal: AuthPrincipal = Depends(get_current_principal),
+    _rate_limit: None = Depends(
+        require_rate_limit(bucket="scrapes", limit_attr="rate_limit_scrape_requests")
+    ),
+    settings: Settings = Depends(get_app_settings),
+    service: ScrapeBatchService = Depends(get_scrape_service),
+    cache: ScrapeResultCache = Depends(get_scrape_result_cache),
+) -> ScrapeBatchResponse:
+    batch_input = _build_scrape_input(payload, request, settings=settings, service=service)
+    output = await run_in_threadpool(service.scrape, batch_input)
+    return await run_in_threadpool(_to_scrape_response, output, cache=cache)
+
+
+@router.post("/jobs", response_model=ScrapeJobCreateResponse, status_code=202)
+async def post_scrape_job(
+    payload: ScrapeBatchRequest,
+    request: Request,
+    _principal: AuthPrincipal = Depends(get_current_principal),
+    _rate_limit: None = Depends(
+        require_rate_limit(bucket="scrapes", limit_attr="rate_limit_scrape_requests")
+    ),
+    settings: Settings = Depends(get_app_settings),
+    service: ScrapeBatchService = Depends(get_scrape_service),
+    cache: ScrapeResultCache = Depends(get_scrape_result_cache),
+    jobs: ScrapeJobService = Depends(get_scrape_job_service),
+) -> ScrapeJobCreateResponse:
+    batch_input = _build_scrape_input(payload, request, settings=settings, service=service)
+
+    def _run_job() -> ScrapeBatchResponse:
+        return _to_scrape_response(service.scrape(batch_input), cache=cache)
+
+    try:
+        job = jobs.submit(
+            request_id=batch_input.request_id,
+            kind="scrapes",
+            run=_run_job,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return ScrapeJobCreateResponse(
+        job_id=job.job_id,
+        request_id=job.request_id,
+        status=job.status,
     )

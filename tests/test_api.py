@@ -1,16 +1,23 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import time
 
 from fastapi.testclient import TestClient
 
-from app.api.dependencies import get_current_principal, get_discovery_service, get_scrape_service
+from app.api.dependencies import (
+    get_current_principal,
+    get_discovery_service,
+    get_scrape_job_service,
+    get_scrape_service,
+)
 from app.application.discovery_service import (
     DiscoveryBatchInput,
     DiscoveryBatchOutput,
     DiscoveryPhaseError,
 )
 from app.application.scrape_service import ScrapeBatchInput, ScrapeBatchOutput
+from app.application.scrape_job_service import ScrapeJobService
 from app.main import app
 from app.core.auth import AuthPrincipal
 from app.scraper import PriceListing, PriceResult
@@ -153,11 +160,14 @@ class FakeDiscoveryService:
 def _build_client(
     fake_scrape_service: FakeScrapeService | None = None,
     fake_discovery_service: object | None = None,
+    fake_job_service: ScrapeJobService | None = None,
 ) -> TestClient:
     if fake_scrape_service is not None:
         app.dependency_overrides[get_scrape_service] = lambda: fake_scrape_service
     if fake_discovery_service is not None:
         app.dependency_overrides[get_discovery_service] = lambda: fake_discovery_service
+    if fake_job_service is not None:
+        app.dependency_overrides[get_scrape_job_service] = lambda: fake_job_service
     app.dependency_overrides[get_current_principal] = lambda: AuthPrincipal(
         subject="subject_test",
         email="test@example.com",
@@ -170,6 +180,18 @@ def _build_client(
 
 def _clear_overrides() -> None:
     app.dependency_overrides.clear()
+
+
+def _poll_job_until_done(client: TestClient, job_id: str) -> dict:
+    body: dict = {}
+    for _ in range(50):
+        response = client.get(f"/api/v1/scrape-jobs/{job_id}")
+        assert response.status_code == 200
+        body = response.json()
+        if body["status"] in {"succeeded", "failed", "expired"}:
+            return body
+        time.sleep(0.01)
+    raise AssertionError(f"job did not finish: {body}")
 
 
 def test_health_endpoint_returns_ok_and_request_id() -> None:
@@ -273,6 +295,76 @@ def test_scrapes_endpoint_uses_auto_fetch_mode_by_default() -> None:
     assert response.status_code == 200
     assert fake_service.last_input is not None
     assert fake_service.last_input.fetch_mode == "auto"
+
+
+def test_scrape_job_create_returns_accepted_and_poll_succeeds() -> None:
+    fake_service = FakeScrapeService()
+    job_service = ScrapeJobService(max_workers=1, ttl_seconds=60, max_jobs=10)
+    client = _build_client(fake_scrape_service=fake_service, fake_job_service=job_service)
+    response = client.post(
+        "/api/v1/scrapes/jobs",
+        json={"urls": ["https://example.com/product-a"], "fetch_mode": "http"},
+    )
+
+    assert response.status_code == 202
+    created = response.json()
+    assert created["status"] in {"queued", "running", "succeeded"}
+    assert created["job_id"].startswith("job_")
+
+    body = _poll_job_until_done(client, created["job_id"])
+    _clear_overrides()
+
+    assert body["status"] == "succeeded"
+    assert body["kind"] == "scrapes"
+    assert body["result"]["success_count"] == 1
+    assert body["result"]["results"][0]["result_ref"]
+
+
+def test_scrape_job_failure_is_reported_safely() -> None:
+    class _FailingScrapeService(FakeScrapeService):
+        def scrape(self, payload: ScrapeBatchInput) -> ScrapeBatchOutput:  # noqa: ARG002
+            raise RuntimeError("network exploded")
+
+    job_service = ScrapeJobService(max_workers=1, ttl_seconds=60, max_jobs=10)
+    client = _build_client(fake_scrape_service=_FailingScrapeService(), fake_job_service=job_service)
+    response = client.post(
+        "/api/v1/scrapes/jobs",
+        json={"urls": ["https://example.com/product-a"]},
+    )
+
+    assert response.status_code == 202
+    body = _poll_job_until_done(client, response.json()["job_id"])
+    _clear_overrides()
+
+    assert body["status"] == "failed"
+    assert body["error"] == "network exploded"
+
+
+def test_scrape_job_unknown_id_returns_404() -> None:
+    job_service = ScrapeJobService(max_workers=1, ttl_seconds=60, max_jobs=10)
+    client = _build_client(fake_job_service=job_service)
+    response = client.get("/api/v1/scrape-jobs/job_missing")
+    _clear_overrides()
+
+    assert response.status_code == 404
+
+
+def test_discover_job_create_returns_accepted_and_poll_succeeds() -> None:
+    fake_service = FakeDiscoveryService()
+    job_service = ScrapeJobService(max_workers=1, ttl_seconds=60, max_jobs=10)
+    client = _build_client(fake_discovery_service=fake_service, fake_job_service=job_service)
+    response = client.post(
+        "/api/v1/discover/jobs",
+        json={"start_urls": ["https://example.com/category/laptops"]},
+    )
+
+    assert response.status_code == 202
+    body = _poll_job_until_done(client, response.json()["job_id"])
+    _clear_overrides()
+
+    assert body["status"] == "succeeded"
+    assert body["kind"] == "discover"
+    assert body["result"]["discovered_url_count"] == 1
 
 
 def test_discover_endpoint_returns_summary_stats_and_results() -> None:

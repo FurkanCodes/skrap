@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from app.core.config import get_settings
@@ -70,6 +72,11 @@ def test_scrape_proxy_urls_are_parsed(monkeypatch: pytest.MonkeyPatch) -> None:
         "socks5://proxy2.example:1080",
     )
     assert settings.scrape_proxy_list_urls == ()
+
+
+def test_scrapling_dependency_pin_is_current() -> None:
+    requirements = Path("requirements.txt").read_text(encoding="utf-8")
+    assert "scrapling[fetchers]==0.4.7" in requirements
 
 
 def test_scrape_proxy_list_urls_are_parsed(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -9,6 +9,7 @@ from app.api.dependencies import (
     get_app_settings,
     get_current_principal,
     get_discovery_service,
+    get_scrape_job_service,
     require_rate_limit,
     validate_server_fetch_urls,
 )
@@ -17,7 +18,9 @@ from app.api.schemas.scrapes import (
     DiscoverBatchResponse,
     DiscoveryStatsResponse,
     PriceResultResponse,
+    ScrapeJobCreateResponse,
 )
+from app.application.scrape_job_service import ScrapeJobService
 from app.application.discovery_service import (
     DiscoveryBatchInput,
     DiscoveryBatchService,
@@ -48,17 +51,13 @@ def _normalize_selected_sites(raw_sites: list[str] | None, supported_sites: set[
     return normalized or None
 
 
-@router.post("", response_model=DiscoverBatchResponse)
-async def post_discover_batch(
+def _build_discover_input(
     payload: DiscoverBatchRequest,
     request: Request,
-    _principal: AuthPrincipal = Depends(get_current_principal),
-    _rate_limit: None = Depends(
-        require_rate_limit(bucket="discover", limit_attr="rate_limit_discover_requests")
-    ),
-    settings: Settings = Depends(get_app_settings),
-    service: DiscoveryBatchService = Depends(get_discovery_service),
-) -> DiscoverBatchResponse:
+    *,
+    settings: Settings,
+    service: DiscoveryBatchService,
+) -> DiscoveryBatchInput:
     start_urls = [str(url) for url in payload.start_urls]
     validate_server_fetch_urls(start_urls, settings=settings)
     if len(start_urls) > settings.scrape_max_urls:
@@ -76,7 +75,7 @@ async def post_discover_batch(
 
     selected_sites = _normalize_selected_sites(payload.sites, set(service.list_sites()))
     request_id = str(getattr(request.state, "request_id", ""))
-    discover_input = DiscoveryBatchInput(
+    return DiscoveryBatchInput(
         request_id=request_id,
         start_urls=start_urls,
         timeout_seconds=timeout_seconds,
@@ -86,13 +85,9 @@ async def post_discover_batch(
         max_depth=payload.max_depth,
     )
 
-    try:
-        output = await run_in_threadpool(service.discover_and_scrape, discover_input)
-    except DiscoveryPhaseError as exc:
-        raise HTTPException(status_code=502, detail=f"discovery_failed: {exc}") from exc
 
+def _to_discover_response(output) -> DiscoverBatchResponse:
     results = [PriceResultResponse.model_validate(asdict(item)) for item in output.results]
-
     return DiscoverBatchResponse(
         request_id=output.request_id,
         seed_count=output.seed_count,
@@ -103,4 +98,58 @@ async def post_discover_batch(
         success_count=output.success_count,
         failure_count=output.failure_count,
         results=results,
+    )
+
+
+@router.post("", response_model=DiscoverBatchResponse)
+async def post_discover_batch(
+    payload: DiscoverBatchRequest,
+    request: Request,
+    _principal: AuthPrincipal = Depends(get_current_principal),
+    _rate_limit: None = Depends(
+        require_rate_limit(bucket="discover", limit_attr="rate_limit_discover_requests")
+    ),
+    settings: Settings = Depends(get_app_settings),
+    service: DiscoveryBatchService = Depends(get_discovery_service),
+) -> DiscoverBatchResponse:
+    discover_input = _build_discover_input(payload, request, settings=settings, service=service)
+    try:
+        output = await run_in_threadpool(service.discover_and_scrape, discover_input)
+    except DiscoveryPhaseError as exc:
+        raise HTTPException(status_code=502, detail=f"discovery_failed: {exc}") from exc
+    return await run_in_threadpool(_to_discover_response, output)
+
+
+@router.post("/jobs", response_model=ScrapeJobCreateResponse, status_code=202)
+async def post_discover_job(
+    payload: DiscoverBatchRequest,
+    request: Request,
+    _principal: AuthPrincipal = Depends(get_current_principal),
+    _rate_limit: None = Depends(
+        require_rate_limit(bucket="discover", limit_attr="rate_limit_discover_requests")
+    ),
+    settings: Settings = Depends(get_app_settings),
+    service: DiscoveryBatchService = Depends(get_discovery_service),
+    jobs: ScrapeJobService = Depends(get_scrape_job_service),
+) -> ScrapeJobCreateResponse:
+    discover_input = _build_discover_input(payload, request, settings=settings, service=service)
+
+    def _run_job() -> DiscoverBatchResponse:
+        try:
+            return _to_discover_response(service.discover_and_scrape(discover_input))
+        except DiscoveryPhaseError as exc:
+            raise RuntimeError(f"discovery_failed: {exc}") from exc
+
+    try:
+        job = jobs.submit(
+            request_id=discover_input.request_id,
+            kind="discover",
+            run=_run_job,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return ScrapeJobCreateResponse(
+        job_id=job.job_id,
+        request_id=job.request_id,
+        status=job.status,
     )
