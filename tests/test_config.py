@@ -55,6 +55,25 @@ def test_localhost_http_auth_urls_are_allowed_in_development(
     assert settings.rate_limit_enabled is False
     assert settings.rate_limit_fail_open is True
     assert settings.server_fetch_allowed_ports == (80, 443)
+    assert settings.scrape_proxy_urls == ()
+
+
+def test_scrape_proxy_urls_are_parsed(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SCRAPE_PROXY_URLS", "http://user:pass@proxy.example:8000, socks5://proxy2.example:1080")
+
+    settings = get_settings()
+
+    assert settings.scrape_proxy_urls == (
+        "http://user:pass@proxy.example:8000",
+        "socks5://proxy2.example:1080",
+    )
+
+
+def test_invalid_scrape_proxy_urls_are_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SCRAPE_PROXY_URLS", "ftp://proxy.example:21")
+
+    with pytest.raises(RuntimeError, match="SCRAPE_PROXY_URLS must contain valid"):
+        get_settings()
 
 
 def test_production_rejects_wildcard_cors_with_credentials(

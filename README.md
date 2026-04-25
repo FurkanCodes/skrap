@@ -731,6 +731,7 @@ High-level relationships:
 | `SCRAPE_CONCURRENCY` | `5` | scrape service worker concurrency |
 | `SCRAPE_RESULT_CACHE_TTL_SECONDS` | `900` | TTL for `scrape_ref/result_ref` cache |
 | `SCRAPE_RESULT_CACHE_MAX_BATCHES` | `500` | max cached scrape batches |
+| `SCRAPE_PROXY_URLS` | empty | comma-separated outbound proxy URLs for Scrapling fetchers |
 
 ## Tracking DB settings
 

@@ -279,7 +279,7 @@ Guidance:
 
 - Default path: fast HTTP fetch mode.
 - Escalate to dynamic/stealth only when blocked/protection signals indicate need.
-- Use proxy rotation primarily on blocked paths, not every request.
+- Set `SCRAPE_PROXY_URLS` to route Scrapling HTTP, dynamic, stealth, and discovery sessions through residential/mobile proxies when deployment IPs are blocked by target WAFs.
 
 ### Critical Edge Cases
 
@@ -342,4 +342,3 @@ Track and alert on:
 7. Add Postgres repository adapter and migration scripts.
 8. Add Redis dispatcher adapter and worker queue runtime.
 9. Run load/soak validation for 100k checks/day target.
-

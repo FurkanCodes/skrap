@@ -484,6 +484,27 @@ def test_auto_escalation_signals_and_followup_order() -> None:
     assert auto_followup_modes(js_signals) == ["dynamic", "stealth"]
 
 
+def test_fetch_page_with_mode_passes_configured_proxy_rotator(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.scraper import fetching
+
+    proxy_rotator = object()
+    captured: dict[str, object] = {}
+
+    def _fake_get(url: str, **kwargs: object) -> Selector:
+        captured["url"] = url
+        captured.update(kwargs)
+        return Selector("<html></html>")
+
+    monkeypatch.setattr(fetching, "get_scrape_proxy_rotator", lambda: proxy_rotator)
+    monkeypatch.setattr(fetching.Fetcher, "get", _fake_get)
+
+    page = fetching.fetch_page_with_mode("https://example.com/product", timeout=10, mode="http")
+
+    assert isinstance(page, Selector)
+    assert captured["url"] == "https://example.com/product"
+    assert captured["proxy_rotator"] is proxy_rotator
+
+
 def test_find_fallback_is_bounded() -> None:
     rows = "\n".join(
         f"<div data-qa='price-tag'>US${index}.00</div>"

@@ -93,6 +93,7 @@ class Settings:
     scrape_concurrency: int
     scrape_result_cache_ttl_seconds: int
     scrape_result_cache_max_batches: int
+    scrape_proxy_urls: tuple[str, ...]
     server_fetch_allowed_ports: tuple[int, ...]
     server_fetch_allow_private_networks: bool
     server_fetch_resolve_dns: bool
@@ -172,6 +173,12 @@ def get_settings() -> Settings:
         scrape_concurrency=_parse_int_env("SCRAPE_CONCURRENCY", 5),
         scrape_result_cache_ttl_seconds=_parse_int_env("SCRAPE_RESULT_CACHE_TTL_SECONDS", 900),
         scrape_result_cache_max_batches=_parse_int_env("SCRAPE_RESULT_CACHE_MAX_BATCHES", 500),
+        scrape_proxy_urls=_parse_csv(
+            _parse_str_env("SCRAPE_PROXY_URLS", "")
+            or _parse_str_env("SCRAPER_PROXY_URLS", "")
+            or _parse_str_env("SCRAPE_PROXY_URL", ""),
+            default=(),
+        ),
         server_fetch_allowed_ports=_parse_int_csv(
             _parse_str_env("SERVER_FETCH_ALLOWED_PORTS", ""),
             default=(80, 443),
@@ -298,6 +305,12 @@ def get_settings() -> Settings:
         raise RuntimeError("SCRAPE_RESULT_CACHE_TTL_SECONDS must be >= 60")
     if settings.scrape_result_cache_max_batches < 1:
         raise RuntimeError("SCRAPE_RESULT_CACHE_MAX_BATCHES must be >= 1")
+    for proxy_url in settings.scrape_proxy_urls:
+        parsed_proxy = urlparse(proxy_url)
+        if parsed_proxy.scheme not in {"http", "https", "socks4", "socks5"} or not parsed_proxy.netloc:
+            raise RuntimeError(
+                "SCRAPE_PROXY_URLS must contain valid http, https, socks4, or socks5 proxy URLs"
+            )
     if not settings.server_fetch_allowed_ports:
         raise RuntimeError("SERVER_FETCH_ALLOWED_PORTS must not be empty")
     if any(port < 1 or port > 65535 for port in settings.server_fetch_allowed_ports):

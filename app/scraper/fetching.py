@@ -6,6 +6,7 @@ from scrapling.fetchers import DynamicFetcher, Fetcher, StealthyFetcher
 from scrapling.parser import Selector
 
 from .constants import JAVASCRIPT_HINTS, PROTECTION_HINTS, PROTECTION_STATUS_CODES
+from .proxies import get_scrape_proxy_rotator
 
 
 def fetch_page_with_mode(url: str, timeout: int, mode: str) -> Selector:
@@ -15,6 +16,9 @@ def fetch_page_with_mode(url: str, timeout: int, mode: str) -> Selector:
     - `dynamic`: Playwright-backed browser fetcher
     - `stealth`: hardened browser fetcher for protected targets
     """
+    proxy_rotator = get_scrape_proxy_rotator()
+    proxy_kwargs = {"proxy_rotator": proxy_rotator} if proxy_rotator is not None else {}
+
     if mode == "http":
         return Fetcher.get(
             url,
@@ -23,6 +27,7 @@ def fetch_page_with_mode(url: str, timeout: int, mode: str) -> Selector:
             retry_delay=1,
             stealthy_headers=True,
             follow_redirects="safe",
+            **proxy_kwargs,
         )
 
     browser_timeout_ms = max(1000, timeout * 1000)
@@ -32,6 +37,7 @@ def fetch_page_with_mode(url: str, timeout: int, mode: str) -> Selector:
         "retry_delay": 1,
         "headless": True,
         "disable_resources": True,
+        **proxy_kwargs,
     }
 
     if mode == "dynamic":

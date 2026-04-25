@@ -8,6 +8,9 @@ from scrapling.spiders import Request, Response, SessionManager, Spider
 from .fetching import auto_followup_modes, detect_auto_escalation_signals
 from .inputs import parse_fetch_mode
 from .domain import PriceResult
+from .parsing import make_product_id, normalize_runtime_url
+from .proxies import get_scrape_proxy_rotator
+from .registry import ADAPTERS, detect_site_key
 from .service import extract_price_from_page
 
 MODE_TO_SESSION_ID = {
@@ -53,6 +56,8 @@ class PriceScrapeSpider(Spider):
 
     def configure_sessions(self, manager: SessionManager) -> None:
         # HTTP timeout is in seconds; browser sessions use milliseconds.
+        proxy_rotator = get_scrape_proxy_rotator()
+        proxy_kwargs = {"proxy_rotator": proxy_rotator} if proxy_rotator is not None else {}
         manager.add(
             "http",
             FetcherSession(
@@ -61,6 +66,7 @@ class PriceScrapeSpider(Spider):
                 retry_delay=1,
                 stealthy_headers=True,
                 follow_redirects="safe",
+                **proxy_kwargs,
             ),
         )
         manager.add(
@@ -71,6 +77,7 @@ class PriceScrapeSpider(Spider):
                 timeout=self._timeout_seconds * 1000,
                 retries=2,
                 retry_delay=1,
+                **proxy_kwargs,
             ),
             lazy=True,
         )
@@ -84,6 +91,7 @@ class PriceScrapeSpider(Spider):
                 timeout=self._timeout_seconds * 1000,
                 retries=2,
                 retry_delay=1,
+                **proxy_kwargs,
             ),
             lazy=True,
         )
@@ -184,4 +192,24 @@ def scrape_prices_with_spider(
         if existing is None or (getattr(result, "success", False) and not getattr(existing, "success", False)):
             by_url[item_url] = result
 
-    return [by_url[url] for url in ordered_urls if url in by_url]
+    blocked_requests_count = int(getattr(crawl_result.stats, "blocked_requests_count", 0) or 0)
+    missing_error = "blocked_by_protection" if blocked_requests_count else "fetch_failed"
+    results: list[PriceResult] = []
+    for url in ordered_urls:
+        if url in by_url:
+            results.append(by_url[url])
+            continue
+
+        runtime_url = normalize_runtime_url(url)
+        site_key = detect_site_key(runtime_url)
+        results.append(
+            PriceResult(
+                url=runtime_url,
+                success=False,
+                product_id=make_product_id(runtime_url),
+                site_key=site_key,
+                adapter_key=site_key if site_key in ADAPTERS else "generic",
+                error=missing_error,
+            )
+        )
+    return results
