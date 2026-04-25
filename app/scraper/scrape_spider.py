@@ -7,7 +7,7 @@ import logging
 from scrapling.fetchers import AsyncDynamicSession, AsyncStealthySession, FetcherSession
 from scrapling.spiders import Request, Response, SessionManager, Spider
 
-from .fetching import auto_followup_modes, detect_auto_escalation_signals, initial_auto_fetch_mode
+from .fetching import auto_remaining_modes, detect_auto_escalation_signals, initial_auto_fetch_mode
 from .inputs import parse_fetch_mode
 from .domain import PriceResult
 from .parsing import make_product_id, normalize_runtime_url
@@ -60,12 +60,12 @@ class PriceScrapeSpider(Spider):
     def configure_sessions(self, manager: SessionManager) -> None:
         # HTTP timeout is in seconds; browser sessions use milliseconds.
         proxy_rotator = get_scrape_proxy_rotator()
-        stealth_proxy_kwargs = {"proxy_rotator": proxy_rotator} if proxy_rotator is not None else {}
-        stealth_retries = get_proxy_retry_count()
+        browser_proxy_kwargs = {"proxy_rotator": proxy_rotator} if proxy_rotator is not None else {}
+        browser_retries = get_proxy_retry_count()
         _logger.info(
-            "scrape_spider_sessions_configured proxy_enabled=%s stealth_retries=%s timeout_seconds=%s concurrency=%s",
+            "scrape_spider_sessions_configured proxy_enabled=%s browser_retries=%s timeout_seconds=%s concurrency=%s",
             proxy_rotator is not None,
-            stealth_retries,
+            browser_retries,
             self._timeout_seconds,
             self.concurrent_requests,
         )
@@ -85,8 +85,9 @@ class PriceScrapeSpider(Spider):
                 headless=True,
                 disable_resources=True,
                 timeout=self._timeout_seconds * 1000,
-                retries=2,
+                retries=browser_retries,
                 retry_delay=1,
+                **browser_proxy_kwargs,
             ),
             lazy=True,
         )
@@ -103,9 +104,9 @@ class PriceScrapeSpider(Spider):
                 locale="tr-TR",
                 timezone_id="Europe/Istanbul",
                 timeout=max(60000, self._timeout_seconds * 1000),
-                retries=stealth_retries,
+                retries=browser_retries,
                 retry_delay=1,
-                **stealth_proxy_kwargs,
+                **browser_proxy_kwargs,
             ),
             lazy=True,
         )
@@ -136,7 +137,6 @@ class PriceScrapeSpider(Spider):
         return "protection" in detect_auto_escalation_signals(response)
 
     async def retry_blocked_request(self, request: Request, response: Response) -> Request:
-        # Auto mode escalates blocked HTTP requests directly to stealth.
         if self._fetch_mode != "auto":
             _logger.info(
                 "scrape_spider_blocked_retry url=%s mode=%s action=retry_same_mode reason=manual_fetch_mode",
@@ -145,20 +145,29 @@ class PriceScrapeSpider(Spider):
             )
             return request
         current_mode = str(request.meta.get("current_mode", "http"))
-        if current_mode == "http":
+        signals = detect_auto_escalation_signals(response)
+        remaining_modes = auto_remaining_modes(current_mode, signals=signals)
+        if remaining_modes:
+            next_mode = remaining_modes.pop(0)
             _logger.info(
-                "scrape_spider_auto_escalate url=%s from_mode=http to_mode=stealth reason=blocked_response status=%s",
+                "scrape_spider_auto_escalate url=%s from_mode=%s to_mode=%s remaining_modes=%s reason=blocked_response status=%s signals=%s",
                 response.url,
+                current_mode,
+                next_mode,
+                ",".join(remaining_modes),
                 getattr(response, "status", None),
+                ",".join(sorted(signals)) or "<none>",
             )
-            request.sid = "stealth"
-            request.meta["current_mode"] = "stealth"
+            request.sid = MODE_TO_SESSION_ID[next_mode]
+            request.meta["current_mode"] = next_mode
+            request.meta["remaining_modes"] = remaining_modes
             return request
         _logger.info(
-            "scrape_spider_blocked_retry url=%s mode=%s action=retry_same_mode status=%s",
+            "scrape_spider_blocked_retry url=%s mode=%s action=retry_same_mode status=%s signals=%s",
             response.url,
             current_mode,
             getattr(response, "status", None),
+            ",".join(sorted(signals)) or "<none>",
         )
         return request
 
@@ -195,16 +204,16 @@ class PriceScrapeSpider(Spider):
         )
         if self._fetch_mode == "auto":
             remaining_modes = list(response.meta.get("remaining_modes", []))
-            if current_mode == "http" and not remaining_modes:
-                signals = detect_auto_escalation_signals(response)
-                remaining_modes = auto_followup_modes(signals)
-                if signals:
-                    _logger.info(
-                        "scrape_spider_auto_escalate url=%s from_mode=http to_modes=%s signals=%s",
-                        url,
-                        ",".join(remaining_modes) or "<none>",
-                        ",".join(sorted(signals)),
-                    )
+            signals = detect_auto_escalation_signals(response)
+            if not remaining_modes:
+                remaining_modes = auto_remaining_modes(current_mode, signals=signals)
+            _logger.info(
+                "scrape_spider_auto_escalate url=%s from_mode=%s to_modes=%s signals=%s reason=extract_failed",
+                url,
+                current_mode,
+                ",".join(remaining_modes) or "<none>",
+                ",".join(sorted(signals)) or "<none>",
+            )
             if remaining_modes:
                 next_mode = remaining_modes.pop(0)
                 next_sid = MODE_TO_SESSION_ID[next_mode]

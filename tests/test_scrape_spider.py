@@ -38,4 +38,4 @@ def test_scrape_prices_with_spider_returns_failure_for_blocked_missing_item(
     assert len(results) == 1
     assert results[0].success is False
     assert results[0].error == "blocked_by_protection"
-    assert results[0].adapter_key == "generic"
+    assert results[0].adapter_key == "teknosa"

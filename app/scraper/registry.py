@@ -24,6 +24,7 @@ SUPPORTED_SITES: dict[str, str] = {
     "costco": "Costco adapter",
     "ebay": "eBay adapter",
     "etsy": "Etsy adapter",
+    "gurgencler": "Gurgencler adapter",
     "hepsiburada": "Hepsiburada adapter",
     "homedepot": "Home Depot adapter",
     "ikea": "IKEA adapter",
@@ -35,8 +36,10 @@ SUPPORTED_SITES: dict[str, str] = {
     "n11": "n11 adapter",
     "pttavm": "PttAVM adapter",
     "shein": "SHEIN adapter",
+    "sinerji": "Sinerji adapter",
     "target": "Target adapter",
     "temu": "Temu adapter",
+    "teknosa": "Teknosa adapter",
     "trendyol": "Trendyol adapter",
     "vatanbilgisayar": "Vatan Bilgisayar adapter",
     "vinted": "Vinted adapter",
@@ -60,6 +63,7 @@ SITE_DOMAIN_SUFFIXES: dict[str, tuple[str, ...]] = {
     "costco": ("costco.com",),
     "ebay": ("ebay.com", "ebay.co.uk", "ebay.de", "ebay.fr", "ebay.es"),
     "etsy": ("etsy.com",),
+    "gurgencler": ("gurgencler.com.tr",),
     "hepsiburada": ("hepsiburada.com",),
     "homedepot": ("homedepot.com",),
     "ikea": ("ikea.com",),
@@ -71,8 +75,10 @@ SITE_DOMAIN_SUFFIXES: dict[str, tuple[str, ...]] = {
     "n11": ("n11.com",),
     "pttavm": ("pttavm.com",),
     "shein": ("shein.com",),
+    "sinerji": ("sinerji.gen.tr",),
     "target": ("target.com",),
     "temu": ("temu.com",),
+    "teknosa": ("teknosa.com",),
     "trendyol": ("trendyol.com",),
     "vatanbilgisayar": ("vatanbilgisayar.com",),
     "vinted": ("vinted.fr", "vinted.it", "vinted.es"),
@@ -148,6 +154,15 @@ ADAPTERS: dict[str, SiteAdapter] = {
             "[itemprop='price']::attr(content)",
             ".wt-text-title-03::text",
         ),
+    ),
+    "gurgencler": ConfiguredSiteAdapter(
+        key="gurgencler",
+        price_selectors=(
+            "[itemprop='price']::attr(content)",
+            "meta[property='product:price:amount']::attr(content)",
+            "[class*='price']::text",
+        ),
+        default_currency="TRY",
     ),
     "hepsiburada": ConfiguredSiteAdapter(
         key="hepsiburada",
@@ -225,6 +240,15 @@ ADAPTERS: dict[str, SiteAdapter] = {
             "[itemprop='price']::attr(content)",
         ),
     ),
+    "sinerji": ConfiguredSiteAdapter(
+        key="sinerji",
+        price_selectors=(
+            "[itemprop='price']::attr(content)",
+            "meta[property='product:price:amount']::attr(content)",
+            "[class*='price']::text",
+        ),
+        default_currency="TRY",
+    ),
     "target": ConfiguredSiteAdapter(
         key="target",
         price_selectors=(
@@ -239,6 +263,17 @@ ADAPTERS: dict[str, SiteAdapter] = {
             "[class*='price']::text",
             "[itemprop='price']::attr(content)",
         ),
+    ),
+    "teknosa": ConfiguredSiteAdapter(
+        key="teknosa",
+        price_selectors=(
+            "[itemprop='price']::attr(content)",
+            "meta[property='product:price:amount']::attr(content)",
+            "[data-testid*='price']::text",
+            "[class*='price']::text",
+            "[id*='price']::text",
+        ),
+        default_currency="TRY",
     ),
     "trendyol": ConfiguredSiteAdapter(
         key="trendyol",

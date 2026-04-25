@@ -443,6 +443,7 @@ def test_detect_site_key() -> None:
     assert detect_site_key("https://www.vatanbilgisayar.com/sample-urun.html") == "vatanbilgisayar"
     assert detect_site_key("https://www.ciceksepeti.com/sample-urun-kc123456") == "ciceksepeti"
     assert detect_site_key("https://www.a101.com.tr/sample-urun") == "a101"
+    assert detect_site_key("https://www.teknosa.com/sample-urun-p-12345") == "teknosa"
     assert detect_site_key("https://example.com/product") == "generic"
 
 
@@ -485,9 +486,9 @@ def test_auto_escalation_signals_and_followup_order() -> None:
 
 
 def test_auto_mode_starts_protected_sites_with_stealth() -> None:
-    assert initial_auto_fetch_mode("https://www.akakce.com/ssd/example,123.html") == "stealth"
-    assert initial_auto_fetch_mode("https://www.mediamarkt.com.tr/tr/product/example.html") == "stealth"
-    assert initial_auto_fetch_mode("https://www.teknosa.com/example-p-123") == "stealth"
+    assert initial_auto_fetch_mode("https://www.akakce.com/ssd/example,123.html") == "http"
+    assert initial_auto_fetch_mode("https://www.mediamarkt.com.tr/tr/product/example.html") == "http"
+    assert initial_auto_fetch_mode("https://www.teknosa.com/example-p-123") == "http"
     assert initial_auto_fetch_mode("https://example.com/product") == "http"
 
 
@@ -536,6 +537,29 @@ def test_stealth_fetch_uses_challenge_friendly_browser_settings(monkeypatch: pyt
     assert captured["hide_canvas"] is True
     assert captured["locale"] == "tr-TR"
     assert captured["timezone_id"] == "Europe/Istanbul"
+
+
+def test_dynamic_fetch_passes_configured_proxy_rotator(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.scraper import fetching
+
+    proxy_rotator = object()
+    captured: dict[str, object] = {}
+
+    def _fake_fetch(url: str, **kwargs: object) -> Selector:
+        captured["url"] = url
+        captured.update(kwargs)
+        return Selector("<html></html>")
+
+    monkeypatch.setattr(fetching, "get_scrape_proxy_rotator", lambda: proxy_rotator)
+    monkeypatch.setattr(fetching, "get_proxy_retry_count", lambda: 8)
+    monkeypatch.setattr(fetching.DynamicFetcher, "fetch", _fake_fetch)
+
+    page = fetching.fetch_page_with_mode("https://www.teknosa.com/example-p-123", timeout=10, mode="dynamic")
+
+    assert isinstance(page, Selector)
+    assert captured["url"] == "https://www.teknosa.com/example-p-123"
+    assert captured["proxy_rotator"] is proxy_rotator
+    assert captured["retries"] == 8
 
 
 def test_stealth_fetch_passes_configured_proxy_rotator(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -17,7 +17,7 @@ from urllib.parse import urljoin
 
 from .constants import SUPPORTED_FETCH_MODES
 from .domain import PriceListing, PriceResult
-from .fetching import auto_followup_modes, detect_auto_escalation_signals, fetch_page_with_mode, initial_auto_fetch_mode
+from .fetching import auto_remaining_modes, detect_auto_escalation_signals, fetch_page_with_mode, initial_auto_fetch_mode
 from .inputs import parse_fetch_mode
 from .metadata import extract_product_metadata
 from .parsing import make_item_id, make_product_id, normalize_runtime_url, normalize_url
@@ -153,12 +153,15 @@ def fetch_price(
                 runtime_url,
                 exc,
             )
-            if normalized_fetch_mode == "auto" and mode == "http":
-                # If plain HTTP fails, queue browser modes as next attempts.
-                modes_to_try.extend(["dynamic", "stealth"])
+            if normalized_fetch_mode == "auto":
+                for followup_mode in auto_remaining_modes(mode):
+                    if followup_mode not in modes_to_try:
+                        modes_to_try.append(followup_mode)
                 _logger.info(
-                    "scrape_auto_escalate url=%s from_mode=http to_modes=dynamic,stealth reason=fetch_error",
+                    "scrape_auto_escalate url=%s from_mode=%s to_modes=%s reason=fetch_error",
                     runtime_url,
+                    mode,
+                    ",".join(auto_remaining_modes(mode)) or "<none>",
                 )
             continue
 
@@ -192,19 +195,19 @@ def fetch_price(
             extracted.adapter_key,
             extracted.error,
         )
-        if normalized_fetch_mode == "auto" and mode == "http":
-            # HTTP succeeded but extraction failed; inspect signals for escalation.
+        if normalized_fetch_mode == "auto":
             signals = detect_auto_escalation_signals(page)
-            for followup_mode in auto_followup_modes(signals):
+            followup_modes = auto_remaining_modes(mode, signals=signals)
+            for followup_mode in followup_modes:
                 if followup_mode not in modes_to_try:
                     modes_to_try.append(followup_mode)
-            if signals:
-                _logger.info(
-                    "scrape_auto_escalate url=%s from_mode=http to_modes=%s signals=%s",
-                    runtime_url,
-                    ",".join(auto_followup_modes(signals)) or "<none>",
-                    ",".join(sorted(signals)),
-                )
+            _logger.info(
+                "scrape_auto_escalate url=%s from_mode=%s to_modes=%s signals=%s reason=extract_failed",
+                runtime_url,
+                mode,
+                ",".join(followup_modes) or "<none>",
+                ",".join(sorted(signals)) or "<none>",
+            )
 
     if fetched_any_page:
         _logger.info("scrape_failed url=%s error=price_not_found attempted_modes=%s", runtime_url, ",".join(modes_to_try))

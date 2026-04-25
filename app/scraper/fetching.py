@@ -3,42 +3,35 @@ from __future__ import annotations
 """Fetcher selection and auto-escalation heuristics."""
 
 import logging
-from urllib.parse import urlparse
 
 from scrapling.fetchers import DynamicFetcher, Fetcher, StealthyFetcher
 from scrapling.parser import Selector
 
 from .constants import JAVASCRIPT_HINTS, PROTECTION_HINTS, PROTECTION_STATUS_CODES
 from .proxies import get_proxy_retry_count, get_scrape_proxy_rotator
-from .registry import detect_site_key
 
 _logger = logging.getLogger("scraper_api.scraper")
-
-STEALTH_FIRST_AUTO_SITE_KEYS = frozenset(
-    {
-        "akakce",
-        "mediamarkt",
-    }
-)
-STEALTH_FIRST_AUTO_DOMAIN_SUFFIXES = (
-    "teknosa.com",
-)
 
 
 def initial_auto_fetch_mode(url: str) -> str:
     """Choose the first transport for auto mode."""
-    site_key = detect_site_key(url)
-    if site_key in STEALTH_FIRST_AUTO_SITE_KEYS:
-        _logger.info("scrape_auto_initial_mode mode=stealth reason=known_protected_site site=%s url=%s", site_key, url)
-        return "stealth"
-    host = urlparse(url).netloc.lower()
-    if host.startswith("www."):
-        host = host[4:]
-    if any(host == suffix or host.endswith(f".{suffix}") for suffix in STEALTH_FIRST_AUTO_DOMAIN_SUFFIXES):
-        _logger.info("scrape_auto_initial_mode mode=stealth reason=known_protected_domain host=%s url=%s", host, url)
-        return "stealth"
-    _logger.info("scrape_auto_initial_mode mode=http reason=default site=%s host=%s url=%s", site_key, host, url)
+    _logger.info("scrape_auto_initial_mode mode=http reason=sequential_probe url=%s", url)
     return "http"
+
+
+def auto_remaining_modes(
+    current_mode: str,
+    *,
+    signals: set[str] | None = None,
+) -> list[str]:
+    """Return untried auto-mode fallbacks in the best order for observed signals."""
+    seen = {current_mode}
+    ordered: list[str]
+    if signals and "protection" in signals:
+        ordered = ["stealth", "dynamic"]
+    else:
+        ordered = ["dynamic", "stealth"]
+    return [mode for mode in ordered if mode not in seen]
 
 
 def fetch_page_with_mode(url: str, timeout: int, mode: str) -> Selector:
@@ -71,7 +64,20 @@ def fetch_page_with_mode(url: str, timeout: int, mode: str) -> Selector:
     }
 
     if mode == "dynamic":
-        page = DynamicFetcher.fetch(url, **base_kwargs)
+        proxy_rotator = get_scrape_proxy_rotator()
+        proxy_kwargs = {"proxy_rotator": proxy_rotator} if proxy_rotator is not None else {}
+        _logger.info(
+            "scrape_fetch_dynamic_config proxy_enabled=%s retries=%s url=%s",
+            proxy_rotator is not None,
+            get_proxy_retry_count(),
+            url,
+        )
+        dynamic_kwargs = {
+            **base_kwargs,
+            "retries": get_proxy_retry_count(),
+            **proxy_kwargs,
+        }
+        page = DynamicFetcher.fetch(url, **dynamic_kwargs)
         _logger.info("scrape_fetch_complete mode=dynamic status=%s url=%s", getattr(page, "status", None), url)
         return page
     if mode == "stealth":
@@ -135,6 +141,4 @@ def auto_followup_modes(signals: set[str]) -> list[str]:
     """Choose follow-up modes in preferred order for auto mode."""
     if "protection" in signals:
         return ["stealth", "dynamic"]
-    if "javascript" in signals:
-        return ["dynamic", "stealth"]
-    return []
+    return ["dynamic", "stealth"]
