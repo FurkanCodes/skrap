@@ -94,6 +94,7 @@ class Settings:
     scrape_result_cache_ttl_seconds: int
     scrape_result_cache_max_batches: int
     scrape_proxy_urls: tuple[str, ...]
+    scrape_proxy_list_urls: tuple[str, ...]
     server_fetch_allowed_ports: tuple[int, ...]
     server_fetch_allow_private_networks: bool
     server_fetch_resolve_dns: bool
@@ -177,6 +178,11 @@ def get_settings() -> Settings:
             _parse_str_env("SCRAPE_PROXY_URLS", "")
             or _parse_str_env("SCRAPER_PROXY_URLS", "")
             or _parse_str_env("SCRAPE_PROXY_URL", ""),
+            default=(),
+        ),
+        scrape_proxy_list_urls=_parse_csv(
+            _parse_str_env("SCRAPE_PROXY_LIST_URLS", "")
+            or _parse_str_env("SCRAPE_PROXY_LIST_URL", ""),
             default=(),
         ),
         server_fetch_allowed_ports=_parse_int_csv(
@@ -311,6 +317,10 @@ def get_settings() -> Settings:
             raise RuntimeError(
                 "SCRAPE_PROXY_URLS must contain valid http, https, socks4, or socks5 proxy URLs"
             )
+    for list_url in settings.scrape_proxy_list_urls:
+        parsed_list_url = urlparse(list_url)
+        if parsed_list_url.scheme not in {"http", "https"} or not parsed_list_url.netloc:
+            raise RuntimeError("SCRAPE_PROXY_LIST_URLS must contain valid http or https URLs")
     if not settings.server_fetch_allowed_ports:
         raise RuntimeError("SERVER_FETCH_ALLOWED_PORTS must not be empty")
     if any(port < 1 or port > 65535 for port in settings.server_fetch_allowed_ports):

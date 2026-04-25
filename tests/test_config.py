@@ -45,6 +45,8 @@ def test_localhost_http_auth_urls_are_allowed_in_development(
     monkeypatch.setenv("BETTER_AUTH_JWKS_URL", "http://localhost:3000/api/auth/jwks")
     monkeypatch.setenv("BETTER_AUTH_JWT_ISSUER", "http://127.0.0.1:3000")
     monkeypatch.setenv("BETTER_AUTH_JWT_AUDIENCE", "http://127.0.0.1:8000")
+    monkeypatch.setenv("SCRAPE_PROXY_URLS", "")
+    monkeypatch.setenv("SCRAPE_PROXY_LIST_URLS", "")
 
     settings = get_settings()
 
@@ -67,12 +69,28 @@ def test_scrape_proxy_urls_are_parsed(monkeypatch: pytest.MonkeyPatch) -> None:
         "http://user:pass@proxy.example:8000",
         "socks5://proxy2.example:1080",
     )
+    assert settings.scrape_proxy_list_urls == ()
+
+
+def test_scrape_proxy_list_urls_are_parsed(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SCRAPE_PROXY_LIST_URLS", "https://proxy.example/list.txt")
+
+    settings = get_settings()
+
+    assert settings.scrape_proxy_list_urls == ("https://proxy.example/list.txt",)
 
 
 def test_invalid_scrape_proxy_urls_are_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SCRAPE_PROXY_URLS", "ftp://proxy.example:21")
 
     with pytest.raises(RuntimeError, match="SCRAPE_PROXY_URLS must contain valid"):
+        get_settings()
+
+
+def test_invalid_scrape_proxy_list_urls_are_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SCRAPE_PROXY_LIST_URLS", "ftp://proxy.example/list.txt")
+
+    with pytest.raises(RuntimeError, match="SCRAPE_PROXY_LIST_URLS must contain valid"):
         get_settings()
 
 
@@ -94,6 +112,7 @@ def test_production_enables_rate_limit_by_default(
     monkeypatch.setenv("AUTH_REQUIRED", "false")
     monkeypatch.setenv("CORS_ALLOW_ORIGINS", "https://app.example.com")
     monkeypatch.setenv("SCHEDULER_QUEUE_REDIS_URL", "redis://redis:6379/0")
+    monkeypatch.setenv("SERVER_FETCH_RESOLVE_DNS", "")
 
     settings = get_settings()
 

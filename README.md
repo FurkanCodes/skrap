@@ -732,6 +732,7 @@ High-level relationships:
 | `SCRAPE_RESULT_CACHE_TTL_SECONDS` | `900` | TTL for `scrape_ref/result_ref` cache |
 | `SCRAPE_RESULT_CACHE_MAX_BATCHES` | `500` | max cached scrape batches |
 | `SCRAPE_PROXY_URLS` | empty | comma-separated outbound proxy URLs for Scrapling fetchers |
+| `SCRAPE_PROXY_LIST_URLS` | empty | comma-separated text proxy-list URLs; one proxy URL per line |
 
 ## Tracking DB settings
 
