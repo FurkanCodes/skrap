@@ -505,6 +505,32 @@ def test_fetch_page_with_mode_passes_configured_proxy_rotator(monkeypatch: pytes
     assert captured["proxy_rotator"] is proxy_rotator
 
 
+def test_stealth_fetch_uses_challenge_friendly_browser_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.scraper import fetching
+
+    captured: dict[str, object] = {}
+
+    def _fake_fetch(url: str, **kwargs: object) -> Selector:
+        captured["url"] = url
+        captured.update(kwargs)
+        return Selector("<html></html>")
+
+    monkeypatch.setattr(fetching, "get_scrape_proxy_rotator", lambda: None)
+    monkeypatch.setattr(fetching.StealthyFetcher, "fetch", _fake_fetch)
+
+    page = fetching.fetch_page_with_mode("https://example.com/protected", timeout=10, mode="stealth")
+
+    assert isinstance(page, Selector)
+    assert captured["url"] == "https://example.com/protected"
+    assert captured["timeout"] == 60000
+    assert captured["disable_resources"] is False
+    assert captured["network_idle"] is True
+    assert captured["solve_cloudflare"] is True
+    assert captured["hide_canvas"] is True
+    assert captured["locale"] == "tr-TR"
+    assert captured["timezone_id"] == "Europe/Istanbul"
+
+
 def test_find_fallback_is_bounded() -> None:
     rows = "\n".join(
         f"<div data-qa='price-tag'>US${index}.00</div>"

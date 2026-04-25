@@ -43,11 +43,21 @@ def fetch_page_with_mode(url: str, timeout: int, mode: str) -> Selector:
     if mode == "dynamic":
         return DynamicFetcher.fetch(url, **base_kwargs)
     if mode == "stealth":
+        stealth_kwargs = {
+            **base_kwargs,
+            "timeout": max(60000, browser_timeout_ms),
+            "disable_resources": False,
+            "network_idle": True,
+            "wait": 1500,
+            "solve_cloudflare": True,
+            "block_webrtc": True,
+            "hide_canvas": True,
+            "locale": "tr-TR",
+            "timezone_id": "Europe/Istanbul",
+        }
         return StealthyFetcher.fetch(
             url,
-            solve_cloudflare=True,
-            block_webrtc=True,
-            **base_kwargs,
+            **stealth_kwargs,
         )
 
     raise ValueError(f"Unsupported fetch mode '{mode}'")
