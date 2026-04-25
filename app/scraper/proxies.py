@@ -14,6 +14,7 @@ from app.core.config import get_settings
 
 _logger = logging.getLogger("scraper_api.scraper")
 _SUPPORTED_PROXY_SCHEMES = {"http", "https", "socks4", "socks5"}
+MAX_PROXY_ATTEMPTS = 8
 
 
 def _mask_proxy_url(proxy_url: str | dict[str, Any]) -> str:
@@ -97,3 +98,11 @@ def get_scrape_proxy_rotator() -> ProxyRotator | None:
         ",".join(_mask_proxy_url(url) for url in proxy_urls),
     )
     return ProxyRotator(list(proxy_urls), strategy=_logging_cyclic_rotation)
+
+
+def get_proxy_retry_count(default: int = 2) -> int:
+    """Return a retry budget large enough to sample several configured proxies."""
+    proxy_rotator = get_scrape_proxy_rotator()
+    if proxy_rotator is None:
+        return default
+    return max(default, min(len(proxy_rotator), MAX_PROXY_ATTEMPTS))

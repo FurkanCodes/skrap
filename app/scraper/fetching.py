@@ -8,7 +8,7 @@ from scrapling.fetchers import DynamicFetcher, Fetcher, StealthyFetcher
 from scrapling.parser import Selector
 
 from .constants import JAVASCRIPT_HINTS, PROTECTION_HINTS, PROTECTION_STATUS_CODES
-from .proxies import get_scrape_proxy_rotator
+from .proxies import get_proxy_retry_count, get_scrape_proxy_rotator
 from .registry import detect_site_key
 
 STEALTH_FIRST_AUTO_SITE_KEYS = frozenset(
@@ -43,12 +43,13 @@ def fetch_page_with_mode(url: str, timeout: int, mode: str) -> Selector:
     """
     proxy_rotator = get_scrape_proxy_rotator()
     proxy_kwargs = {"proxy_rotator": proxy_rotator} if proxy_rotator is not None else {}
+    retries = get_proxy_retry_count()
 
     if mode == "http":
         return Fetcher.get(
             url,
             timeout=timeout,
-            retries=2,
+            retries=retries,
             retry_delay=1,
             stealthy_headers=True,
             follow_redirects="safe",
@@ -58,7 +59,7 @@ def fetch_page_with_mode(url: str, timeout: int, mode: str) -> Selector:
     browser_timeout_ms = max(1000, timeout * 1000)
     base_kwargs = {
         "timeout": browser_timeout_ms,
-        "retries": 2,
+        "retries": retries,
         "retry_delay": 1,
         "headless": True,
         "disable_resources": True,

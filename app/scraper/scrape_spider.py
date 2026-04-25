@@ -9,7 +9,7 @@ from .fetching import auto_followup_modes, detect_auto_escalation_signals, initi
 from .inputs import parse_fetch_mode
 from .domain import PriceResult
 from .parsing import make_product_id, normalize_runtime_url
-from .proxies import get_scrape_proxy_rotator
+from .proxies import get_proxy_retry_count, get_scrape_proxy_rotator
 from .registry import ADAPTERS, detect_site_key
 from .service import extract_price_from_page
 
@@ -58,11 +58,12 @@ class PriceScrapeSpider(Spider):
         # HTTP timeout is in seconds; browser sessions use milliseconds.
         proxy_rotator = get_scrape_proxy_rotator()
         proxy_kwargs = {"proxy_rotator": proxy_rotator} if proxy_rotator is not None else {}
+        retries = get_proxy_retry_count()
         manager.add(
             "http",
             FetcherSession(
                 timeout=self._timeout_seconds,
-                retries=2,
+                retries=retries,
                 retry_delay=1,
                 stealthy_headers=True,
                 follow_redirects="safe",
@@ -75,7 +76,7 @@ class PriceScrapeSpider(Spider):
                 headless=True,
                 disable_resources=True,
                 timeout=self._timeout_seconds * 1000,
-                retries=2,
+                retries=retries,
                 retry_delay=1,
                 **proxy_kwargs,
             ),
@@ -94,7 +95,7 @@ class PriceScrapeSpider(Spider):
                 locale="tr-TR",
                 timezone_id="Europe/Istanbul",
                 timeout=max(60000, self._timeout_seconds * 1000),
-                retries=2,
+                retries=retries,
                 retry_delay=1,
                 **proxy_kwargs,
             ),

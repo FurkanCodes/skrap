@@ -10,7 +10,7 @@ from scrapling.fetchers import AsyncStealthySession, FetcherSession
 from scrapling.spiders import Request, Response, SessionManager, Spider
 
 from .parsing import strip_tracking_query_params
-from .proxies import get_scrape_proxy_rotator
+from .proxies import get_proxy_retry_count, get_scrape_proxy_rotator
 
 PAGINATION_TEXT_TOKENS = {
     "next",
@@ -136,7 +136,11 @@ class PriceDiscoverySpider(Spider):
         # Timeout units differ across fetchers, so set them per session type.
         proxy_rotator = get_scrape_proxy_rotator()
         proxy_kwargs = {"proxy_rotator": proxy_rotator} if proxy_rotator is not None else {}
-        manager.add("http", FetcherSession(timeout=self._timeout_seconds, **proxy_kwargs))
+        retries = get_proxy_retry_count()
+        manager.add(
+            "http",
+            FetcherSession(timeout=self._timeout_seconds, retries=retries, retry_delay=1, **proxy_kwargs),
+        )
         manager.add(
             "stealth",
             AsyncStealthySession(
@@ -150,6 +154,8 @@ class PriceDiscoverySpider(Spider):
                 locale="tr-TR",
                 timezone_id="Europe/Istanbul",
                 timeout=max(60000, self._timeout_seconds * 1000),
+                retries=retries,
+                retry_delay=1,
                 **proxy_kwargs,
             ),
             lazy=True,

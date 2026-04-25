@@ -87,3 +87,20 @@ def test_logging_rotation_selects_next_proxy(caplog: pytest.LogCaptureFixture) -
     assert first_proxy == "http://user:secret@proxy.example:8080"
     assert next_index == 1
     assert "scrape_proxy_selected index=0 proxy=http://***:***@proxy.example:8080" in caplog.text
+
+
+def test_proxy_retry_count_scales_with_proxy_count(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(
+        "SCRAPE_PROXY_URLS",
+        ",".join(f"http://proxy{index}.example:8080" for index in range(12)),
+    )
+    monkeypatch.setenv("SCRAPE_PROXY_LIST_URLS", "")
+
+    assert proxies.get_proxy_retry_count() == proxies.MAX_PROXY_ATTEMPTS
+
+
+def test_proxy_retry_count_uses_default_without_proxies(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SCRAPE_PROXY_URLS", "")
+    monkeypatch.setenv("SCRAPE_PROXY_LIST_URLS", "")
+
+    assert proxies.get_proxy_retry_count() == 2
