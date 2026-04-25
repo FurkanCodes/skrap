@@ -491,7 +491,7 @@ def test_auto_mode_starts_protected_sites_with_stealth() -> None:
     assert initial_auto_fetch_mode("https://example.com/product") == "http"
 
 
-def test_fetch_page_with_mode_passes_configured_proxy_rotator(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_http_fetch_does_not_use_configured_proxy_rotator(monkeypatch: pytest.MonkeyPatch) -> None:
     from app.scraper import fetching
 
     proxy_rotator = object()
@@ -509,7 +509,7 @@ def test_fetch_page_with_mode_passes_configured_proxy_rotator(monkeypatch: pytes
 
     assert isinstance(page, Selector)
     assert captured["url"] == "https://example.com/product"
-    assert captured["proxy_rotator"] is proxy_rotator
+    assert "proxy_rotator" not in captured
 
 
 def test_stealth_fetch_uses_challenge_friendly_browser_settings(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -536,6 +536,29 @@ def test_stealth_fetch_uses_challenge_friendly_browser_settings(monkeypatch: pyt
     assert captured["hide_canvas"] is True
     assert captured["locale"] == "tr-TR"
     assert captured["timezone_id"] == "Europe/Istanbul"
+
+
+def test_stealth_fetch_passes_configured_proxy_rotator(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.scraper import fetching
+
+    proxy_rotator = object()
+    captured: dict[str, object] = {}
+
+    def _fake_fetch(url: str, **kwargs: object) -> Selector:
+        captured["url"] = url
+        captured.update(kwargs)
+        return Selector("<html></html>")
+
+    monkeypatch.setattr(fetching, "get_scrape_proxy_rotator", lambda: proxy_rotator)
+    monkeypatch.setattr(fetching, "get_proxy_retry_count", lambda: 8)
+    monkeypatch.setattr(fetching.StealthyFetcher, "fetch", _fake_fetch)
+
+    page = fetching.fetch_page_with_mode("https://example.com/protected", timeout=10, mode="stealth")
+
+    assert isinstance(page, Selector)
+    assert captured["url"] == "https://example.com/protected"
+    assert captured["proxy_rotator"] is proxy_rotator
+    assert captured["retries"] == 8
 
 
 def test_find_fallback_is_bounded() -> None:

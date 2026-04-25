@@ -135,11 +135,11 @@ class PriceDiscoverySpider(Spider):
     def configure_sessions(self, manager: SessionManager) -> None:
         # Timeout units differ across fetchers, so set them per session type.
         proxy_rotator = get_scrape_proxy_rotator()
-        proxy_kwargs = {"proxy_rotator": proxy_rotator} if proxy_rotator is not None else {}
-        retries = get_proxy_retry_count()
+        stealth_proxy_kwargs = {"proxy_rotator": proxy_rotator} if proxy_rotator is not None else {}
+        stealth_retries = get_proxy_retry_count()
         manager.add(
             "http",
-            FetcherSession(timeout=self._timeout_seconds, retries=retries, retry_delay=1, **proxy_kwargs),
+            FetcherSession(timeout=self._timeout_seconds, retries=2, retry_delay=1),
         )
         manager.add(
             "stealth",
@@ -154,9 +154,9 @@ class PriceDiscoverySpider(Spider):
                 locale="tr-TR",
                 timezone_id="Europe/Istanbul",
                 timeout=max(60000, self._timeout_seconds * 1000),
-                retries=retries,
+                retries=stealth_retries,
                 retry_delay=1,
-                **proxy_kwargs,
+                **stealth_proxy_kwargs,
             ),
             lazy=True,
         )

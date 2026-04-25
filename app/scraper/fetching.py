@@ -41,37 +41,34 @@ def fetch_page_with_mode(url: str, timeout: int, mode: str) -> Selector:
     - `dynamic`: Playwright-backed browser fetcher
     - `stealth`: hardened browser fetcher for protected targets
     """
-    proxy_rotator = get_scrape_proxy_rotator()
-    proxy_kwargs = {"proxy_rotator": proxy_rotator} if proxy_rotator is not None else {}
-    retries = get_proxy_retry_count()
-
     if mode == "http":
         return Fetcher.get(
             url,
             timeout=timeout,
-            retries=retries,
+            retries=2,
             retry_delay=1,
             stealthy_headers=True,
             follow_redirects="safe",
-            **proxy_kwargs,
         )
 
     browser_timeout_ms = max(1000, timeout * 1000)
     base_kwargs = {
         "timeout": browser_timeout_ms,
-        "retries": retries,
+        "retries": 2,
         "retry_delay": 1,
         "headless": True,
         "disable_resources": True,
-        **proxy_kwargs,
     }
 
     if mode == "dynamic":
         return DynamicFetcher.fetch(url, **base_kwargs)
     if mode == "stealth":
+        proxy_rotator = get_scrape_proxy_rotator()
+        proxy_kwargs = {"proxy_rotator": proxy_rotator} if proxy_rotator is not None else {}
         stealth_kwargs = {
             **base_kwargs,
             "timeout": max(60000, browser_timeout_ms),
+            "retries": get_proxy_retry_count(),
             "disable_resources": False,
             "network_idle": True,
             "wait": 1500,
@@ -80,6 +77,7 @@ def fetch_page_with_mode(url: str, timeout: int, mode: str) -> Selector:
             "hide_canvas": True,
             "locale": "tr-TR",
             "timezone_id": "Europe/Istanbul",
+            **proxy_kwargs,
         }
         return StealthyFetcher.fetch(
             url,
