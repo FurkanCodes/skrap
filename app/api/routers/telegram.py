@@ -108,7 +108,6 @@ async def get_telegram_connect_status(
 
 @router.get("/status", response_model=TelegramActiveStatusResponse)
 async def get_telegram_status(
-    settings: Settings = Depends(get_app_settings),
     service: TelegramIntegrationService = Depends(get_telegram_integration_service),
     principal: AuthPrincipal = Depends(get_current_principal),
     user_service: UserService = Depends(get_user_service),
@@ -118,10 +117,15 @@ async def get_telegram_status(
         service.get_active_chat_status,
         user_id=current_user.user_id,
     )
+    try:
+        bot_username = await run_in_threadpool(service.get_bot_username)
+    except TelegramIntegrationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
     return TelegramActiveStatusResponse(
         connected=connected,
         active_chat_id=active_chat_id,
-        bot_username=settings.telegram_bot_username,
+        bot_username=bot_username,
     )
 
 

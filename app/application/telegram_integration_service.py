@@ -5,8 +5,11 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 import httpx
 import json
+import logging
 
 from app.tracking import TelegramConnectSession, TrackingRepository
+
+_logger = logging.getLogger("scraper_api.telegram")
 
 
 class TelegramIntegrationError(RuntimeError):
@@ -51,12 +54,12 @@ class TelegramIntegrationService:
     ) -> None:
         self._repository = repository
         self._bot_token = bot_token.strip()
-        self._bot_username = bot_username.strip().lstrip("@")
+        self._configured_bot_username = bot_username.strip().lstrip("@")
+        self._resolved_bot_username: str | None = None
         self._connect_ttl_minutes = max(1, connect_ttl_minutes)
 
     def start_connect(self, *, user_id: str = "legacy_owner") -> TelegramConnectStartOutput:
-        if not self._bot_username:
-            raise TelegramIntegrationError("TELEGRAM_BOT_USERNAME is required")
+        bot_username = self._get_bot_username_for_connect()
 
         now = _utcnow()
         expires_at = now + timedelta(minutes=self._connect_ttl_minutes)
@@ -75,9 +78,9 @@ class TelegramIntegrationService:
         saved = self._repository.create_telegram_connect_session(session)
         return TelegramConnectStartOutput(
             state=saved.state,
-            deep_link_url=f"https://t.me/{self._bot_username}?start={saved.state}",
+            deep_link_url=f"https://t.me/{bot_username}?start={saved.state}",
             expires_at=saved.expires_at,
-            bot_username=self._bot_username,
+            bot_username=bot_username,
         )
 
     def get_connect_status(
@@ -103,6 +106,11 @@ class TelegramIntegrationService:
     def get_active_chat_status(self, *, user_id: str = "legacy_owner") -> tuple[bool, str | None]:
         active_chat = self._get_active_chat(user_id=user_id)
         return (active_chat is not None, active_chat)
+
+    def get_bot_username(self) -> str:
+        if not self._bot_token:
+            return self._configured_bot_username
+        return self._resolve_bot_username_from_token()
 
     def setup_webhook(
         self,
@@ -276,6 +284,46 @@ class TelegramIntegrationService:
             return method(user_id=user_id)
         except TypeError:
             return method()
+
+    def _get_bot_username_for_connect(self) -> str:
+        if not self._bot_token:
+            raise TelegramIntegrationError("TELEGRAM_BOT_TOKEN is required")
+
+        return self._resolve_bot_username_from_token()
+
+    def _resolve_bot_username_from_token(self) -> str:
+        if self._resolved_bot_username:
+            return self._resolved_bot_username
+
+        try:
+            response = httpx.get(
+                f"https://api.telegram.org/bot{self._bot_token}/getMe",
+                timeout=10,
+            )
+        except Exception as exc:
+            raise TelegramIntegrationError(f"telegram_get_me_network_error: {exc}") from exc
+
+        body = _json_dict(response.text)
+        result = body.get("result") if isinstance(body, dict) else None
+        actual_username = ""
+        if isinstance(result, dict):
+            actual_username = str(result.get("username") or "").strip().lstrip("@")
+
+        if not response.is_success or not body.get("ok") or not actual_username:
+            raise TelegramIntegrationError("TELEGRAM_BOT_TOKEN is invalid")
+
+        if (
+            self._configured_bot_username
+            and self._configured_bot_username.lower() != actual_username.lower()
+        ):
+            _logger.warning(
+                "telegram_bot_username_mismatch configured=%s actual=%s",
+                self._configured_bot_username,
+                actual_username,
+            )
+
+        self._resolved_bot_username = actual_username
+        return actual_username
 
 
 @dataclass(frozen=True)

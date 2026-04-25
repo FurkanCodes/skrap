@@ -54,6 +54,9 @@ class _FakeTelegramService:
     def get_active_chat_status(self, *, user_id: str | None = None) -> tuple[bool, str | None]:  # noqa: ARG002
         return (True, "12345")
 
+    def get_bot_username(self) -> str:
+        return "testbot"
+
     def process_webhook_update(self, payload: dict) -> bool:
         self.processed_updates += 1
         return bool(payload)
@@ -75,7 +78,7 @@ class _FakeTelegramService:
 @dataclass
 class _FailingTelegramService:
     def start_connect(self, *, user_id: str | None = None) -> TelegramConnectStartOutput:  # noqa: ARG002
-        raise TelegramIntegrationError("TELEGRAM_BOT_USERNAME is required")
+        raise TelegramIntegrationError("TELEGRAM_BOT_TOKEN is invalid")
 
 
 def _build_client(service: object, *, webhook_secret: str | None = "") -> TestClient:
@@ -115,7 +118,7 @@ def test_start_connect_maps_service_error_to_422() -> None:
     _clear_overrides()
 
     assert response.status_code == 422
-    assert response.json()["detail"] == "TELEGRAM_BOT_USERNAME is required"
+    assert response.json()["detail"] == "TELEGRAM_BOT_TOKEN is invalid"
 
 
 def test_setup_webhook_returns_configured_url() -> None:
@@ -154,6 +157,7 @@ def test_get_telegram_status() -> None:
     assert response.status_code == 200
     assert response.json()["connected"] is True
     assert response.json()["active_chat_id"] == "12345"
+    assert response.json()["bot_username"] == "testbot"
 
 
 def test_webhook_requires_secret_when_configured() -> None:

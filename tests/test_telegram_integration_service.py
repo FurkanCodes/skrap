@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 import httpx
+import pytest
 
 from app.application.telegram_integration_service import (
     TelegramIntegrationError,
@@ -77,11 +78,11 @@ def _now_iso() -> str:
     return datetime.now(tz=UTC).isoformat().replace("+00:00", "Z")
 
 
-def test_start_connect_requires_bot_username() -> None:
+def test_start_connect_requires_bot_token() -> None:
     service = TelegramIntegrationService(
         repository=_FakeRepository(sessions={}),
         bot_token="",
-        bot_username="",
+        bot_username="mypricebot",
         connect_ttl_minutes=15,
     )
 
@@ -89,24 +90,84 @@ def test_start_connect_requires_bot_username() -> None:
         service.start_connect()
         assert False, "Expected TelegramIntegrationError"
     except TelegramIntegrationError as exc:
-        assert str(exc) == "TELEGRAM_BOT_USERNAME is required"
+        assert str(exc) == "TELEGRAM_BOT_TOKEN is required"
 
 
-def test_start_connect_creates_pending_session() -> None:
+def test_start_connect_uses_username_resolved_from_token(monkeypatch: pytest.MonkeyPatch) -> None:
     repo = _FakeRepository(sessions={})
     service = TelegramIntegrationService(
         repository=repo,
         bot_token="token",
-        bot_username="mypricebot",
+        bot_username="Dealvinci",
+        connect_ttl_minutes=15,
+    )
+    calls = 0
+
+    def _fake_get(url, timeout):  # noqa: ANN001
+        nonlocal calls
+        calls += 1
+        assert url == "https://api.telegram.org/bottoken/getMe"
+        assert timeout == 10
+        return httpx.Response(
+            200,
+            json={"ok": True, "result": {"username": "SkkrappyBot", "is_bot": True}},
+        )
+
+    monkeypatch.setattr("app.application.telegram_integration_service.httpx.get", _fake_get)
+
+    output = service.start_connect()
+    second_output = service.start_connect()
+
+    assert output.bot_username == "SkkrappyBot"
+    assert output.deep_link_url.startswith("https://t.me/SkkrappyBot?start=")
+    assert output.state in repo.sessions
+    assert repo.sessions[output.state].status == "pending"
+    assert second_output.bot_username == "SkkrappyBot"
+    assert calls == 1
+
+
+def test_start_connect_logs_configured_username_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    service = TelegramIntegrationService(
+        repository=_FakeRepository(sessions={}),
+        bot_token="token",
+        bot_username="Dealvinci",
         connect_ttl_minutes=15,
     )
 
-    output = service.start_connect()
+    def _fake_get(url, timeout):  # noqa: ANN001, ARG001
+        return httpx.Response(200, json={"ok": True, "result": {"username": "SkkrappyBot"}})
 
-    assert output.bot_username == "mypricebot"
-    assert output.deep_link_url.startswith("https://t.me/mypricebot?start=")
-    assert output.state in repo.sessions
-    assert repo.sessions[output.state].status == "pending"
+    monkeypatch.setattr("app.application.telegram_integration_service.httpx.get", _fake_get)
+
+    with caplog.at_level("WARNING", logger="scraper_api.telegram"):
+        output = service.start_connect()
+
+    assert output.bot_username == "SkkrappyBot"
+    assert "telegram_bot_username_mismatch" in caplog.text
+    assert "configured=Dealvinci actual=SkkrappyBot" in caplog.text
+
+
+def test_start_connect_rejects_invalid_bot_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    service = TelegramIntegrationService(
+        repository=_FakeRepository(sessions={}),
+        bot_token="bad-token",
+        bot_username="Dealvinci",
+        connect_ttl_minutes=15,
+    )
+
+    def _fake_get(url, timeout):  # noqa: ANN001, ARG001
+        return httpx.Response(404, json={"ok": False, "description": "Not Found"})
+
+    monkeypatch.setattr("app.application.telegram_integration_service.httpx.get", _fake_get)
+
+    try:
+        service.start_connect()
+        assert False, "Expected TelegramIntegrationError"
+    except TelegramIntegrationError as exc:
+        assert str(exc) == "TELEGRAM_BOT_TOKEN is invalid"
 
 
 def test_process_webhook_update_connects_session_and_sets_active_chat() -> None:
