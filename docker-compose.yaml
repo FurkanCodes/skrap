@@ -1,5 +1,10 @@
+name: dealvinci
+
+x-app-image: &app_image dealvinci-backend-app:${COOLIFY_RESOURCE_UUID:-local}
+
 services:
   api:
+    image: *app_image
     build:
       context: .
       dockerfile: Dockerfile
@@ -14,9 +19,7 @@ services:
     restart: unless-stopped
 
   scheduler_dispatcher:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: *app_image
     env_file:
       - .env
     command: python -m app.jobs.scheduler_dispatcher
@@ -26,9 +29,7 @@ services:
     restart: unless-stopped
 
   scheduler_worker:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: *app_image
     env_file:
       - .env
     command: python -m app.jobs.scheduler_worker
@@ -38,9 +39,7 @@ services:
     restart: unless-stopped
 
   notifier:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: *app_image
     env_file:
       - .env
     command: python -m app.jobs.notifier
