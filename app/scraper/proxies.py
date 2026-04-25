@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 import logging
+from typing import Any
 from urllib.parse import urlparse
 
 import httpx
@@ -15,7 +16,18 @@ _logger = logging.getLogger("scraper_api.scraper")
 _SUPPORTED_PROXY_SCHEMES = {"http", "https", "socks4", "socks5"}
 
 
-def _mask_proxy_url(proxy_url: str) -> str:
+def _mask_proxy_url(proxy_url: str | dict[str, Any]) -> str:
+    if isinstance(proxy_url, dict):
+        server = str(proxy_url.get("server", "")).strip()
+        masked_server = _mask_proxy_url(server) if server else "<missing-server>"
+        if proxy_url.get("username") or proxy_url.get("password"):
+            parsed = urlparse(server)
+            if parsed.netloc:
+                host = parsed.hostname or ""
+                port = f":{parsed.port}" if parsed.port is not None else ""
+                return f"{parsed.scheme}://***:***@{host}{port}"
+        return masked_server
+
     parsed = urlparse(proxy_url)
     if not parsed.netloc:
         return proxy_url
@@ -57,13 +69,25 @@ def _load_proxy_list_url(url: str) -> tuple[str, ...]:
     return proxies
 
 
+def _logging_cyclic_rotation(proxies: list[Any], current_index: int) -> tuple[Any, int]:
+    index = current_index % len(proxies)
+    proxy = proxies[index]
+    _logger.info(
+        "scrape_proxy_selected index=%s proxy=%s",
+        index,
+        _mask_proxy_url(proxy),
+    )
+    return proxy, (index + 1) % len(proxies)
+
+
 @lru_cache
 def get_scrape_proxy_rotator() -> ProxyRotator | None:
     """Return a shared, thread-safe proxy rotator when scraping proxies are configured."""
     settings = get_settings()
-    proxy_urls = list(settings.scrape_proxy_urls)
+    proxy_urls: list[str] = []
     for list_url in settings.scrape_proxy_list_urls:
         proxy_urls.extend(_load_proxy_list_url(list_url))
+    proxy_urls.extend(settings.scrape_proxy_urls)
     proxy_urls = list(dict.fromkeys(proxy_urls))
     if not proxy_urls:
         return None
@@ -72,4 +96,4 @@ def get_scrape_proxy_rotator() -> ProxyRotator | None:
         len(proxy_urls),
         ",".join(_mask_proxy_url(url) for url in proxy_urls),
     )
-    return ProxyRotator(list(proxy_urls))
+    return ProxyRotator(list(proxy_urls), strategy=_logging_cyclic_rotation)

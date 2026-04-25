@@ -57,3 +57,33 @@ def test_proxy_rotator_loads_remote_proxy_list(
     assert captured_urls == ["https://proxy.example/list.txt"]
     assert rotator is not None
     assert rotator.proxies == ["http://1.2.3.4:8080", "https://5.6.7.8:8443"]
+
+
+def test_proxy_rotator_prefers_remote_list_before_manual_proxies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SCRAPE_PROXY_URLS", "http://manual.example:8080")
+    monkeypatch.setenv("SCRAPE_PROXY_LIST_URLS", "https://proxy.example/list.txt")
+
+    def _fake_get(url: str, **_kwargs: object) -> _FakeResponse:  # noqa: ARG001
+        return _FakeResponse("http://list.example:8080\n")
+
+    monkeypatch.setattr(proxies.httpx, "get", _fake_get)
+
+    rotator = proxies.get_scrape_proxy_rotator()
+
+    assert rotator is not None
+    assert rotator.proxies == ["http://list.example:8080", "http://manual.example:8080"]
+
+
+def test_logging_rotation_selects_next_proxy(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level("INFO", logger="scraper_api.scraper")
+
+    first_proxy, next_index = proxies._logging_cyclic_rotation(
+        ["http://user:secret@proxy.example:8080", "http://proxy2.example:8080"],
+        0,
+    )
+
+    assert first_proxy == "http://user:secret@proxy.example:8080"
+    assert next_index == 1
+    assert "scrape_proxy_selected index=0 proxy=http://***:***@proxy.example:8080" in caplog.text
