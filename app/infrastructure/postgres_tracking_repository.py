@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from threading import RLock
+from time import sleep
 import uuid
 
+from psycopg.errors import DeadlockDetected
 from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 
@@ -21,6 +23,8 @@ from app.tracking.domain import (
     UsageCounter,
     UserEntitlement,
 )
+
+_SCHEMA_INITIALIZATION_LOCK_ID = 740_595_379_821_391_147
 
 _SCHEMA_STATEMENTS: tuple[str, ...] = (
     """
@@ -438,22 +442,24 @@ class PostgresTrackingRepository:
         with self._lock:
             self._pool.open(wait=True)
             with self._pool.connection() as conn:
-                with conn.transaction():
-                    for old_name, new_name in _LEGACY_TABLE_RENAMES:
-                        exists = conn.execute(
-                            """
-                            SELECT
-                              to_regclass(%s) IS NOT NULL AS old_exists,
-                              to_regclass(%s) IS NOT NULL AS new_exists
-                            """,
-                            (f"public.{old_name}", f"public.{new_name}"),
-                        ).fetchone()
-                        if not exists:
-                            continue
-                        if bool(exists["old_exists"]) and not bool(exists["new_exists"]):
-                            conn.execute(
-                                f'ALTER TABLE "{old_name}" RENAME TO "{new_name}"'
-                            )
+                conn.execute("SELECT pg_advisory_lock(%s)", (_SCHEMA_INITIALIZATION_LOCK_ID,))
+                try:
+                    with conn.transaction():
+                        for old_name, new_name in _LEGACY_TABLE_RENAMES:
+                            exists = conn.execute(
+                                """
+                                SELECT
+                                  to_regclass(%s) IS NOT NULL AS old_exists,
+                                  to_regclass(%s) IS NOT NULL AS new_exists
+                                """,
+                                (f"public.{old_name}", f"public.{new_name}"),
+                            ).fetchone()
+                            if not exists:
+                                continue
+                            if bool(exists["old_exists"]) and not bool(exists["new_exists"]):
+                                conn.execute(
+                                    f'ALTER TABLE "{old_name}" RENAME TO "{new_name}"'
+                                )
 
                     # Ensure legacy tables have user columns before user-scoped
                     # indexes are created in `_SCHEMA_STATEMENTS`.
@@ -589,13 +595,15 @@ class PostgresTrackingRepository:
                             ),
                         )
 
-                    conn.execute(_SYNC_BILLING_ENTITLEMENT_FROM_PLAN_FUNCTION_SQL)
-                    conn.execute(_SYNC_BILLING_ENTITLEMENT_FROM_PLAN_TRIGGER_SQL)
-                    conn.execute(_PROPAGATE_BILLING_PLAN_LIMITS_FUNCTION_SQL)
-                    conn.execute(_PROPAGATE_BILLING_PLAN_LIMITS_TRIGGER_SQL)
-                    conn.execute(
-                        _SYNC_BILLING_ENTITLEMENTS_BACKFILL_SQL,
-                    )
+                        conn.execute(_SYNC_BILLING_ENTITLEMENT_FROM_PLAN_FUNCTION_SQL)
+                        conn.execute(_SYNC_BILLING_ENTITLEMENT_FROM_PLAN_TRIGGER_SQL)
+                        conn.execute(_PROPAGATE_BILLING_PLAN_LIMITS_FUNCTION_SQL)
+                        conn.execute(_PROPAGATE_BILLING_PLAN_LIMITS_TRIGGER_SQL)
+                        conn.execute(
+                            _SYNC_BILLING_ENTITLEMENTS_BACKFILL_SQL,
+                        )
+                finally:
+                    conn.execute("SELECT pg_advisory_unlock(%s)", (_SCHEMA_INITIALIZATION_LOCK_ID,))
 
     def close(self) -> None:
         """Close pooled connections (useful in tests/shutdown hooks)."""
@@ -798,37 +806,44 @@ class PostgresTrackingRepository:
             )
 
     def get_user_entitlement(self, *, user_id: str) -> UserEntitlement | None:
-        with self._pool.connection() as conn:
-            row = conn.execute(
-                """
-                SELECT
-                    entitlement.user_id,
-                    entitlement.plan_key,
-                    COALESCE(plan.max_active_trackers, entitlement.max_active_trackers)
-                        AS max_active_trackers,
-                    COALESCE(
-                        plan.min_check_interval_minutes,
-                        entitlement.min_check_interval_minutes
-                    ) AS min_check_interval_minutes,
-                    COALESCE(plan.monthly_check_units, entitlement.monthly_check_units)
-                        AS monthly_check_units,
-                    COALESCE(plan.allowed_channels, entitlement.allowed_channels)
-                        AS allowed_channels,
-                    COALESCE(plan.overage_policy, entitlement.overage_policy)
-                        AS overage_policy,
-                    entitlement.created_at,
-                    GREATEST(
-                        entitlement.updated_at,
-                        COALESCE(plan.updated_at, entitlement.updated_at)
-                    ) AS updated_at
-                FROM billing_entitlements AS entitlement
-                LEFT JOIN billing_plans AS plan
-                  ON plan.plan_key = entitlement.plan_key
-                WHERE entitlement.user_id = %s
-                LIMIT 1
-                """,
-                (user_id,),
-            ).fetchone()
+        for attempt in range(3):
+            try:
+                with self._pool.connection() as conn:
+                    row = conn.execute(
+                        """
+                        SELECT
+                            entitlement.user_id,
+                            entitlement.plan_key,
+                            COALESCE(plan.max_active_trackers, entitlement.max_active_trackers)
+                                AS max_active_trackers,
+                            COALESCE(
+                                plan.min_check_interval_minutes,
+                                entitlement.min_check_interval_minutes
+                            ) AS min_check_interval_minutes,
+                            COALESCE(plan.monthly_check_units, entitlement.monthly_check_units)
+                                AS monthly_check_units,
+                            COALESCE(plan.allowed_channels, entitlement.allowed_channels)
+                                AS allowed_channels,
+                            COALESCE(plan.overage_policy, entitlement.overage_policy)
+                                AS overage_policy,
+                            entitlement.created_at,
+                            GREATEST(
+                                entitlement.updated_at,
+                                COALESCE(plan.updated_at, entitlement.updated_at)
+                            ) AS updated_at
+                        FROM billing_entitlements AS entitlement
+                        LEFT JOIN billing_plans AS plan
+                          ON plan.plan_key = entitlement.plan_key
+                        WHERE entitlement.user_id = %s
+                        LIMIT 1
+                        """,
+                        (user_id,),
+                    ).fetchone()
+                break
+            except DeadlockDetected:
+                if attempt == 2:
+                    raise
+                sleep(0.05 * (attempt + 1))
         if row is None:
             return None
         return self._row_to_user_entitlement(row)
