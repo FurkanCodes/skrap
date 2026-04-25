@@ -16,7 +16,7 @@ from .fetching import (
 from .inputs import parse_fetch_mode
 from .domain import PriceResult
 from .parsing import make_product_id, normalize_runtime_url
-from .proxies import get_proxy_retry_count, get_scrape_proxy_rotator
+from .proxies import get_scrape_proxy_rotator
 from .registry import ADAPTERS, detect_site_key
 from .service import extract_price_from_page
 
@@ -68,7 +68,10 @@ class PriceScrapeSpider(Spider):
         # HTTP timeout is in seconds; browser sessions use milliseconds.
         proxy_rotator = get_scrape_proxy_rotator()
         browser_proxy_kwargs = {"proxy_rotator": proxy_rotator} if proxy_rotator is not None else {}
-        browser_retries = get_proxy_retry_count(default=1)
+        browser_retries = 1
+        browser_timeout_ms = max(1000, self._timeout_seconds * 1000)
+        stealth_timeout_ms = max(10000, browser_timeout_ms)
+        cloudflare_timeout_ms = max(30000, browser_timeout_ms)
         _logger.info(
             "scrape_spider_sessions_configured proxy_enabled=%s browser_retries=%s timeout_seconds=%s concurrency=%s",
             proxy_rotator is not None,
@@ -114,7 +117,7 @@ class PriceScrapeSpider(Spider):
             AsyncDynamicSession(
                 headless=True,
                 disable_resources=True,
-                timeout=self._timeout_seconds * 1000,
+                timeout=browser_timeout_ms,
                 retries=browser_retries,
                 retry_delay=1,
                 **browser_proxy_kwargs,
@@ -133,7 +136,7 @@ class PriceScrapeSpider(Spider):
                 hide_canvas=True,
                 locale="tr-TR",
                 timezone_id="Europe/Istanbul",
-                timeout=max(60000, self._timeout_seconds * 1000),
+                timeout=stealth_timeout_ms,
                 retries=1,
                 retry_delay=1,
                 **browser_proxy_kwargs,
@@ -152,7 +155,7 @@ class PriceScrapeSpider(Spider):
                 hide_canvas=True,
                 locale="tr-TR",
                 timezone_id="Europe/Istanbul",
-                timeout=max(60000, self._timeout_seconds * 1000),
+                timeout=cloudflare_timeout_ms,
                 retries=browser_retries,
                 retry_delay=1,
                 **browser_proxy_kwargs,

@@ -89,9 +89,11 @@ def fetch_page_with_mode(url: str, timeout: int, mode: str) -> Selector:
         return page
 
     browser_timeout_ms = max(1000, timeout * 1000)
+    stealth_timeout_ms = max(10000, browser_timeout_ms)
+    cloudflare_timeout_ms = max(30000, browser_timeout_ms)
     base_kwargs = {
         "timeout": browser_timeout_ms,
-        "retries": 2,
+        "retries": 1,
         "retry_delay": 1,
         "headless": True,
         "disable_resources": True,
@@ -108,7 +110,7 @@ def fetch_page_with_mode(url: str, timeout: int, mode: str) -> Selector:
         )
         dynamic_kwargs = {
             **base_kwargs,
-            "retries": get_proxy_retry_count(),
+            "retries": 1,
             **proxy_kwargs,
         }
         page = DynamicFetcher.fetch(url, **dynamic_kwargs)
@@ -128,8 +130,8 @@ def fetch_page_with_mode(url: str, timeout: int, mode: str) -> Selector:
         )
         stealth_kwargs = {
             **base_kwargs,
-            "timeout": max(60000, browser_timeout_ms),
-            "retries": 1 if not solve_cloudflare else get_proxy_retry_count(default=1),
+            "timeout": cloudflare_timeout_ms if solve_cloudflare else stealth_timeout_ms,
+            "retries": 1,
             "disable_resources": not solve_cloudflare,
             "network_idle": solve_cloudflare,
             "wait": 1500 if solve_cloudflare else 1000,

@@ -5,7 +5,7 @@ from decimal import Decimal
 import pytest
 from scrapling.parser import Selector
 
-from app.scraper.adapters import AkakceAdapter, N11Adapter
+from app.scraper.adapters import AkakceAdapter, N11Adapter, TeknosaAdapter
 from app.scraper.domain import PriceCandidate
 from app.scraper.extractors.generic import extract_price_listings_from_selector
 from app.scraper.fetching import (
@@ -398,6 +398,31 @@ def test_n11_adapter_prefers_selected_offer_metadata() -> None:
     assert listings[0].source == "n11:selected-meta"
 
 
+def test_teknosa_adapter_ignores_hidden_mini_cart_zero_price() -> None:
+    page = Selector(
+        """
+        <html>
+          <body>
+            <div id="miniCartPrice" class="mini-cart-price hidden">0,00 TL</div>
+            <div class="col-12 pdp-amount-tc has-cart-price">
+              <input id="visiblePi" value="13.299,00 TL">
+              <div class="pdp-cart-price"><span class="prc prc-third">13.299 TL</span></div>
+            </div>
+            <div class="recommendation-price">17.199 TL</div>
+          </body>
+        </html>
+        """
+    )
+
+    listings = TeknosaAdapter().extract(page, "https://www.teknosa.com/example-p-115019184?shopId=teknosa")
+
+    assert listings
+    assert str(listings[0].amount) == "13299.00"
+    assert listings[0].currency == "TRY"
+    assert listings[0].raw_text == "13.299,00 TL"
+    assert all(str(listing.amount) != "0.00" for listing in listings)
+
+
 def test_parse_sites_blob() -> None:
     assert parse_sites_blob("akakce,newegg") == {"akakce", "newegg"}
     assert parse_sites_blob("all") == set()
@@ -540,7 +565,7 @@ def test_regular_stealth_fetch_avoids_cloudflare_solver(monkeypatch: pytest.Monk
 
     assert isinstance(page, Selector)
     assert captured["url"] == "https://example.com/protected"
-    assert captured["timeout"] == 60000
+    assert captured["timeout"] == 10000
     assert captured["disable_resources"] is True
     assert captured["network_idle"] is False
     assert captured["solve_cloudflare"] is False
@@ -570,6 +595,7 @@ def test_cloudflare_stealth_fetch_uses_solver(monkeypatch: pytest.MonkeyPatch) -
     assert captured["disable_resources"] is False
     assert captured["network_idle"] is True
     assert captured["solve_cloudflare"] is True
+    assert captured["timeout"] == 30000
 
 
 def test_dynamic_fetch_passes_configured_proxy_rotator(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -592,7 +618,7 @@ def test_dynamic_fetch_passes_configured_proxy_rotator(monkeypatch: pytest.Monke
     assert isinstance(page, Selector)
     assert captured["url"] == "https://www.teknosa.com/example-p-123"
     assert captured["proxy_rotator"] is proxy_rotator
-    assert captured["retries"] == 8
+    assert captured["retries"] == 1
 
 
 def test_stealth_fetch_passes_configured_proxy_rotator(monkeypatch: pytest.MonkeyPatch) -> None:

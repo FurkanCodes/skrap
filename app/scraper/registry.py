@@ -11,6 +11,7 @@ from .adapters import (
     N11Adapter,
     NeweggAdapter,
     SiteAdapter,
+    TeknosaAdapter,
 )
 
 SUPPORTED_SITES: dict[str, str] = {
@@ -264,17 +265,7 @@ ADAPTERS: dict[str, SiteAdapter] = {
             "[itemprop='price']::attr(content)",
         ),
     ),
-    "teknosa": ConfiguredSiteAdapter(
-        key="teknosa",
-        price_selectors=(
-            "[itemprop='price']::attr(content)",
-            "meta[property='product:price:amount']::attr(content)",
-            "[data-testid*='price']::text",
-            "[class*='price']::text",
-            "[id*='price']::text",
-        ),
-        default_currency="TRY",
-    ),
+    "teknosa": TeknosaAdapter(),
     "trendyol": ConfiguredSiteAdapter(
         key="trendyol",
         price_selectors=(

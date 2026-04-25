@@ -91,6 +91,53 @@ class ConfiguredSiteAdapter(SiteAdapter):
         return extract_price_listings_from_selector(page)
 
 
+class TeknosaAdapter(SiteAdapter):
+    """Teknosa parser that avoids hidden mini-cart zero totals."""
+
+    key = "teknosa"
+
+    _product_price_selectors = (
+        "#visiblePi::attr(value)",
+        ".pdp-cart-price .prc::text",
+        ".pdp-amount .prc::text",
+    )
+    _fallback_price_selectors = (
+        "[itemprop='price']::attr(content)",
+        "meta[property='product:price:amount']::attr(content)",
+        "[data-testid*='price']::text",
+        "[class*='price']::text",
+        "[id*='price']::text",
+    )
+
+    @staticmethod
+    def _positive_only(candidates: list[PriceCandidate]) -> list[PriceCandidate]:
+        return [candidate for candidate in candidates if candidate.amount > 0]
+
+    def extract(self, page: Selector, url: str) -> list[PriceCandidate]:
+        product_candidates = _extract_candidates_from_selectors(
+            page,
+            selectors=self._product_price_selectors,
+            source_prefix=self.key,
+            default_currency="TRY",
+        )
+        positive_product_candidates = self._positive_only(product_candidates)
+        if positive_product_candidates:
+            return positive_product_candidates
+
+        fallback_candidates = _extract_candidates_from_selectors(
+            page,
+            selectors=self._fallback_price_selectors,
+            source_prefix=self.key,
+            default_currency="TRY",
+        )
+        positive_fallback_candidates = self._positive_only(fallback_candidates)
+        if positive_fallback_candidates:
+            return positive_fallback_candidates
+
+        generic_candidates = extract_price_listings_from_selector(page)
+        return self._positive_only(generic_candidates)
+
+
 class AkakceAdapter(SiteAdapter):
     """Akakce-specific listing parser with seller cleanup rules."""
 
