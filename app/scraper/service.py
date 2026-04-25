@@ -16,7 +16,7 @@ from urllib.parse import urljoin
 
 from .constants import SUPPORTED_FETCH_MODES
 from .domain import PriceListing, PriceResult
-from .fetching import auto_followup_modes, detect_auto_escalation_signals, fetch_page_with_mode
+from .fetching import auto_followup_modes, detect_auto_escalation_signals, fetch_page_with_mode, initial_auto_fetch_mode
 from .inputs import parse_fetch_mode
 from .metadata import extract_product_metadata
 from .parsing import make_item_id, make_product_id, normalize_runtime_url, normalize_url
@@ -128,7 +128,7 @@ def fetch_price(
             extracted_at=extracted_at,
         )
 
-    modes_to_try = ["http"] if normalized_fetch_mode == "auto" else [normalized_fetch_mode]
+    modes_to_try = [initial_auto_fetch_mode(runtime_url)] if normalized_fetch_mode == "auto" else [normalized_fetch_mode]
     attempted_fetch_errors: list[str] = []
     fetched_any_page = False
 

@@ -2,11 +2,36 @@ from __future__ import annotations
 
 """Fetcher selection and auto-escalation heuristics."""
 
+from urllib.parse import urlparse
+
 from scrapling.fetchers import DynamicFetcher, Fetcher, StealthyFetcher
 from scrapling.parser import Selector
 
 from .constants import JAVASCRIPT_HINTS, PROTECTION_HINTS, PROTECTION_STATUS_CODES
 from .proxies import get_scrape_proxy_rotator
+from .registry import detect_site_key
+
+STEALTH_FIRST_AUTO_SITE_KEYS = frozenset(
+    {
+        "akakce",
+        "mediamarkt",
+    }
+)
+STEALTH_FIRST_AUTO_DOMAIN_SUFFIXES = (
+    "teknosa.com",
+)
+
+
+def initial_auto_fetch_mode(url: str) -> str:
+    """Choose the first transport for auto mode."""
+    if detect_site_key(url) in STEALTH_FIRST_AUTO_SITE_KEYS:
+        return "stealth"
+    host = urlparse(url).netloc.lower()
+    if host.startswith("www."):
+        host = host[4:]
+    if any(host == suffix or host.endswith(f".{suffix}") for suffix in STEALTH_FIRST_AUTO_DOMAIN_SUFFIXES):
+        return "stealth"
+    return "http"
 
 
 def fetch_page_with_mode(url: str, timeout: int, mode: str) -> Selector:

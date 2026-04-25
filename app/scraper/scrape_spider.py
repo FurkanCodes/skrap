@@ -5,7 +5,7 @@ from __future__ import annotations
 from scrapling.fetchers import AsyncDynamicSession, AsyncStealthySession, FetcherSession
 from scrapling.spiders import Request, Response, SessionManager, Spider
 
-from .fetching import auto_followup_modes, detect_auto_escalation_signals
+from .fetching import auto_followup_modes, detect_auto_escalation_signals, initial_auto_fetch_mode
 from .inputs import parse_fetch_mode
 from .domain import PriceResult
 from .parsing import make_product_id, normalize_runtime_url
@@ -102,9 +102,9 @@ class PriceScrapeSpider(Spider):
         )
 
     async def start_requests(self):
-        initial_mode = "http" if self._fetch_mode == "auto" else self._fetch_mode
-        initial_sid = MODE_TO_SESSION_ID[initial_mode]
         for url in self.start_urls:
+            initial_mode = initial_auto_fetch_mode(url) if self._fetch_mode == "auto" else self._fetch_mode
+            initial_sid = MODE_TO_SESSION_ID[initial_mode]
             yield Request(
                 url,
                 sid=initial_sid,

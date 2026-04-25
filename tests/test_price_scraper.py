@@ -8,7 +8,7 @@ from scrapling.parser import Selector
 from app.scraper.adapters import AkakceAdapter, N11Adapter
 from app.scraper.domain import PriceCandidate
 from app.scraper.extractors.generic import extract_price_listings_from_selector
-from app.scraper.fetching import auto_followup_modes, detect_auto_escalation_signals
+from app.scraper.fetching import auto_followup_modes, detect_auto_escalation_signals, initial_auto_fetch_mode
 from app.scraper.inputs import parse_fetch_mode, parse_sites_blob, parse_urls_blob
 from app.scraper.metadata import extract_product_metadata
 from app.scraper.parsing import make_item_id, normalize_runtime_url
@@ -482,6 +482,13 @@ def test_auto_escalation_signals_and_followup_order() -> None:
     assert js_signals == {"javascript"}
     assert auto_followup_modes(protection_signals) == ["stealth", "dynamic"]
     assert auto_followup_modes(js_signals) == ["dynamic", "stealth"]
+
+
+def test_auto_mode_starts_protected_sites_with_stealth() -> None:
+    assert initial_auto_fetch_mode("https://www.akakce.com/ssd/example,123.html") == "stealth"
+    assert initial_auto_fetch_mode("https://www.mediamarkt.com.tr/tr/product/example.html") == "stealth"
+    assert initial_auto_fetch_mode("https://www.teknosa.com/example-p-123") == "stealth"
+    assert initial_auto_fetch_mode("https://example.com/product") == "http"
 
 
 def test_fetch_page_with_mode_passes_configured_proxy_rotator(monkeypatch: pytest.MonkeyPatch) -> None:
