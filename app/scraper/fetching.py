@@ -2,6 +2,7 @@ from __future__ import annotations
 
 """Fetcher selection and auto-escalation heuristics."""
 
+import logging
 from urllib.parse import urlparse
 
 from scrapling.fetchers import DynamicFetcher, Fetcher, StealthyFetcher
@@ -10,6 +11,8 @@ from scrapling.parser import Selector
 from .constants import JAVASCRIPT_HINTS, PROTECTION_HINTS, PROTECTION_STATUS_CODES
 from .proxies import get_proxy_retry_count, get_scrape_proxy_rotator
 from .registry import detect_site_key
+
+_logger = logging.getLogger("scraper_api.scraper")
 
 STEALTH_FIRST_AUTO_SITE_KEYS = frozenset(
     {
@@ -24,13 +27,17 @@ STEALTH_FIRST_AUTO_DOMAIN_SUFFIXES = (
 
 def initial_auto_fetch_mode(url: str) -> str:
     """Choose the first transport for auto mode."""
-    if detect_site_key(url) in STEALTH_FIRST_AUTO_SITE_KEYS:
+    site_key = detect_site_key(url)
+    if site_key in STEALTH_FIRST_AUTO_SITE_KEYS:
+        _logger.info("scrape_auto_initial_mode mode=stealth reason=known_protected_site site=%s url=%s", site_key, url)
         return "stealth"
     host = urlparse(url).netloc.lower()
     if host.startswith("www."):
         host = host[4:]
     if any(host == suffix or host.endswith(f".{suffix}") for suffix in STEALTH_FIRST_AUTO_DOMAIN_SUFFIXES):
+        _logger.info("scrape_auto_initial_mode mode=stealth reason=known_protected_domain host=%s url=%s", host, url)
         return "stealth"
+    _logger.info("scrape_auto_initial_mode mode=http reason=default site=%s host=%s url=%s", site_key, host, url)
     return "http"
 
 
@@ -41,8 +48,9 @@ def fetch_page_with_mode(url: str, timeout: int, mode: str) -> Selector:
     - `dynamic`: Playwright-backed browser fetcher
     - `stealth`: hardened browser fetcher for protected targets
     """
+    _logger.info("scrape_fetch_start mode=%s url=%s timeout_seconds=%s", mode, url, timeout)
     if mode == "http":
-        return Fetcher.get(
+        page = Fetcher.get(
             url,
             timeout=timeout,
             retries=2,
@@ -50,6 +58,8 @@ def fetch_page_with_mode(url: str, timeout: int, mode: str) -> Selector:
             stealthy_headers=True,
             follow_redirects="safe",
         )
+        _logger.info("scrape_fetch_complete mode=http status=%s url=%s", getattr(page, "status", None), url)
+        return page
 
     browser_timeout_ms = max(1000, timeout * 1000)
     base_kwargs = {
@@ -61,10 +71,18 @@ def fetch_page_with_mode(url: str, timeout: int, mode: str) -> Selector:
     }
 
     if mode == "dynamic":
-        return DynamicFetcher.fetch(url, **base_kwargs)
+        page = DynamicFetcher.fetch(url, **base_kwargs)
+        _logger.info("scrape_fetch_complete mode=dynamic status=%s url=%s", getattr(page, "status", None), url)
+        return page
     if mode == "stealth":
         proxy_rotator = get_scrape_proxy_rotator()
         proxy_kwargs = {"proxy_rotator": proxy_rotator} if proxy_rotator is not None else {}
+        _logger.info(
+            "scrape_fetch_stealth_config proxy_enabled=%s retries=%s url=%s",
+            proxy_rotator is not None,
+            get_proxy_retry_count(),
+            url,
+        )
         stealth_kwargs = {
             **base_kwargs,
             "timeout": max(60000, browser_timeout_ms),
@@ -79,10 +97,12 @@ def fetch_page_with_mode(url: str, timeout: int, mode: str) -> Selector:
             "timezone_id": "Europe/Istanbul",
             **proxy_kwargs,
         }
-        return StealthyFetcher.fetch(
+        page = StealthyFetcher.fetch(
             url,
             **stealth_kwargs,
         )
+        _logger.info("scrape_fetch_complete mode=stealth status=%s url=%s", getattr(page, "status", None), url)
+        return page
 
     raise ValueError(f"Unsupported fetch mode '{mode}'")
 

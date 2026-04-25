@@ -2,6 +2,8 @@ from __future__ import annotations
 
 """Spider-backed batch scraping for seed URLs without link discovery."""
 
+import logging
+
 from scrapling.fetchers import AsyncDynamicSession, AsyncStealthySession, FetcherSession
 from scrapling.spiders import Request, Response, SessionManager, Spider
 
@@ -18,6 +20,7 @@ MODE_TO_SESSION_ID = {
     "dynamic": "dynamic",
     "stealth": "stealth",
 }
+_logger = logging.getLogger("scraper_api.scraper")
 
 
 def _dedupe_preserving_order(urls: list[str]) -> list[str]:
@@ -59,6 +62,13 @@ class PriceScrapeSpider(Spider):
         proxy_rotator = get_scrape_proxy_rotator()
         stealth_proxy_kwargs = {"proxy_rotator": proxy_rotator} if proxy_rotator is not None else {}
         stealth_retries = get_proxy_retry_count()
+        _logger.info(
+            "scrape_spider_sessions_configured proxy_enabled=%s stealth_retries=%s timeout_seconds=%s concurrency=%s",
+            proxy_rotator is not None,
+            stealth_retries,
+            self._timeout_seconds,
+            self.concurrent_requests,
+        )
         manager.add(
             "http",
             FetcherSession(
@@ -104,6 +114,13 @@ class PriceScrapeSpider(Spider):
         for url in self.start_urls:
             initial_mode = initial_auto_fetch_mode(url) if self._fetch_mode == "auto" else self._fetch_mode
             initial_sid = MODE_TO_SESSION_ID[initial_mode]
+            _logger.info(
+                "scrape_spider_request_start url=%s fetch_mode=%s mode=%s sid=%s",
+                url,
+                self._fetch_mode,
+                initial_mode,
+                initial_sid,
+            )
             yield Request(
                 url,
                 sid=initial_sid,
@@ -121,29 +138,84 @@ class PriceScrapeSpider(Spider):
     async def retry_blocked_request(self, request: Request, response: Response) -> Request:
         # Auto mode escalates blocked HTTP requests directly to stealth.
         if self._fetch_mode != "auto":
+            _logger.info(
+                "scrape_spider_blocked_retry url=%s mode=%s action=retry_same_mode reason=manual_fetch_mode",
+                response.url,
+                request.meta.get("current_mode", request.sid),
+            )
             return request
         current_mode = str(request.meta.get("current_mode", "http"))
         if current_mode == "http":
+            _logger.info(
+                "scrape_spider_auto_escalate url=%s from_mode=http to_mode=stealth reason=blocked_response status=%s",
+                response.url,
+                getattr(response, "status", None),
+            )
             request.sid = "stealth"
             request.meta["current_mode"] = "stealth"
+            return request
+        _logger.info(
+            "scrape_spider_blocked_retry url=%s mode=%s action=retry_same_mode status=%s",
+            response.url,
+            current_mode,
+            getattr(response, "status", None),
+        )
         return request
 
     async def parse(self, response: Response):
         url = str(response.meta.get("original_url", response.url))
         current_mode = str(response.meta.get("current_mode", "http"))
+        _logger.info(
+            "scrape_spider_response_received url=%s mode=%s status=%s",
+            url,
+            current_mode,
+            getattr(response, "status", None),
+        )
+        _logger.info("scrape_extract_start mode=%s url=%s", current_mode, url)
         result = extract_price_from_page(response, url, selected_sites=self._selected_sites)
         if result.success:
+            _logger.info(
+                "scrape_success mode=%s url=%s adapter=%s amount=%s currency=%s source=%s",
+                current_mode,
+                url,
+                result.adapter_key,
+                result.amount,
+                result.currency,
+                result.source,
+            )
             yield {"url": url, "result": result}
             return
 
+        _logger.info(
+            "scrape_extract_failed mode=%s url=%s adapter=%s error=%s",
+            current_mode,
+            url,
+            result.adapter_key,
+            result.error,
+        )
         if self._fetch_mode == "auto":
             remaining_modes = list(response.meta.get("remaining_modes", []))
             if current_mode == "http" and not remaining_modes:
-                remaining_modes = auto_followup_modes(detect_auto_escalation_signals(response))
+                signals = detect_auto_escalation_signals(response)
+                remaining_modes = auto_followup_modes(signals)
+                if signals:
+                    _logger.info(
+                        "scrape_spider_auto_escalate url=%s from_mode=http to_modes=%s signals=%s",
+                        url,
+                        ",".join(remaining_modes) or "<none>",
+                        ",".join(sorted(signals)),
+                    )
             if remaining_modes:
                 next_mode = remaining_modes.pop(0)
                 next_sid = MODE_TO_SESSION_ID[next_mode]
                 if current_mode != next_mode:
+                    _logger.info(
+                        "scrape_spider_followup_request url=%s from_mode=%s to_mode=%s remaining_modes=%s",
+                        url,
+                        current_mode,
+                        next_mode,
+                        ",".join(remaining_modes),
+                    )
                     yield Request(
                         url,
                         sid=next_sid,
@@ -157,6 +229,7 @@ class PriceScrapeSpider(Spider):
                     )
                     return
 
+        _logger.info("scrape_failed url=%s mode=%s error=%s", url, current_mode, result.error)
         yield {"url": url, "result": result}
 
 

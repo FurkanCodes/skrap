@@ -11,6 +11,7 @@ This module is the application-facing entry point for scraping. It coordinates:
 
 from collections.abc import Iterable
 from datetime import UTC, datetime
+import logging
 from typing import Any
 from urllib.parse import urljoin
 
@@ -23,6 +24,7 @@ from .parsing import make_item_id, make_product_id, normalize_runtime_url, norma
 from .registry import ADAPTERS, detect_site_key, list_supported_sites
 
 REQUIRED_RESULT_FIELDS: tuple[str, ...] = ("amount", "product_name", "image_url")
+_logger = logging.getLogger("scraper_api.scraper")
 
 
 def _utc_now_iso() -> str:
@@ -131,18 +133,37 @@ def fetch_price(
     modes_to_try = [initial_auto_fetch_mode(runtime_url)] if normalized_fetch_mode == "auto" else [normalized_fetch_mode]
     attempted_fetch_errors: list[str] = []
     fetched_any_page = False
+    _logger.info(
+        "scrape_start url=%s fetch_mode=%s initial_modes=%s site=%s adapter=%s",
+        runtime_url,
+        normalized_fetch_mode,
+        ",".join(modes_to_try),
+        site_key,
+        adapter_key,
+    )
 
     for mode in modes_to_try:
         try:
             page = fetch_page_with_mode(runtime_url, timeout=timeout, mode=mode)
         except Exception as exc:
             attempted_fetch_errors.append(f"{mode}: {exc}")
+            _logger.warning(
+                "scrape_fetch_error mode=%s url=%s error=%s",
+                mode,
+                runtime_url,
+                exc,
+            )
             if normalized_fetch_mode == "auto" and mode == "http":
                 # If plain HTTP fails, queue browser modes as next attempts.
                 modes_to_try.extend(["dynamic", "stealth"])
+                _logger.info(
+                    "scrape_auto_escalate url=%s from_mode=http to_modes=dynamic,stealth reason=fetch_error",
+                    runtime_url,
+                )
             continue
 
         fetched_any_page = True
+        _logger.info("scrape_extract_start mode=%s url=%s adapter=%s", mode, runtime_url, adapter_key)
         extracted = extract_price_from_page(
             page=page,
             url=runtime_url,
@@ -153,16 +174,40 @@ def fetch_price(
             extracted_at=extracted_at,
         )
         if extracted.success:
+            _logger.info(
+                "scrape_success mode=%s url=%s adapter=%s amount=%s currency=%s source=%s",
+                mode,
+                runtime_url,
+                extracted.adapter_key,
+                extracted.amount,
+                extracted.currency,
+                extracted.source,
+            )
             return extracted
 
+        _logger.info(
+            "scrape_extract_failed mode=%s url=%s adapter=%s error=%s",
+            mode,
+            runtime_url,
+            extracted.adapter_key,
+            extracted.error,
+        )
         if normalized_fetch_mode == "auto" and mode == "http":
             # HTTP succeeded but extraction failed; inspect signals for escalation.
             signals = detect_auto_escalation_signals(page)
             for followup_mode in auto_followup_modes(signals):
                 if followup_mode not in modes_to_try:
                     modes_to_try.append(followup_mode)
+            if signals:
+                _logger.info(
+                    "scrape_auto_escalate url=%s from_mode=http to_modes=%s signals=%s",
+                    runtime_url,
+                    ",".join(auto_followup_modes(signals)) or "<none>",
+                    ",".join(sorted(signals)),
+                )
 
     if fetched_any_page:
+        _logger.info("scrape_failed url=%s error=price_not_found attempted_modes=%s", runtime_url, ",".join(modes_to_try))
         return PriceResult(
             url=runtime_url,
             success=False,
@@ -174,6 +219,7 @@ def fetch_price(
         )
 
     error_detail = "; ".join(attempted_fetch_errors) if attempted_fetch_errors else "unknown"
+    _logger.info("scrape_failed url=%s error=fetch_failed attempted_modes=%s detail=%s", runtime_url, ",".join(modes_to_try), error_detail)
     return PriceResult(
         url=runtime_url,
         success=False,
