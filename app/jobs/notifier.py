@@ -24,6 +24,7 @@ def _configure_logging() -> None:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
+    logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
 class LoggingNotificationSender:
@@ -103,7 +104,7 @@ class TelegramNotificationSender:
                 success=False,
                 provider_name="telegram",
                 provider_message_id=None,
-                error=f"telegram_network_error: {exc}",
+                error=f"telegram_network_error: {_redact_token(str(exc), self._bot_token)}",
                 retryable=True,
             )
 
@@ -288,6 +289,13 @@ def _extract_telegram_retry_after_seconds(payload: dict, description: str) -> in
     except (TypeError, ValueError):
         return None
     return parsed if parsed > 0 else None
+
+
+def _redact_token(value: str, token: str) -> str:
+    cleaned_token = token.strip()
+    if not cleaned_token:
+        return value
+    return value.replace(cleaned_token, "<redacted>")
 
 
 def _resolve_lease_owner() -> str:

@@ -18,6 +18,7 @@ def test_production_rejects_http_jwks_url(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setenv("ENVIRONMENT", "production")
     monkeypatch.setenv("AUTH_REQUIRED", "true")
     monkeypatch.setenv("CORS_ALLOW_ORIGINS", "https://app.example.com")
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "")
     monkeypatch.setenv("BETTER_AUTH_JWKS_URL", "http://auth.example.com/api/auth/jwks")
     monkeypatch.setenv("BETTER_AUTH_JWT_ISSUER", "https://auth.example.com")
     monkeypatch.setenv("BETTER_AUTH_JWT_AUDIENCE", "https://api.example.com")
@@ -30,6 +31,7 @@ def test_production_rejects_http_issuer(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setenv("ENVIRONMENT", "production")
     monkeypatch.setenv("AUTH_REQUIRED", "true")
     monkeypatch.setenv("CORS_ALLOW_ORIGINS", "https://app.example.com")
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "")
     monkeypatch.setenv("BETTER_AUTH_JWKS_URL", "https://auth.example.com/api/auth/jwks")
     monkeypatch.setenv("BETTER_AUTH_JWT_ISSUER", "http://auth.example.com")
     monkeypatch.setenv("BETTER_AUTH_JWT_AUDIENCE", "https://api.example.com")
@@ -107,6 +109,7 @@ def test_production_rejects_wildcard_cors_with_credentials(
     monkeypatch.setenv("ENVIRONMENT", "production")
     monkeypatch.setenv("AUTH_REQUIRED", "false")
     monkeypatch.setenv("CORS_ALLOW_ORIGINS", "*")
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "")
 
     with pytest.raises(RuntimeError, match="CORS_ALLOW_ORIGINS must be explicit"):
         get_settings()
@@ -118,6 +121,7 @@ def test_production_enables_rate_limit_by_default(
     monkeypatch.setenv("ENVIRONMENT", "production")
     monkeypatch.setenv("AUTH_REQUIRED", "false")
     monkeypatch.setenv("CORS_ALLOW_ORIGINS", "https://app.example.com")
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "")
     monkeypatch.setenv("SCHEDULER_QUEUE_REDIS_URL", "redis://redis:6379/0")
     monkeypatch.setenv("SERVER_FETCH_RESOLVE_DNS", "")
 
@@ -127,3 +131,16 @@ def test_production_enables_rate_limit_by_default(
     assert settings.rate_limit_redis_url == "redis://redis:6379/0"
     assert settings.rate_limit_fail_open is False
     assert settings.server_fetch_resolve_dns is True
+
+
+def test_production_requires_telegram_webhook_secret_when_bot_token_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    monkeypatch.setenv("AUTH_REQUIRED", "false")
+    monkeypatch.setenv("CORS_ALLOW_ORIGINS", "https://app.example.com")
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "secret-token-123")
+    monkeypatch.setenv("TELEGRAM_WEBHOOK_SECRET", "")
+
+    with pytest.raises(RuntimeError, match="TELEGRAM_WEBHOOK_SECRET is required"):
+        get_settings()

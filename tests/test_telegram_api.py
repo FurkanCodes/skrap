@@ -8,6 +8,7 @@ from app.api.dependencies import (
     get_app_settings,
     get_current_principal,
     get_telegram_integration_service,
+    get_user_service,
 )
 from app.application.telegram_integration_service import (
     TelegramConnectStartOutput,
@@ -81,6 +82,16 @@ class _FailingTelegramService:
         raise TelegramIntegrationError("TELEGRAM_BOT_TOKEN is invalid")
 
 
+@dataclass(frozen=True)
+class _FakeUser:
+    user_id: str
+
+
+class _FakeUserService:
+    def provision_from_principal(self, _principal: AuthPrincipal) -> _FakeUser:
+        return _FakeUser(user_id="usr_123")
+
+
 def _build_client(service: object, *, webhook_secret: str | None = "") -> TestClient:
     app.dependency_overrides[get_telegram_integration_service] = lambda: service
     app.dependency_overrides[get_current_principal] = lambda: AuthPrincipal(
@@ -90,6 +101,7 @@ def _build_client(service: object, *, webhook_secret: str | None = "") -> TestCl
         issuer="test",
         audience="test",
     )
+    app.dependency_overrides[get_user_service] = lambda: _FakeUserService()
     if webhook_secret is not None:
         settings = replace(get_settings(), telegram_webhook_secret=webhook_secret)
         app.dependency_overrides[get_app_settings] = lambda: settings

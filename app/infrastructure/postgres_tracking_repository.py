@@ -1862,6 +1862,7 @@ class PostgresTrackingRepository:
                     telegram_username = %s
                 WHERE state = %s
                   AND user_id = %s
+                  AND status = 'pending'
                 RETURNING *
                 """,
                 (

@@ -690,6 +690,14 @@ Responsibilities:
 - acknowledge stream entries on success/stale skip,
 - reclaim stale pending jobs via idle-time auto-claim.
 
+Recovery notes:
+- If Redis loses the stream or consumer group while workers stay up, the worker recreates the group on `NOGROUP` and retries once.
+- Manual unblock command:
+  `redis-cli XGROUP CREATE tracking:scheduler:jobs tracking-scheduler-workers 0-0 MKSTREAM`
+- Redis host warning fix:
+  `sysctl vm.overcommit_memory=1`
+  and persist `vm.overcommit_memory = 1` in `/etc/sysctl.conf`.
+
 ## Notifier (`python -m app.jobs.notifier`)
 
 Responsibilities:
@@ -698,8 +706,9 @@ Responsibilities:
 - finalize as `sent`, retry (`failed` + backoff), or `dead`.
 - apply Telegram send pacing and honor Telegram `retry_after` backpressure hints.
 
-Current sender:
-- `LoggingNotificationSender` only (writes payload to logs).
+Current senders:
+- `TelegramNotificationSender` for connected Telegram chats.
+- `LoggingNotificationSender` fallback for non-Telegram notification events.
 
 ## Data Model (Tracking Domain)
 

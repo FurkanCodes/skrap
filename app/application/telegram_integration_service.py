@@ -10,6 +10,9 @@ import logging
 from app.tracking import TelegramConnectSession, TrackingRepository
 
 _logger = logging.getLogger("scraper_api.telegram")
+_CONNECT_CONFIRMATION_TEXT = (
+    "Telegram connected securely. You will receive Dealvinci price alerts in this chat."
+)
 
 
 class TelegramIntegrationError(RuntimeError):
@@ -142,7 +145,8 @@ class TelegramIntegrationService:
         try:
             response = httpx.post(api_url, json=payload, timeout=10)
         except Exception as exc:
-            raise TelegramIntegrationError(f"telegram_set_webhook_network_error: {exc}") from exc
+            error = _redact_token(str(exc), self._bot_token)
+            raise TelegramIntegrationError(f"telegram_set_webhook_network_error: {error}") from exc
 
         body = _json_dict(response.text)
         ok = bool(body.get("ok", False))
@@ -168,7 +172,7 @@ class TelegramIntegrationService:
             return False
 
         session = self._expire_if_needed(session)
-        if session.status == "expired":
+        if session.status != "pending":
             return False
 
         connected_at = _to_iso(_utcnow())
@@ -188,6 +192,7 @@ class TelegramIntegrationService:
             chat_id=start_payload.chat_id,
             updated_at=connected_at,
         )
+        self._send_connect_confirmation(chat_id=start_payload.chat_id)
         return True
 
     def _expire_if_needed(self, session: TelegramConnectSession) -> TelegramConnectSession:
@@ -301,7 +306,8 @@ class TelegramIntegrationService:
                 timeout=10,
             )
         except Exception as exc:
-            raise TelegramIntegrationError(f"telegram_get_me_network_error: {exc}") from exc
+            error = _redact_token(str(exc), self._bot_token)
+            raise TelegramIntegrationError(f"telegram_get_me_network_error: {error}") from exc
 
         body = _json_dict(response.text)
         result = body.get("result") if isinstance(body, dict) else None
@@ -324,6 +330,38 @@ class TelegramIntegrationService:
 
         self._resolved_bot_username = actual_username
         return actual_username
+
+    def _send_connect_confirmation(self, *, chat_id: str) -> None:
+        if not self._bot_token:
+            return
+        api_url = f"https://api.telegram.org/bot{self._bot_token}/sendMessage"
+        try:
+            response = httpx.post(
+                api_url,
+                json={
+                    "chat_id": chat_id,
+                    "text": _CONNECT_CONFIRMATION_TEXT,
+                    "disable_web_page_preview": True,
+                },
+                timeout=10,
+            )
+        except Exception as exc:
+            _logger.warning(
+                "telegram_connect_confirmation_failed error=%s",
+                _redact_token(str(exc), self._bot_token),
+            )
+            return
+
+        body = _json_dict(response.text)
+        if response.is_success and bool(body.get("ok", False)):
+            return
+
+        description = str(body.get("description", "telegram_send_failed")).strip()
+        _logger.warning(
+            "telegram_connect_confirmation_failed status=%s description=%s",
+            response.status_code,
+            description,
+        )
 
 
 @dataclass(frozen=True)
@@ -384,3 +422,10 @@ def _utcnow() -> datetime:
 
 def _to_iso(value: datetime) -> str:
     return value.isoformat().replace("+00:00", "Z")
+
+
+def _redact_token(value: str, token: str) -> str:
+    cleaned_token = token.strip()
+    if not cleaned_token:
+        return value
+    return value.replace(cleaned_token, "<redacted>")

@@ -405,6 +405,14 @@ def get_settings() -> Settings:
         raise RuntimeError("TELEGRAM_SENDER_MIN_INTERVAL_MS must be >= 0")
     if settings.telegram_connect_ttl_minutes < 1 or settings.telegram_connect_ttl_minutes > 120:
         raise RuntimeError("TELEGRAM_CONNECT_TTL_MINUTES must be between 1 and 120")
+    if (
+        settings.environment == "production"
+        and settings.telegram_bot_token
+        and not settings.telegram_webhook_secret
+    ):
+        raise RuntimeError(
+            "TELEGRAM_WEBHOOK_SECRET is required in production when TELEGRAM_BOT_TOKEN is configured"
+        )
     if settings.auth_required:
         if not settings.better_auth_jwks_url:
             raise RuntimeError("BETTER_AUTH_JWKS_URL is required when AUTH_REQUIRED=true")

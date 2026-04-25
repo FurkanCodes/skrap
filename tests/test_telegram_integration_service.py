@@ -37,7 +37,10 @@ class _FakeRepository:
         session = self.sessions.get(state)
         if session is None:
             return None
+        if session.status != "pending":
+            return None
         updated = TelegramConnectSession(
+            user_id=session.user_id,
             state=session.state,
             status="connected",
             created_at=session.created_at,
@@ -55,6 +58,7 @@ class _FakeRepository:
         if session is None:
             return None
         updated = TelegramConnectSession(
+            user_id=session.user_id,
             state=session.state,
             status="expired",
             created_at=session.created_at,
@@ -170,7 +174,114 @@ def test_start_connect_rejects_invalid_bot_token(monkeypatch: pytest.MonkeyPatch
         assert str(exc) == "TELEGRAM_BOT_TOKEN is invalid"
 
 
-def test_process_webhook_update_connects_session_and_sets_active_chat() -> None:
+def test_process_webhook_update_connects_session_sets_active_chat_and_sends_confirmation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = "state_123"
+    sent_payloads: list[dict] = []
+    repo = _FakeRepository(
+        sessions={
+            state: TelegramConnectSession(
+                state=state,
+                status="pending",
+                created_at=_now_iso(),
+                expires_at=(datetime.now(tz=UTC) + timedelta(minutes=5)).isoformat().replace("+00:00", "Z"),
+                connected_at=None,
+                telegram_user_id=None,
+                telegram_chat_id=None,
+                telegram_username=None,
+            )
+        }
+    )
+    service = TelegramIntegrationService(
+        repository=repo,
+        bot_token="secret-token-123",
+        bot_username="mypricebot",
+        connect_ttl_minutes=15,
+    )
+
+    def _fake_post(url, json, timeout):  # noqa: ANN001
+        assert url == "https://api.telegram.org/botsecret-token-123/sendMessage"
+        assert timeout == 10
+        sent_payloads.append(json)
+        return httpx.Response(200, json={"ok": True, "result": {"message_id": 1}})
+
+    monkeypatch.setattr("app.application.telegram_integration_service.httpx.post", _fake_post)
+
+    processed = service.process_webhook_update(
+        {
+            "message": {
+                "text": "/start state_123",
+                "from": {"id": 999, "username": "tester"},
+                "chat": {"id": 12345},
+            }
+        }
+    )
+
+    assert processed is True
+    assert repo.sessions[state].status == "connected"
+    assert repo.sessions[state].telegram_chat_id == "12345"
+    assert repo.active_chat_id == "12345"
+    assert sent_payloads == [
+        {
+            "chat_id": "12345",
+            "text": "Telegram connected securely. You will receive Dealvinci price alerts in this chat.",
+            "disable_web_page_preview": True,
+        }
+    ]
+
+
+def test_process_webhook_update_does_not_resend_confirmation_for_duplicate_start(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = "state_123"
+    sent_payloads: list[dict] = []
+    repo = _FakeRepository(
+        sessions={
+            state: TelegramConnectSession(
+                state=state,
+                status="pending",
+                created_at=_now_iso(),
+                expires_at=(datetime.now(tz=UTC) + timedelta(minutes=5)).isoformat().replace("+00:00", "Z"),
+                connected_at=None,
+                telegram_user_id=None,
+                telegram_chat_id=None,
+                telegram_username=None,
+            )
+        }
+    )
+    service = TelegramIntegrationService(
+        repository=repo,
+        bot_token="secret-token-123",
+        bot_username="mypricebot",
+        connect_ttl_minutes=15,
+    )
+
+    def _fake_post(url, json, timeout):  # noqa: ANN001, ARG001
+        sent_payloads.append(json)
+        return httpx.Response(200, json={"ok": True, "result": {"message_id": 1}})
+
+    update = {
+        "message": {
+            "text": "/start state_123",
+            "from": {"id": 999, "username": "tester"},
+            "chat": {"id": 12345},
+        }
+    }
+    monkeypatch.setattr("app.application.telegram_integration_service.httpx.post", _fake_post)
+
+    first_processed = service.process_webhook_update(update)
+    second_processed = service.process_webhook_update(update)
+
+    assert first_processed is True
+    assert second_processed is False
+    assert len(sent_payloads) == 1
+
+
+def test_process_webhook_update_keeps_connection_when_confirmation_send_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     state = "state_123"
     repo = _FakeRepository(
         sessions={
@@ -188,25 +299,33 @@ def test_process_webhook_update_connects_session_and_sets_active_chat() -> None:
     )
     service = TelegramIntegrationService(
         repository=repo,
-        bot_token="token",
+        bot_token="secret-token-123",
         bot_username="mypricebot",
         connect_ttl_minutes=15,
     )
 
-    processed = service.process_webhook_update(
-        {
-            "message": {
-                "text": "/start state_123",
-                "from": {"id": 999, "username": "tester"},
-                "chat": {"id": 12345},
+    def _fake_post(url, json, timeout):  # noqa: ANN001, ARG001
+        raise RuntimeError("request failed for secret-token-123")
+
+    monkeypatch.setattr("app.application.telegram_integration_service.httpx.post", _fake_post)
+
+    with caplog.at_level("WARNING", logger="scraper_api.telegram"):
+        processed = service.process_webhook_update(
+            {
+                "message": {
+                    "text": "/start state_123",
+                    "from": {"id": 999, "username": "tester"},
+                    "chat": {"id": 12345},
+                }
             }
-        }
-    )
+        )
 
     assert processed is True
     assert repo.sessions[state].status == "connected"
-    assert repo.sessions[state].telegram_chat_id == "12345"
     assert repo.active_chat_id == "12345"
+    assert "telegram_connect_confirmation_failed" in caplog.text
+    assert "secret-token-123" not in caplog.text
+    assert "<redacted>" in caplog.text
 
 
 def test_process_webhook_update_returns_false_for_expired_state() -> None:

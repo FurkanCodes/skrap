@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 try:
@@ -17,6 +18,8 @@ from app.application.tracking_dispatch_queue import (
     TrackingDispatchJob,
     TrackingDispatchQueue,
 )
+
+_logger = logging.getLogger("scraper_api.scheduler.queue")
 
 
 class RedisTrackingDispatchQueue(TrackingDispatchQueue):
@@ -76,6 +79,32 @@ class RedisTrackingDispatchQueue(TrackingDispatchQueue):
         if max_items < 1:
             return []
         block_ms = max(0, int(block_seconds * 1000))
+        try:
+            return self._claim_once(
+                consumer_name=consumer_name,
+                max_items=max_items,
+                block_ms=block_ms,
+                pending_idle_seconds=pending_idle_seconds,
+            )
+        except ResponseError as exc:
+            if not _is_nogroup_error(exc):
+                raise
+            self._recreate_missing_consumer_group()
+            return self._claim_once(
+                consumer_name=consumer_name,
+                max_items=max_items,
+                block_ms=block_ms,
+                pending_idle_seconds=pending_idle_seconds,
+            )
+
+    def _claim_once(
+        self,
+        *,
+        consumer_name: str,
+        max_items: int,
+        block_ms: int,
+        pending_idle_seconds: int,
+    ) -> list[ClaimedTrackingDispatchJob]:
         fresh = self._redis.xreadgroup(
             groupname=self._consumer_group,
             consumername=consumer_name,
@@ -86,7 +115,6 @@ class RedisTrackingDispatchQueue(TrackingDispatchQueue):
         claimed = self._decode_entries(fresh)
         if claimed:
             return claimed
-
         reclaimed = self._redis.xautoclaim(
             name=self._stream_key,
             groupname=self._consumer_group,
@@ -120,6 +148,14 @@ class RedisTrackingDispatchQueue(TrackingDispatchQueue):
             if "BUSYGROUP" in message:
                 return
             raise
+
+    def _recreate_missing_consumer_group(self) -> None:
+        self._ensure_consumer_group()
+        _logger.warning(
+            "scheduler_queue_group_missing_recreated stream_key=%s consumer_group=%s",
+            self._stream_key,
+            self._consumer_group,
+        )
 
     def _decode_entries(self, rows: Any) -> list[ClaimedTrackingDispatchJob]:
         parsed: list[ClaimedTrackingDispatchJob] = []
@@ -165,3 +201,7 @@ def _safe_str(value: Any) -> str:
     if value is None:
         return ""
     return str(value).strip()
+
+
+def _is_nogroup_error(exc: Exception) -> bool:
+    return "NOGROUP" in str(exc).upper()

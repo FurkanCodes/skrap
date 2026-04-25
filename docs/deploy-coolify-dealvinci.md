@@ -338,7 +338,7 @@ services:
       PORT: "8000"
     depends_on:
       redis:
-        condition: service_started
+        condition: service_healthy
     expose:
       - "8000"
     restart: unless-stopped
@@ -349,7 +349,7 @@ services:
     command: python -m app.jobs.scheduler_dispatcher
     depends_on:
       redis:
-        condition: service_started
+        condition: service_healthy
     restart: unless-stopped
 
   scheduler_worker:
@@ -358,7 +358,7 @@ services:
     command: python -m app.jobs.scheduler_worker
     depends_on:
       redis:
-        condition: service_started
+        condition: service_healthy
     restart: unless-stopped
 
   notifier:
@@ -367,12 +367,17 @@ services:
     command: python -m app.jobs.notifier
     depends_on:
       redis:
-        condition: service_started
+        condition: service_healthy
     restart: unless-stopped
 
   redis:
     image: redis:7-alpine
     command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy noeviction
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
     volumes:
       - redis-data:/data
     restart: unless-stopped
@@ -790,8 +795,11 @@ If Redis is broken:
 
 1. Open backend stack logs.
 2. Check `redis` container.
-3. Restart only Redis if needed.
-4. Then restart API and workers.
+3. If scheduler worker logs show `NOGROUP`, unblock Redis:
+   `redis-cli XGROUP CREATE tracking:scheduler:jobs tracking-scheduler-workers 0-0 MKSTREAM`
+4. If Redis warns about memory overcommit, run `sysctl vm.overcommit_memory=1` on the host and persist `vm.overcommit_memory = 1` in `/etc/sysctl.conf`.
+5. Restart only Redis if needed.
+6. Then restart API and workers.
 
 ## 17. Logs To Check
 
