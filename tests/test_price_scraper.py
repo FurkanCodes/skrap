@@ -579,6 +579,7 @@ def test_http_fetch_does_not_use_configured_proxy_rotator(monkeypatch: pytest.Mo
 
 def test_regular_stealth_fetch_avoids_cloudflare_solver(monkeypatch: pytest.MonkeyPatch) -> None:
     from app.scraper import fetching
+    from app.scraper.resource_blocking import BROWSER_BLOCKED_DOMAINS
 
     captured: dict[str, object] = {}
 
@@ -598,6 +599,11 @@ def test_regular_stealth_fetch_avoids_cloudflare_solver(monkeypatch: pytest.Monk
     assert captured["disable_resources"] is True
     assert captured["network_idle"] is False
     assert captured["solve_cloudflare"] is False
+    assert captured["block_ads"] is True
+    assert isinstance(captured["blocked_domains"], set)
+    assert "googletagmanager.com" in captured["blocked_domains"]
+    assert "vatanbilgisayar.com" not in captured["blocked_domains"]
+    assert captured["blocked_domains"].issuperset(BROWSER_BLOCKED_DOMAINS)
     assert captured["retries"] == 1
     assert captured["hide_canvas"] is True
     assert captured["locale"] == "tr-TR"
@@ -624,6 +630,8 @@ def test_cloudflare_stealth_fetch_uses_solver(monkeypatch: pytest.MonkeyPatch) -
     assert captured["disable_resources"] is False
     assert captured["network_idle"] is True
     assert captured["solve_cloudflare"] is True
+    assert captured["block_ads"] is True
+    assert "googletagmanager.com" in captured["blocked_domains"]
     assert captured["timeout"] == 30000
 
 
@@ -647,6 +655,8 @@ def test_dynamic_fetch_passes_configured_proxy_rotator(monkeypatch: pytest.Monke
     assert isinstance(page, Selector)
     assert captured["url"] == "https://www.teknosa.com/example-p-123"
     assert captured["proxy_rotator"] is proxy_rotator
+    assert captured["block_ads"] is True
+    assert "doubleclick.net" in captured["blocked_domains"]
     assert captured["retries"] == 1
 
 

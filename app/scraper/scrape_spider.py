@@ -18,6 +18,7 @@ from .domain import PriceResult
 from .parsing import make_product_id, normalize_runtime_url
 from .proxies import get_scrape_proxy_rotator
 from .registry import ADAPTERS, detect_site_key
+from .resource_blocking import browser_resource_blocking_kwargs
 from .service import extract_price_from_page
 
 MODE_TO_SESSION_ID = {
@@ -68,6 +69,7 @@ class PriceScrapeSpider(Spider):
         # HTTP timeout is in seconds; browser sessions use milliseconds.
         proxy_rotator = get_scrape_proxy_rotator()
         browser_proxy_kwargs = {"proxy_rotator": proxy_rotator} if proxy_rotator is not None else {}
+        browser_blocking_kwargs = browser_resource_blocking_kwargs()
         browser_retries = 1
         browser_timeout_ms = max(1000, self._timeout_seconds * 1000)
         stealth_timeout_ms = max(10000, browser_timeout_ms)
@@ -117,6 +119,7 @@ class PriceScrapeSpider(Spider):
             AsyncDynamicSession(
                 headless=True,
                 disable_resources=True,
+                **browser_blocking_kwargs,
                 timeout=browser_timeout_ms,
                 retries=browser_retries,
                 retry_delay=1,
@@ -133,6 +136,7 @@ class PriceScrapeSpider(Spider):
                 wait=1000,
                 solve_cloudflare=False,
                 block_webrtc=True,
+                **browser_blocking_kwargs,
                 hide_canvas=True,
                 locale="tr-TR",
                 timezone_id="Europe/Istanbul",
@@ -152,6 +156,7 @@ class PriceScrapeSpider(Spider):
                 wait=1500,
                 solve_cloudflare=True,
                 block_webrtc=True,
+                **browser_blocking_kwargs,
                 hide_canvas=True,
                 locale="tr-TR",
                 timezone_id="Europe/Istanbul",

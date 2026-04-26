@@ -9,6 +9,7 @@ from scrapling.parser import Selector
 
 from .constants import CLOUDFLARE_HINTS, JAVASCRIPT_HINTS, PROTECTION_HINTS, PROTECTION_STATUS_CODES
 from .proxies import get_proxy_retry_count, get_scrape_proxy_rotator
+from .resource_blocking import browser_resource_blocking_kwargs
 
 _logger = logging.getLogger("scraper_api.scraper")
 
@@ -97,6 +98,7 @@ def fetch_page_with_mode(url: str, timeout: int, mode: str) -> Selector:
         "retry_delay": 1,
         "headless": True,
         "disable_resources": True,
+        **browser_resource_blocking_kwargs(),
     }
 
     if internal_mode == "dynamic_proxy":
