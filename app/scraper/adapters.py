@@ -169,6 +169,20 @@ class AkakceAdapter(SiteAdapter):
                 return fallback
         return None
 
+    @staticmethod
+    def _select_price_node(price_nodes: list[Selector]) -> Selector:
+        for price_node in price_nodes:
+            class_name = str(getattr(price_node, "attrib", {}).get("class", ""))
+            if "cmpgn_pt_v8" in class_name:
+                return price_node
+
+        for price_node in price_nodes:
+            class_name = str(getattr(price_node, "attrib", {}).get("class", ""))
+            if "orig_pt_v8" not in class_name:
+                return price_node
+
+        return price_nodes[0]
+
     def extract(self, page: Selector, url: str) -> list[PriceCandidate]:
         candidates: list[PriceCandidate] = []
         for li in page.css("#PL > li"):
@@ -176,7 +190,8 @@ class AkakceAdapter(SiteAdapter):
             if not price_nodes:
                 continue
 
-            price_text = self._normalize_price_text(str(price_nodes[0].get_all_text(separator=" ", strip=True)))
+            price_node = self._select_price_node(list(price_nodes))
+            price_text = self._normalize_price_text(str(price_node.get_all_text(separator=" ", strip=True)))
             candidate = scan_price_in_text(price_text, source="akakce:dom", require_currency=False)
             if not candidate:
                 continue

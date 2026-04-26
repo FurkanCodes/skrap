@@ -298,6 +298,35 @@ def test_akakce_adapter_parses_decimals_and_seller_fallbacks() -> None:
     assert listings[2].seller == "MediaMarkt"
 
 
+def test_akakce_adapter_prefers_campaign_price_over_original_price() -> None:
+    page = Selector(
+        """
+        <html>
+          <body>
+            <ul id="PL">
+              <li>
+                <a href="#/p1?s=1">
+                  <span class="pb_v8">
+                    <span class="pt_v8 orig_pt_v8">35.158<i>,30 TL</i></span>
+                    <span class="pt_v8 cmpgn_pt_v8">34.158<i>,30 TL</i></span>
+                  </span>
+                  <span class="v_v8">Satıcı: <img alt="Pttavm" src="//cdn.example/p.svg">/Dfsbilgisayar</span>
+                </a>
+              </li>
+            </ul>
+          </body>
+        </html>
+        """
+    )
+
+    listings = AkakceAdapter().extract(page, "https://www.akakce.com/example,123.html")
+
+    assert len(listings) == 1
+    assert str(listings[0].amount) == "34158.30"
+    assert listings[0].raw_text == "34.158,30 TL"
+    assert listings[0].listing_url == "#/p1?s=1"
+
+
 def test_n11_adapter_prefers_requested_seller_from_initial_state() -> None:
     page = Selector(
         """
