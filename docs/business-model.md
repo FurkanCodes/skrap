@@ -57,7 +57,7 @@ That means users can trade breadth for speed:
 
 - Price: `$0`
 - Active trackers: `5`
-- Monthly credits: `500`
+- Monthly credits: `100`
 - Fastest interval: `720 minutes`
 - Channels: `Telegram`
 - Overage policy: `Block`
@@ -203,7 +203,7 @@ This is the direct mapping to existing entitlement fields:
 
 | Plan | `plan_key` | `max_active_trackers` | `min_check_interval_minutes` | `monthly_check_units` | `allowed_channels` | `overage_policy` |
 |---|---|---:|---:|---:|---|---|
-| Free | `free` | 5 | 720 | 500 | `telegram` | `block` |
+| Free | `free` | 5 | 720 | 100 | `telegram` | `block` |
 | Plus | `plus` | 25 | 120 | 10000 | `telegram` | `block` |
 | Pro | `pro` | 100 | 30 | 50000 | `telegram` | `block` |
 

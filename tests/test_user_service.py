@@ -75,7 +75,7 @@ class _FakeUserRepository:
             plan_key="free",
             max_active_trackers=5,
             min_check_interval_minutes=720,
-            monthly_check_units=500,
+            monthly_check_units=100,
             allowed_channels="telegram",
             overage_policy="block",
             created_at=now,
@@ -111,9 +111,9 @@ def test_user_service_get_me_includes_credit_usage() -> None:
 
     output = service.get_me(principal)
 
-    assert output.entitlement.monthly_check_units == 500
+    assert output.entitlement.monthly_check_units == 100
     assert output.usage.consumed_check_units == 42
-    assert output.usage.remaining_check_units == 458
+    assert output.usage.remaining_check_units == 58
     assert output.usage.user_id == output.user.user_id
     assert output.usage.updated_at
 
@@ -135,7 +135,7 @@ def test_user_service_get_me_reuses_existing_user_without_upsert() -> None:
         plan_key="free",
         max_active_trackers=5,
         min_check_interval_minutes=720,
-        monthly_check_units=500,
+        monthly_check_units=100,
         allowed_channels="telegram",
         overage_policy="block",
         created_at=now,

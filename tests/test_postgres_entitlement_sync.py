@@ -82,7 +82,7 @@ def test_initialize_registers_plan_entitlement_sync_triggers(monkeypatch) -> Non
 
 def test_launch_plan_definitions_match_product_limits() -> None:
     assert repository_module._PLAN_DEFINITIONS == (
-        ("free", "Free", 5, 720, 500, "telegram", "block"),
+        ("free", "Free", 5, 720, 100, "telegram", "block"),
         ("plus", "Plus", 25, 120, 10_000, "telegram", "block"),
         ("pro", "Pro", 100, 30, 50_000, "telegram", "block"),
     )

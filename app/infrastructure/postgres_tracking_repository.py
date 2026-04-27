@@ -306,7 +306,7 @@ _LEGACY_TABLE_RENAMES: tuple[tuple[str, str], ...] = (
 )
 
 _PLAN_DEFINITIONS: tuple[tuple[str, str, int, int, int, str, str], ...] = (
-    ("free", "Free", 5, 720, 500, "telegram", "block"),
+    ("free", "Free", 5, 720, 100, "telegram", "block"),
     ("plus", "Plus", 25, 120, 10_000, "telegram", "block"),
     ("pro", "Pro", 100, 30, 50_000, "telegram", "block"),
 )

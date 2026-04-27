@@ -554,7 +554,7 @@ def _build_repo() -> _InMemoryTrackingRepository:
                 plan_key="free",
                 max_active_trackers=5,
                 min_check_interval_minutes=720,
-                monthly_check_units=500,
+                monthly_check_units=100,
                 allowed_channels="telegram",
                 overage_policy="block",
                 created_at=_iso(datetime.now(tz=UTC)),
