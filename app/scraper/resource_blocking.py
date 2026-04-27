@@ -20,6 +20,7 @@ BROWSER_BLOCKED_DOMAINS: frozenset[str] = frozenset(
         "efilli.com",
         "enliven.com", 
         "gstatic.com",   
+        "reimg-teknosa-cloud-prod.mncdn.com",
         "eyeota.net",
         "facebook.com",
         "flix360.com",
