@@ -95,11 +95,13 @@ class _FakeRepository:
 @dataclass
 class _FakeScrapeService:
     result: PriceResult
+    calls: int = 0
 
     def list_sites(self) -> dict[str, str]:
         return {"generic": "Generic extractor"}
 
     def scrape(self, payload) -> ScrapeBatchOutput:
+        self.calls += 1
         return ScrapeBatchOutput(
             request_id=payload.request_id,
             total_urls=1,
@@ -109,23 +111,31 @@ class _FakeScrapeService:
         )
 
 
-def _build_service(result: PriceResult) -> tuple[TrackingService, _FakeRepository]:
+def _build_service(
+    result: PriceResult,
+    *,
+    telegram_connected: bool = True,
+) -> tuple[TrackingService, _FakeRepository, _FakeScrapeService]:
+    chats: dict[str, str] = {}
+    if telegram_connected:
+        chats["legacy_owner"] = "12345"
     repository = _FakeRepository(
         items={},
         snapshots=[],
         idempotency_records={},
         notification_events=[],
-        active_telegram_chat_by_user={},
+        active_telegram_chat_by_user=chats,
     )
+    scrape_service = _FakeScrapeService(result=result)
     service = TrackingService(
         repository=repository,
-        scrape_service=_FakeScrapeService(result=result),
+        scrape_service=scrape_service,
         default_interval_minutes=60,
         min_interval_minutes=5,
         max_interval_minutes=10080,
         default_snapshot_limit=20,
     )
-    return service, repository
+    return service, repository, scrape_service
 
 
 def _success_result(url: str = "https://example.com/p/1") -> PriceResult:
@@ -153,7 +163,7 @@ def _success_result(url: str = "https://example.com/p/1") -> PriceResult:
 
 
 def test_bootstrap_creates_item_and_snapshot() -> None:
-    service, repository = _build_service(_success_result())
+    service, repository, _ = _build_service(_success_result())
 
     item = service.bootstrap(
         TrackingBootstrapInput(
@@ -177,7 +187,7 @@ def test_bootstrap_creates_item_and_snapshot() -> None:
 
 
 def test_bootstrap_interval_under_sixty_is_treated_as_minutes() -> None:
-    service, _ = _build_service(_success_result("https://example.com/p/minutes"))
+    service, _, _ = _build_service(_success_result("https://example.com/p/minutes"))
 
     item = service.bootstrap(
         TrackingBootstrapInput(
@@ -198,7 +208,7 @@ def test_bootstrap_interval_under_sixty_is_treated_as_minutes() -> None:
 
 
 def test_bootstrap_test_interval_schedules_fifteen_seconds() -> None:
-    service, _ = _build_service(_success_result("https://example.com/p/fifteen-seconds"))
+    service, _, _ = _build_service(_success_result("https://example.com/p/fifteen-seconds"))
 
     item = service.bootstrap(
         TrackingBootstrapInput(
@@ -219,7 +229,7 @@ def test_bootstrap_test_interval_schedules_fifteen_seconds() -> None:
 
 
 def test_bootstrap_without_target_starts_monitor_mode() -> None:
-    service, _ = _build_service(_success_result())
+    service, _, _ = _build_service(_success_result())
 
     item = service.bootstrap(
         TrackingBootstrapInput(
@@ -240,7 +250,7 @@ def test_bootstrap_without_target_starts_monitor_mode() -> None:
 
 
 def test_bootstrap_can_enable_price_increase_notifications() -> None:
-    service, _ = _build_service(_success_result("https://example.com/p/price-increase"))
+    service, _, _ = _build_service(_success_result("https://example.com/p/price-increase"))
 
     item = service.bootstrap(
         TrackingBootstrapInput(
@@ -259,8 +269,7 @@ def test_bootstrap_can_enable_price_increase_notifications() -> None:
 
 
 def test_bootstrap_new_item_enqueues_tracking_started_notification_when_chat_connected() -> None:
-    service, repository = _build_service(_success_result())
-    repository.active_telegram_chat_by_user["legacy_owner"] = "12345"
+    service, repository, _ = _build_service(_success_result())
 
     item = service.bootstrap(
         TrackingBootstrapInput(
@@ -285,8 +294,7 @@ def test_bootstrap_new_item_enqueues_tracking_started_notification_when_chat_con
 
 
 def test_bootstrap_existing_item_does_not_enqueue_tracking_started_notification() -> None:
-    service, repository = _build_service(_success_result("https://example.com/p/existing"))
-    repository.active_telegram_chat_by_user["legacy_owner"] = "12345"
+    service, repository, _ = _build_service(_success_result("https://example.com/p/existing"))
 
     first = service.bootstrap(
         TrackingBootstrapInput(
@@ -317,7 +325,7 @@ def test_bootstrap_existing_item_does_not_enqueue_tracking_started_notification(
 
 def test_bootstrap_rejects_failed_scrape() -> None:
     failed = PriceResult(url="https://example.com/p/1", success=False, error="price_not_found")
-    service, _ = _build_service(failed)
+    service, _, _ = _build_service(failed)
 
     with pytest.raises(TrackingBootstrapError, match="price_not_found"):
         service.bootstrap(
@@ -334,7 +342,7 @@ def test_bootstrap_rejects_failed_scrape() -> None:
 
 
 def test_update_item_applies_patch_fields() -> None:
-    service, _ = _build_service(_success_result())
+    service, _, _ = _build_service(_success_result())
     item = service.bootstrap(
         TrackingBootstrapInput(
             request_id="req_3",
@@ -368,7 +376,7 @@ def test_update_item_applies_patch_fields() -> None:
 
 
 def test_update_item_can_clear_target_and_switch_to_monitor_mode() -> None:
-    service, _ = _build_service(_success_result())
+    service, _, _ = _build_service(_success_result())
     item = service.bootstrap(
         TrackingBootstrapInput(
             request_id="req_5",
@@ -400,8 +408,7 @@ def test_update_item_can_clear_target_and_switch_to_monitor_mode() -> None:
 
 
 def test_update_item_paused_transition_enqueues_tracking_stopped_notification() -> None:
-    service, repository = _build_service(_success_result("https://example.com/p/paused-notify"))
-    repository.active_telegram_chat_by_user["legacy_owner"] = "12345"
+    service, repository, _ = _build_service(_success_result("https://example.com/p/paused-notify"))
     item = service.bootstrap(
         TrackingBootstrapInput(
             request_id="req_paused_notify",
@@ -438,7 +445,7 @@ def test_update_item_paused_transition_enqueues_tracking_stopped_notification() 
 
 
 def test_update_item_rejects_interval_outside_bounds() -> None:
-    service, _ = _build_service(_success_result())
+    service, _, _ = _build_service(_success_result())
     item = service.bootstrap(
         TrackingBootstrapInput(
             request_id="req_4",
@@ -464,7 +471,7 @@ def test_update_item_rejects_interval_outside_bounds() -> None:
 
 
 def test_bootstrap_idempotent_reuses_saved_item() -> None:
-    service, repository = _build_service(_success_result("https://example.com/p/idempo"))
+    service, repository, _ = _build_service(_success_result("https://example.com/p/idempo"))
     payload = TrackingBootstrapInput(
         request_id="req_idempo_1",
         url="https://example.com/p/idempo",
@@ -484,7 +491,7 @@ def test_bootstrap_idempotent_reuses_saved_item() -> None:
 
 
 def test_bootstrap_idempotent_rejects_payload_mismatch() -> None:
-    service, _ = _build_service(_success_result("https://example.com/p/mismatch"))
+    service, _, _ = _build_service(_success_result("https://example.com/p/mismatch"))
     base_payload = TrackingBootstrapInput(
         request_id="req_idempo_2",
         url="https://example.com/p/mismatch",
@@ -510,3 +517,28 @@ def test_bootstrap_idempotent_rejects_payload_mismatch() -> None:
         match="Idempotency-Key reuse with different payload",
     ):
         service.bootstrap_idempotent(payload=changed_payload, idempotency_key="idem-2")
+
+
+def test_bootstrap_requires_connected_telegram_before_scrape() -> None:
+    service, _, scrape_service = _build_service(
+        _success_result("https://example.com/p/requires-telegram"),
+        telegram_connected=False,
+    )
+
+    with pytest.raises(
+        TrackingBootstrapError,
+        match="Connect Telegram in Settings before creating trackers",
+    ):
+        service.bootstrap(
+            TrackingBootstrapInput(
+                request_id="req_requires_telegram",
+                url="https://example.com/p/requires-telegram",
+                timeout_seconds=20,
+                selected_sites=None,
+                fetch_mode="auto",
+                check_interval_minutes=60,
+                target_amount=None,
+            )
+        )
+
+    assert scrape_service.calls == 0

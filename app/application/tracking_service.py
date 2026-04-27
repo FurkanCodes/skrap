@@ -132,6 +132,7 @@ class TrackingService:
         price, the tracked item is not created.
         """
         user_id = _resolve_user_id(payload.user_id)
+        self._require_active_telegram_chat(user_id=user_id)
         entitlement = self._resolve_entitlement(user_id=user_id)
         interval = self._normalize_interval(
             payload.check_interval_minutes,
@@ -551,6 +552,14 @@ class TrackingService:
             return method(user_id=user_id)
         except TypeError:
             return method()
+
+    def _require_active_telegram_chat(self, *, user_id: str) -> None:
+        active_chat_id = self._get_active_telegram_chat(user_id=user_id)
+        if active_chat_id:
+            return
+        raise TrackingBootstrapError(
+            "Connect Telegram in Settings before creating trackers."
+        )
 
 
 @dataclass(frozen=True)
