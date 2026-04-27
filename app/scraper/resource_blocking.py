@@ -18,6 +18,8 @@ BROWSER_BLOCKED_DOMAINS: frozenset[str] = frozenset(
         "demdex.net",
         "doubleclick.net",
         "efilli.com",
+        "enliven.com", 
+        "gstatic.com",   
         "eyeota.net",
         "facebook.com",
         "flix360.com",
