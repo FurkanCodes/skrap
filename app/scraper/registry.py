@@ -12,6 +12,7 @@ from .adapters import (
     NeweggAdapter,
     SiteAdapter,
     TeknosaAdapter,
+    TrendyolAdapter,
 )
 
 SUPPORTED_SITES: dict[str, str] = {
@@ -266,15 +267,7 @@ ADAPTERS: dict[str, SiteAdapter] = {
         ),
     ),
     "teknosa": TeknosaAdapter(),
-    "trendyol": ConfiguredSiteAdapter(
-        key="trendyol",
-        price_selectors=(
-            ".prc-dsc::text",
-            ".prc-slg::text",
-            "[itemprop='price']::attr(content)",
-        ),
-        default_currency="TRY",
-    ),
+    "trendyol": TrendyolAdapter(),
     "vatanbilgisayar": ConfiguredSiteAdapter(
         key="vatanbilgisayar",
         price_selectors=(

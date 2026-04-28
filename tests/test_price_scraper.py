@@ -965,6 +965,59 @@ def test_extract_product_metadata_replaces_trendyol_icon_svg_with_product_image(
     )
 
 
+def test_trendyol_adapter_prefers_winner_variant_state_over_stale_json_ld() -> None:
+    source_url = "https://www.trendyol.com/ninja/example-product-p-123"
+    page = Selector(
+        """
+        <html>
+          <head>
+            <script type='application/ld+json'>
+              {
+                "@context": "https://schema.org",
+                "@type": "Product",
+                "name": "Example Trendyol Product",
+                "offers": {
+                  "@type": "Offer",
+                  "priceCurrency": "TRY",
+                  "price": "11200.00",
+                  "url": "https://www.trendyol.com/ninja/example-product-p-123"
+                }
+              }
+            </script>
+            <script>
+              window["__envoy_product-detail__PROPS"]={
+                "product": {
+                  "merchantListing": {
+                    "merchant": {"name": "Shark Ninja"},
+                    "url": "/ninja/example-product-p-123?merchantId=123",
+                    "winnerVariant": {
+                      "price": {
+                        "currency": "TRY",
+                        "discountedPrice": {"value": 10880, "text": "10.880 TL"},
+                        "sellingPrice": {"value": 10930, "text": "10.930 TL"},
+                        "originalPrice": {"value": 10880, "text": "10.880 TL"}
+                      }
+                    }
+                  }
+                }
+              }
+            </script>
+          </head>
+          <body></body>
+        </html>
+        """
+    )
+
+    result = extract_price_from_page(page, source_url)
+
+    assert result.success is True
+    assert result.amount == "10880"
+    assert result.currency == "TRY"
+    assert result.raw_text == "10.880 TL"
+    assert result.source == "trendyol:winner-variant"
+    assert result.listings[0].seller == "Shark Ninja"
+
+
 def test_extract_price_from_page_prefers_listing_matching_requested_url() -> None:
     page = Selector(
         """

@@ -5,15 +5,61 @@ from __future__ import annotations
 Adapters isolate target-specific selectors while reusing shared parsing helpers.
 """
 
-import re
-from urllib.parse import parse_qs, urlparse
 import json
+import re
+from typing import Any
+from urllib.parse import parse_qs, urljoin, urlparse
 
 from scrapling.parser import Selector
 
 from .domain import PriceCandidate
 from .extractors.generic import deduplicate_candidates, extract_price_listings_from_selector
 from .parsing import scan_price_in_text
+
+
+def _extract_json_object_after_marker(script_text: str, marker: str) -> dict[str, Any] | None:
+    marker_index = script_text.find(marker)
+    if marker_index < 0:
+        return None
+
+    start = script_text.find("{", marker_index)
+    if start < 0:
+        return None
+
+    depth = 0
+    in_string = False
+    escape = False
+    for index in range(start, len(script_text)):
+        char = script_text[index]
+        if in_string:
+            if escape:
+                escape = False
+                continue
+            if char == "\\":
+                escape = True
+                continue
+            if char == '"':
+                in_string = False
+            continue
+
+        if char == '"':
+            in_string = True
+            continue
+        if char == "{":
+            depth += 1
+            continue
+        if char == "}":
+            depth -= 1
+            if depth == 0:
+                chunk = script_text[start : index + 1]
+                try:
+                    parsed = json.loads(chunk)
+                except json.JSONDecodeError:
+                    return None
+                if isinstance(parsed, dict):
+                    return parsed
+                return None
+    return None
 
 
 class SiteAdapter:
@@ -136,6 +182,116 @@ class TeknosaAdapter(SiteAdapter):
 
         generic_candidates = extract_price_listings_from_selector(page)
         return self._positive_only(generic_candidates)
+
+
+class TrendyolAdapter(SiteAdapter):
+    """Trendyol parser that prefers PDP winner-variant state over stale JSON-LD."""
+
+    key = "trendyol"
+
+    _price_selectors = (
+        ".prc-dsc::text",
+        ".prc-slg::text",
+        "[itemprop='price']::attr(content)",
+    )
+    _price_keys = (
+        "discountedPrice",
+        "discountedPriceAfterNoLimitPromotions",
+        "sellingPrice",
+        "originalPrice",
+    )
+
+    @staticmethod
+    def _price_text(price_data: dict[str, Any]) -> tuple[str, str | None] | None:
+        currency = price_data.get("currency")
+        normalized_currency = str(currency).strip() if isinstance(currency, str) and currency.strip() else None
+
+        for key in TrendyolAdapter._price_keys:
+            raw_price = price_data.get(key)
+            if not isinstance(raw_price, dict):
+                continue
+
+            raw_text = raw_price.get("text")
+            if isinstance(raw_text, str) and raw_text.strip() and "nan" not in raw_text.lower():
+                return raw_text.strip(), normalized_currency
+
+            raw_value = raw_price.get("value")
+            if isinstance(raw_value, (int, float, str)) and str(raw_value).strip():
+                return str(raw_value).strip(), normalized_currency
+
+        return None
+
+    @classmethod
+    def _candidate_from_state(cls, payload: dict[str, Any], source_url: str) -> PriceCandidate | None:
+        product = payload.get("product")
+        if not isinstance(product, dict):
+            return None
+
+        merchant_listing = product.get("merchantListing")
+        if not isinstance(merchant_listing, dict):
+            return None
+
+        winner_variant = merchant_listing.get("winnerVariant")
+        if not isinstance(winner_variant, dict):
+            return None
+
+        price_data = winner_variant.get("price")
+        if not isinstance(price_data, dict):
+            return None
+
+        picked_price = cls._price_text(price_data)
+        if picked_price is None:
+            return None
+
+        price_text, currency = picked_price
+        parsed = scan_price_in_text(price_text, source="trendyol:winner-variant", require_currency=False)
+        if not parsed:
+            return None
+
+        merchant = merchant_listing.get("merchant")
+        seller = None
+        if isinstance(merchant, dict):
+            merchant_name = merchant.get("name")
+            seller = str(merchant_name).strip() if isinstance(merchant_name, str) and merchant_name.strip() else None
+
+        raw_listing_url = merchant_listing.get("url")
+        listing_url = urljoin(source_url, raw_listing_url) if isinstance(raw_listing_url, str) else source_url
+
+        return PriceCandidate(
+            raw_text=parsed.raw_text,
+            amount=parsed.amount,
+            currency=parsed.currency or currency or "TRY",
+            source=parsed.source,
+            seller=seller,
+            listing_url=listing_url,
+        )
+
+    def _extract_from_envoy_state(self, page: Selector, url: str) -> PriceCandidate | None:
+        html = str(getattr(page, "html_content", "") or "")
+        if "__envoy_product-detail__PROPS" not in html:
+            return None
+
+        payload = _extract_json_object_after_marker(html, 'window["__envoy_product-detail__PROPS"]=')
+        if not payload:
+            return None
+
+        return self._candidate_from_state(payload, url)
+
+    def extract(self, page: Selector, url: str) -> list[PriceCandidate]:
+        state_candidate = self._extract_from_envoy_state(page, url)
+        if state_candidate is not None:
+            return [state_candidate]
+
+        selector_candidates = _extract_candidates_from_selectors(
+            page,
+            selectors=self._price_selectors,
+            source_prefix=self.key,
+            default_currency="TRY",
+        )
+        if selector_candidates:
+            return selector_candidates
+
+        return extract_price_listings_from_selector(page)
 
 
 class AkakceAdapter(SiteAdapter):
@@ -278,51 +434,6 @@ class N11Adapter(SiteAdapter):
 
     key = "n11"
 
-    @staticmethod
-    def _extract_json_object_after_marker(script_text: str, marker: str) -> dict | None:
-        marker_index = script_text.find(marker)
-        if marker_index < 0:
-            return None
-
-        start = script_text.find("{", marker_index)
-        if start < 0:
-            return None
-
-        depth = 0
-        in_string = False
-        escape = False
-        for index in range(start, len(script_text)):
-            char = script_text[index]
-            if in_string:
-                if escape:
-                    escape = False
-                    continue
-                if char == "\\":
-                    escape = True
-                    continue
-                if char == '"':
-                    in_string = False
-                continue
-
-            if char == '"':
-                in_string = True
-                continue
-            if char == "{":
-                depth += 1
-                continue
-            if char == "}":
-                depth -= 1
-                if depth == 0:
-                    chunk = script_text[start : index + 1]
-                    try:
-                        parsed = json.loads(chunk)
-                    except json.JSONDecodeError:
-                        return None
-                    if isinstance(parsed, dict):
-                        return parsed
-                    return None
-        return None
-
     @classmethod
     def _find_key(cls, payload: object, key: str) -> object | None:
         if isinstance(payload, dict):
@@ -378,7 +489,7 @@ class N11Adapter(SiteAdapter):
         if "__INITIAL_STATE__" not in html:
             return []
 
-        payload = self._extract_json_object_after_marker(html, "__INITIAL_STATE__")
+        payload = _extract_json_object_after_marker(html, "__INITIAL_STATE__")
         if not payload:
             return []
 
@@ -419,7 +530,7 @@ class N11Adapter(SiteAdapter):
         if not html:
             return None
 
-        product_meta = self._extract_json_object_after_marker(html, '"productMeta":')
+        product_meta = _extract_json_object_after_marker(html, '"productMeta":')
         if not isinstance(product_meta, dict):
             return None
 
