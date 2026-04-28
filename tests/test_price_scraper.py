@@ -17,7 +17,7 @@ from app.scraper.inputs import parse_fetch_mode, parse_sites_blob, parse_urls_bl
 from app.scraper.metadata import extract_product_metadata
 from app.scraper.parsing import make_item_id, normalize_runtime_url
 from app.scraper.registry import ADAPTERS, detect_site_key, list_supported_sites
-from app.scraper.scrape_spider import MODE_TO_SESSION_ID
+from app.scraper.scrape_spider import MODE_TO_SESSION_ID, _balanced_spider_remaining_modes
 from app.scraper.service import extract_price_from_page, fetch_price, is_result_qualified, missing_required_result_fields
 
 
@@ -665,6 +665,27 @@ def test_amazon_auto_jumps_to_direct_browser_after_proxy_tunnel_failure(monkeypa
 def test_spider_mode_map_supports_direct_browser_fallbacks() -> None:
     assert MODE_TO_SESSION_ID["dynamic_direct"] == "dynamic_direct"
     assert MODE_TO_SESSION_ID["stealth_direct"] == "stealth_direct"
+
+
+def test_spider_amazon_captcha_uses_one_proxy_then_direct_browser_fallbacks() -> None:
+    modes = _balanced_spider_remaining_modes(
+        "http_direct",
+        signals={"amazon_captcha", "protection"},
+        url="https://www.amazon.com.tr/example/dp/B000000000",
+    )
+
+    assert modes == ["dynamic_proxy", "dynamic_direct", "stealth_direct"]
+
+
+def test_spider_amazon_proxy_followup_skips_remaining_proxy_modes() -> None:
+    modes = _balanced_spider_remaining_modes(
+        "dynamic_proxy",
+        signals=set(),
+        url="https://www.amazon.com.tr/example/dp/B000000000",
+        remaining_modes=["stealth_proxy", "dynamic_direct", "stealth_direct"],
+    )
+
+    assert modes == ["dynamic_direct", "stealth_direct"]
 
 
 def test_auto_mode_starts_protected_sites_with_stealth() -> None:

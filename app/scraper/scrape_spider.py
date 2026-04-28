@@ -3,6 +3,7 @@ from __future__ import annotations
 """Spider-backed batch scraping for seed URLs without link discovery."""
 
 import logging
+from urllib.parse import urlparse
 
 from scrapling.fetchers import AsyncDynamicSession, AsyncStealthySession, FetcherSession
 from scrapling.spiders import Request, Response, SessionManager, Spider
@@ -19,7 +20,7 @@ from .parsing import make_product_id, normalize_runtime_url
 from .proxies import get_proxy_retry_count, get_scrape_proxy_rotator
 from .registry import ADAPTERS, detect_site_key
 from .resource_blocking import browser_resource_blocking_kwargs
-from .service import extract_price_from_page
+from .service import extract_price_from_page, missing_required_result_fields
 
 MODE_TO_SESSION_ID = {
     "http_direct": "http_direct",
@@ -31,6 +32,12 @@ MODE_TO_SESSION_ID = {
     "stealth_cf_proxy": "stealth_cf",
 }
 _logger = logging.getLogger("scraper_api.scraper")
+_PROXY_MODES = {"http_proxy", "dynamic_proxy", "stealth_proxy", "stealth_cf_proxy"}
+
+
+def _is_amazon_url(url: str) -> bool:
+    host = urlparse(url).netloc.lower().removeprefix("www.")
+    return host == "amazon.com.tr" or host.startswith("amazon.") or ".amazon." in host
 
 
 def _dedupe_preserving_order(urls: list[str]) -> list[str]:
@@ -42,6 +49,40 @@ def _dedupe_preserving_order(urls: list[str]) -> list[str]:
         seen.add(url)
         ordered.append(url)
     return ordered
+
+
+def _balanced_spider_remaining_modes(
+    current_mode: str,
+    *,
+    signals: set[str],
+    url: str,
+    remaining_modes: list[str] | None = None,
+) -> list[str]:
+    """Keep Amazon fallback broad enough to work, but short enough to finish."""
+    planned_modes = (
+        list(remaining_modes)
+        if remaining_modes is not None
+        else auto_remaining_modes(current_mode, signals=signals, url=url)
+    )
+    if not _is_amazon_url(url):
+        return planned_modes
+
+    if current_mode == "http_direct" and "amazon_captcha" in signals:
+        balanced_modes: list[str] = []
+        if "dynamic_proxy" in planned_modes:
+            balanced_modes.append("dynamic_proxy")
+        balanced_modes.extend(
+            mode
+            for mode in ("dynamic_direct", "stealth_direct")
+            if mode in planned_modes and mode not in balanced_modes
+        )
+        return balanced_modes or planned_modes
+
+    if current_mode in _PROXY_MODES:
+        direct_modes = [mode for mode in planned_modes if mode not in _PROXY_MODES]
+        return direct_modes or planned_modes
+
+    return planned_modes
 
 
 class PriceScrapeSpider(Spider):
@@ -241,19 +282,33 @@ class PriceScrapeSpider(Spider):
             return request
         current_mode = str(request.meta.get("current_mode", "http"))
         signals = detect_auto_escalation_signals(response)
-        remaining_modes = auto_remaining_modes(current_mode, signals=signals, url=str(response.url))
+        remaining_modes = _balanced_spider_remaining_modes(
+            current_mode,
+            signals=signals,
+            url=str(response.url),
+        )
+        _logger.info(
+            "scrape_spider_attempt_plan url=%s current_mode=%s remaining_modes=%s status=%s signals=%s reason=blocked_response",
+            response.url,
+            current_mode,
+            ",".join(remaining_modes) or "<none>",
+            getattr(response, "status", None),
+            ",".join(sorted(signals)) or "<none>",
+        )
         if remaining_modes:
             next_mode = remaining_modes.pop(0)
+            next_sid = MODE_TO_SESSION_ID[next_mode]
             _logger.info(
-                "scrape_spider_auto_escalate url=%s from_mode=%s to_mode=%s remaining_modes=%s reason=blocked_response status=%s signals=%s",
+                "scrape_spider_auto_escalate url=%s from_mode=%s to_mode=%s next_sid=%s remaining_modes=%s reason=blocked_response status=%s signals=%s",
                 response.url,
                 current_mode,
                 next_mode,
+                next_sid,
                 ",".join(remaining_modes),
                 getattr(response, "status", None),
                 ",".join(sorted(signals)) or "<none>",
             )
-            request.sid = MODE_TO_SESSION_ID[next_mode]
+            request.sid = next_sid
             request.meta["current_mode"] = next_mode
             request.meta["remaining_modes"] = remaining_modes
             return request
@@ -279,31 +334,44 @@ class PriceScrapeSpider(Spider):
         result = extract_price_from_page(response, url, selected_sites=self._selected_sites)
         if result.success:
             _logger.info(
-                "scrape_success mode=%s url=%s adapter=%s amount=%s currency=%s source=%s",
+                "scrape_success mode=%s url=%s adapter=%s amount=%s currency=%s source=%s listing_count=%s",
                 current_mode,
                 url,
                 result.adapter_key,
                 result.amount,
                 result.currency,
                 result.source,
+                result.listing_count,
             )
             yield {"url": url, "result": result}
             return
 
         _logger.info(
-            "scrape_extract_failed mode=%s url=%s adapter=%s error=%s",
+            "scrape_extract_failed mode=%s url=%s adapter=%s error=%s required_missing=%s",
             current_mode,
             url,
             result.adapter_key,
             result.error,
+            ",".join(missing_required_result_fields(result)) or "<none>",
         )
         if self._fetch_mode == "auto":
             remaining_modes = list(response.meta.get("remaining_modes", []))
             signals = detect_auto_escalation_signals(response)
             if not remaining_modes:
-                remaining_modes = auto_remaining_modes(current_mode, signals=signals, url=url)
+                remaining_modes = _balanced_spider_remaining_modes(
+                    current_mode,
+                    signals=signals,
+                    url=url,
+                )
+            else:
+                remaining_modes = _balanced_spider_remaining_modes(
+                    current_mode,
+                    signals=signals,
+                    url=url,
+                    remaining_modes=remaining_modes,
+                )
             _logger.info(
-                "scrape_spider_auto_escalate url=%s from_mode=%s to_modes=%s signals=%s reason=extract_failed",
+                "scrape_spider_attempt_plan url=%s current_mode=%s remaining_modes=%s signals=%s reason=extract_failed",
                 url,
                 current_mode,
                 ",".join(remaining_modes) or "<none>",
@@ -314,10 +382,11 @@ class PriceScrapeSpider(Spider):
                 next_sid = MODE_TO_SESSION_ID[next_mode]
                 if current_mode != next_mode:
                     _logger.info(
-                        "scrape_spider_followup_request url=%s from_mode=%s to_mode=%s remaining_modes=%s",
+                        "scrape_spider_followup_request url=%s from_mode=%s to_mode=%s next_sid=%s remaining_modes=%s reason=extract_failed",
                         url,
                         current_mode,
                         next_mode,
+                        next_sid,
                         ",".join(remaining_modes),
                     )
                     yield Request(
