@@ -69,13 +69,12 @@ def test_render_price_drop_message_includes_links_and_drop_values() -> None:
 
     message = _render_telegram_message(payload)
 
-    assert "Price dropped" in message
+    assert "↓ Price drop: 100.00 → 90.00 USD (-10 USD, -10%)" in message
     assert "Item: Test Product" in message
-    assert "Previous: 100.00 USD" in message
-    assert "Now: 90.00 USD" in message
-    assert "Buy: https://go.example.com/out?u=https%3A%2F%2Fexample.com%2Fp%2F1" in message
-    assert "Listing: https://merchant.example.com/buy/1" in message
-    assert "Product: https://example.com/p/1" in message
+    assert "Open product: https://go.example.com/out?u=https%3A%2F%2Fexample.com%2Fp%2F1" in message
+    assert "Listing:" not in message
+    assert "Product:" not in message
+    assert "At:" not in message
     assert "monitor update" not in message.lower()
 
 
@@ -93,6 +92,25 @@ def test_render_alert_message_uses_target_reached_template() -> None:
     assert "Target reached" in message
     assert "Current: 90.00 USD" in message
     assert "Target: 100.00 USD" in message
+    assert "Item: trk_123" in message
+
+
+def test_render_alert_message_uses_url_fallback_and_one_link() -> None:
+    payload = {
+        "notification_type": "alert",
+        "current_amount": "90.00",
+        "target_amount": "100.00",
+        "currency": "USD",
+        "listing_url": "https://merchant.example.com/buy/1",
+        "product_url": "https://example.com/p/1",
+    }
+
+    message = _render_telegram_message(payload)
+
+    assert "Target reached" in message
+    assert "Item: merchant.example.com" in message
+    assert "Open product: https://merchant.example.com/buy/1" in message
+    assert "Product:" not in message
 
 
 def test_render_price_increase_message_includes_rise_values() -> None:
@@ -106,10 +124,14 @@ def test_render_price_increase_message_includes_rise_values() -> None:
 
     message = _render_telegram_message(payload)
 
-    assert "Price increased" in message
-    assert "Previous: 90.00 USD" in message
-    assert "Now: 100.00 USD" in message
+    assert "↑ Price increase: 90.00 → 100.00 USD (+10 USD, +11.11%)" in message
     assert "Item: Growing Item" in message
+
+
+def test_render_price_drop_message_handles_legacy_sparse_payload() -> None:
+    message = _render_telegram_message({"notification_type": "price_drop"})
+
+    assert message == "↓ Price drop: ? → ?"
 
 
 def test_render_tracking_started_message_includes_onboarding_text() -> None:
@@ -128,7 +150,7 @@ def test_render_tracking_started_message_includes_onboarding_text() -> None:
     assert "Item: Starter Item" in message
     assert "Current price: 90.00 USD" in message
     assert "I will notify you when the price drops." in message
-    assert "Product: https://example.com/p/1" in message
+    assert "Open product: https://example.com/p/1" in message
 
 
 def test_render_tracking_stopped_message_includes_last_price() -> None:

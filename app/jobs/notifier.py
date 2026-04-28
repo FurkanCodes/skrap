@@ -7,6 +7,8 @@ import re
 import socket
 import threading
 import time
+from decimal import Decimal, InvalidOperation
+from urllib.parse import urlparse
 
 import httpx
 
@@ -194,26 +196,34 @@ def _render_telegram_message(payload: dict) -> str:
     item_id = str(payload.get("item_id", "")).strip()
     product_name = str(payload.get("product_name", "")).strip()
     tracking_mode = str(payload.get("tracking_mode", "")).strip().lower()
-    triggered_at = str(payload.get("triggered_at", "")).strip()
     affiliate_url = str(payload.get("affiliate_url", "")).strip()
     listing_url = str(payload.get("listing_url", "")).strip()
     product_url = str(payload.get("product_url", "")).strip()
 
     currency_suffix = f" {currency}" if currency else ""
+    primary_url = _primary_product_url(
+        affiliate_url=affiliate_url,
+        listing_url=listing_url,
+        product_url=product_url,
+    )
+    item_label = product_name or _url_label(primary_url) or item_id
+
     if notification_type == "price_drop":
         lines = [
-            "Price dropped",
-            f"Previous: {previous}{currency_suffix}",
-            f"Now: {current}{currency_suffix}",
+            f"↓ Price drop: {previous} → {current}{currency_suffix}{_change_summary(previous, current, currency=currency)}",
         ]
+        if item_label:
+            lines.append(f"Item: {item_label}")
     elif notification_type == "price_increase":
         lines = [
-            "Price increased",
-            f"Previous: {previous}{currency_suffix}",
-            f"Now: {current}{currency_suffix}",
+            f"↑ Price increase: {previous} → {current}{currency_suffix}{_change_summary(previous, current, currency=currency)}",
         ]
+        if item_label:
+            lines.append(f"Item: {item_label}")
     elif notification_type == "tracking_started":
         lines = ["Tracking started"]
+        if item_label:
+            lines.append(f"Item: {item_label}")
         if current != "?":
             lines.append(f"Current price: {current}{currency_suffix}")
         if target != "?":
@@ -224,6 +234,8 @@ def _render_telegram_message(payload: dict) -> str:
             lines.append("I will notify you when your target price is reached.")
     elif notification_type == "tracking_stopped":
         lines = ["Tracking stopped"]
+        if item_label:
+            lines.append(f"Item: {item_label}")
         if current != "?":
             lines.append(f"Last price: {current}{currency_suffix}")
         if target != "?":
@@ -234,19 +246,70 @@ def _render_telegram_message(payload: dict) -> str:
             f"Current: {current}{currency_suffix}",
             f"Target: {target}{currency_suffix}",
         ]
-    if product_name:
-        lines.insert(1, f"Item: {product_name}")
-    if affiliate_url:
-        lines.append(f"Buy: {affiliate_url}")
-    if listing_url:
-        lines.append(f"Listing: {listing_url}")
-    if product_url:
-        lines.append(f"Product: {product_url}")
-    if item_id and not product_name:
-        lines.append(f"Item: {item_id}")
-    if triggered_at:
-        lines.append(f"At: {triggered_at}")
+        if item_label:
+            lines.insert(1, f"Item: {item_label}")
+
+    if primary_url:
+        lines.append(f"Open product: {primary_url}")
     return "\n".join(lines)
+
+
+def _primary_product_url(*, affiliate_url: str, listing_url: str, product_url: str) -> str:
+    for candidate in (affiliate_url, listing_url, product_url):
+        if candidate:
+            return candidate
+    return ""
+
+
+def _url_label(url: str) -> str:
+    if not url:
+        return ""
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return url
+    host = parsed.netloc.strip()
+    if host:
+        return host.removeprefix("www.")
+    return url
+
+
+def _change_summary(previous: str, current: str, *, currency: str) -> str:
+    previous_amount = _parse_decimal_amount(previous)
+    current_amount = _parse_decimal_amount(current)
+    if previous_amount is None or current_amount is None:
+        return ""
+
+    delta = current_amount - previous_amount
+    parts = [_format_signed_decimal(delta, suffix=f" {currency}" if currency else "")]
+    if previous_amount != 0:
+        percent = (delta / previous_amount) * Decimal("100")
+        parts.append(f"{_format_signed_decimal(percent)}%")
+    return f" ({', '.join(parts)})"
+
+
+def _parse_decimal_amount(value: str) -> Decimal | None:
+    normalized = value.strip()
+    if not normalized or normalized == "?":
+        return None
+    if "," in normalized:
+        if not re.fullmatch(r"[+-]?\d{1,3}(,\d{3})+(\.\d+)?", normalized):
+            return None
+        normalized = normalized.replace(",", "")
+    try:
+        return Decimal(normalized)
+    except InvalidOperation:
+        return None
+
+
+def _format_signed_decimal(value: Decimal, *, suffix: str = "") -> str:
+    rounded = value.quantize(Decimal("0.01")).normalize()
+    text = format(rounded, "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    if value > 0:
+        text = f"+{text}"
+    return f"{text}{suffix}"
 
 
 def _is_retryable_telegram_status(status_code: int, description: str) -> bool:
