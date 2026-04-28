@@ -592,14 +592,20 @@ def test_auto_escalation_signals_and_followup_order() -> None:
         text="Amazon.com.tr",
         html_content='<html><script>ue_sn = "opfcaptcha.amazon.com.tr";</script></html>',
     )
+    mediamarkt_normal_page = _FakePage(
+        status=200,
+        text="MediaMarkt privacy copy mentions captcha vendors while showing a normal product page",
+    )
 
     protection_signals = detect_auto_escalation_signals(protection_page)
     js_signals = detect_auto_escalation_signals(js_page)
     amazon_captcha_signals = detect_auto_escalation_signals(amazon_captcha_page)
+    mediamarkt_signals = detect_auto_escalation_signals(mediamarkt_normal_page)
 
     assert protection_signals == {"protection"}
     assert js_signals == {"javascript"}
     assert amazon_captcha_signals == {"amazon_captcha", "protection"}
+    assert mediamarkt_signals == set()
     assert auto_remaining_modes("http_direct", signals=protection_signals, proxy_enabled=True)[:2] == [
         "http_proxy",
         "stealth_proxy",

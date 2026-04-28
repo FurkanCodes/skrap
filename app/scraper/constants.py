@@ -128,10 +128,13 @@ JAVASCRIPT_HINTS = (
 )
 
 PROTECTION_HINTS = (
-    "captcha",
     "access denied",
     "attention required",
     "bot detection",
+    "captcha required",
+    "captcha verification",
+    "complete the captcha",
+    "solve captcha",
 )
 
 CLOUDFLARE_HINTS = (
