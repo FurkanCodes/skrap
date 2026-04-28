@@ -4,6 +4,8 @@ from dataclasses import asdict
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import JSONResponse
+from pydantic import AnyHttpUrl
 
 from app.api.dependencies import (
     get_app_settings,
@@ -22,6 +24,7 @@ from app.api.schemas.tracking import (
     TrackedItemBootstrapResponse,
     TrackedItemDetailResponse,
     TrackedItemListResponse,
+    TrackedItemLookupResponse,
     TrackedItemResponse,
     TrackedItemUpdateRequest,
     TrackedItemUpdateResponse,
@@ -29,6 +32,7 @@ from app.api.schemas.tracking import (
 from app.application.tracking_service import (
     TrackingBootstrapError,
     TrackingBootstrapInput,
+    TrackingDuplicateError,
     TrackingService,
     TrackingServiceError,
     TrackingUpdateInput,
@@ -139,6 +143,7 @@ async def post_tracked_item_bootstrap(
         check_interval_minutes=payload.check_interval_minutes,
         target_amount=payload.target_amount,
         notify_on_price_increase=payload.notify_on_price_increase,
+        duplicate_policy=payload.duplicate_policy,
         scrape_result_ref=scrape_result_ref,
         pre_fetched_result=pre_fetched_result,
         user_id=current_user.user_id,
@@ -155,6 +160,14 @@ async def post_tracked_item_bootstrap(
             item = await run_in_threadpool(service.bootstrap, bootstrap_input)
     except TrackingBootstrapError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except TrackingDuplicateError as exc:
+        return JSONResponse(
+            status_code=409,
+            content={
+                "detail": str(exc),
+                "item": _to_item_response(exc.item).model_dump(mode="json"),
+            },
+        )
     except TrackingServiceError as exc:
         if "Idempotency-Key reuse with different payload" in str(exc):
             raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -315,6 +328,23 @@ async def get_tracked_items(
     return TrackedItemListResponse(
         items=[_to_item_response(item) for item in items]
     )
+
+
+@router.get("/lookup", response_model=TrackedItemLookupResponse)
+async def get_tracked_item_lookup(
+    url: AnyHttpUrl,
+    service: TrackingService = Depends(get_tracking_service),
+    principal: AuthPrincipal = Depends(get_current_principal),
+    user_service: UserService = Depends(get_user_service),
+) -> TrackedItemLookupResponse:
+    """Return one tracked item by exact source URL for duplicate checks."""
+    current_user = await run_in_threadpool(user_service.provision_from_principal, principal)
+    item = await run_in_threadpool(
+        service.get_item_by_source_url,
+        str(url),
+        user_id=current_user.user_id,
+    )
+    return TrackedItemLookupResponse(item=_to_item_response(item) if item else None)
 
 
 @router.get("/{item_id}", response_model=TrackedItemDetailResponse)

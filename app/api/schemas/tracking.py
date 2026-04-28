@@ -14,6 +14,7 @@ class TrackedItemBootstrapRequest(BaseModel):
     check_interval_minutes: int = Field(default=60, ge=1, le=10080)
     target_amount: str | None = None
     notify_on_price_increase: bool | None = None
+    duplicate_policy: Literal["upsert", "reject"] = "upsert"
 
     @model_validator(mode="after")
     def validate_source(self) -> "TrackedItemBootstrapRequest":
@@ -109,6 +110,10 @@ class TrackedItemResponse(BaseModel):
 
 class TrackedItemListResponse(BaseModel):
     items: list[TrackedItemResponse]
+
+
+class TrackedItemLookupResponse(BaseModel):
+    item: TrackedItemResponse | None
 
 
 class TrackedItemBootstrapResponse(BaseModel):

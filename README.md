@@ -432,12 +432,14 @@ Supports two bootstrap sources:
 | `fetch_mode` | `"auto" \| "http" \| "dynamic" \| "stealth"` | no | default `auto` |
 | `check_interval_minutes` | `int` | no | default 60, allowed `max(5, user_plan_min)` .. 10080 |
 | `target_amount` | `str \| null` | no | null/blank => monitor mode |
+| `duplicate_policy` | `"upsert" \| "reject"` | no | default `upsert`; use `reject` to return `409` instead of refreshing an existing URL |
 
 ### Important behaviors
 - If `scrape_result_ref` is provided, server resolves it from short-lived cache.
   - invalid/expired => `422 Invalid or expired scrape_result_ref`
 - Upsert key is `source_url`.
   - existing row for URL is refreshed, not duplicated.
+- With `duplicate_policy: "reject"`, an existing row for URL returns `409` with the existing item and does not refresh the row or append a snapshot.
 - On successful bootstrap, one snapshot is appended.
 - Interval validation is plan-aware:
   - global minimum is 5 minutes
@@ -531,6 +533,23 @@ Returns tracked item list ordered by `updated_at DESC`.
 UI usage:
 - Main dashboard list.
 - Derive badges from `status`, `tracking_mode`, `alerts_enabled`.
+
+## GET /api/v1/tracked-items/lookup
+
+Exact URL lookup for duplicate checks.
+
+### Query params
+- `url` (required HTTP(S) URL)
+
+### Response
+
+```json
+{
+  "item": null
+}
+```
+
+When the user already tracks the exact `source_url`, `item` is the same tracked item shape returned by list/detail endpoints.
 
 ## GET /api/v1/tracked-items/{item_id}
 

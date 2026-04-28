@@ -10,6 +10,7 @@ from app.application.scrape_service import ScrapeBatchOutput
 from app.application.tracking_service import (
     TrackingBootstrapError,
     TrackingBootstrapInput,
+    TrackingDuplicateError,
     TrackingService,
     TrackingServiceError,
     TrackingUpdateInput,
@@ -321,6 +322,45 @@ def test_bootstrap_existing_item_does_not_enqueue_tracking_started_notification(
 
     assert first.item_id == second.item_id
     assert len(repository.notification_events) == 1
+
+
+def test_bootstrap_duplicate_policy_reject_returns_existing_without_mutation() -> None:
+    service, repository, scrape_service = _build_service(
+        _success_result("https://example.com/p/reject-existing")
+    )
+
+    first = service.bootstrap(
+        TrackingBootstrapInput(
+            request_id="req_first_reject",
+            url="https://example.com/p/reject-existing",
+            timeout_seconds=20,
+            selected_sites=None,
+            fetch_mode="auto",
+            check_interval_minutes=60,
+            target_amount=None,
+        )
+    )
+    snapshots_after_first = len(repository.snapshots)
+
+    with pytest.raises(TrackingDuplicateError) as exc_info:
+        service.bootstrap(
+            TrackingBootstrapInput(
+                request_id="req_second_reject",
+                url="https://example.com/p/reject-existing",
+                timeout_seconds=20,
+                selected_sites=None,
+                fetch_mode="auto",
+                check_interval_minutes=120,
+                target_amount="8.00",
+                duplicate_policy="reject",
+            )
+        )
+
+    assert exc_info.value.item.item_id == first.item_id
+    assert len(repository.snapshots) == snapshots_after_first
+    assert repository.items[first.item_id].target_amount is None
+    assert repository.items[first.item_id].check_interval_minutes == 60
+    assert scrape_service.calls == 2
 
 
 def test_bootstrap_rejects_failed_scrape() -> None:

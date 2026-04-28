@@ -30,6 +30,14 @@ class TrackingBootstrapError(TrackingServiceError):
     """Raised when URL bootstrap cannot produce a tracked item."""
 
 
+class TrackingDuplicateError(TrackingServiceError):
+    """Raised when caller opts out of refreshing an existing tracked item."""
+
+    def __init__(self, item: TrackedItem) -> None:
+        super().__init__("Already tracking this product.")
+        self.item = item
+
+
 @dataclass(frozen=True)
 class TrackingBootstrapInput:
     """Input needed to create or refresh a tracked item from a single product URL."""
@@ -42,6 +50,7 @@ class TrackingBootstrapInput:
     check_interval_minutes: int
     target_amount: str | None
     notify_on_price_increase: bool | None = None
+    duplicate_policy: str = "upsert"
     scrape_result_ref: str | None = None
     pre_fetched_result: PriceResult | None = None
     user_id: str | None = None
@@ -106,6 +115,18 @@ class TrackingService:
         """Return one tracked item or None when not found."""
         return self._get_item_for_user(item_id=item_id, user_id=_resolve_user_id(user_id))
 
+    def get_item_by_source_url(
+        self,
+        source_url: str,
+        *,
+        user_id: str | None = None,
+    ) -> TrackedItem | None:
+        """Return one tracked item by exact source URL for one user."""
+        return self._get_item_by_source_url_for_user(
+            source_url=source_url,
+            user_id=_resolve_user_id(user_id),
+        )
+
     def get_detail(
         self,
         item_id: str,
@@ -163,6 +184,9 @@ class TrackingService:
         checked_at = _utcnow_iso()
         source_url = result.url
         existing = self._get_item_by_source_url_for_user(source_url=source_url, user_id=user_id)
+        if existing is not None and payload.duplicate_policy == "reject":
+            raise TrackingDuplicateError(existing)
+
         is_new_item = existing is None
         if existing is None:
             self._enforce_tracker_capacity(
@@ -625,6 +649,7 @@ def _build_bootstrap_request_hash(payload: TrackingBootstrapInput) -> str:
         "check_interval_minutes": payload.check_interval_minutes,
         "target_amount": _normalize_target_amount(payload.target_amount),
         "notify_on_price_increase": payload.notify_on_price_increase,
+        "duplicate_policy": payload.duplicate_policy,
     }
     serialized = json.dumps(normalized, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()

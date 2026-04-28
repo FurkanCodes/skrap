@@ -15,6 +15,7 @@ from app.application.tracking_service import (
     TrackingBootstrapError,
     TrackingBootstrapInput,
     TrackingDetailOutput,
+    TrackingDuplicateError,
     TrackingServiceError,
     TrackingUpdateInput,
 )
@@ -49,6 +50,9 @@ class FakeTrackingService:
         self.bootstrap_payloads.append(payload)
         if "fail" in payload.url:
             raise TrackingBootstrapError("bootstrap failed: price_not_found")
+        for item in self.items.values():
+            if item.source_url == payload.url and payload.duplicate_policy == "reject":
+                raise TrackingDuplicateError(item)
 
         now = _now_iso()
         suffix = str(self.bootstrap_calls)
@@ -108,6 +112,17 @@ class FakeTrackingService:
 
     def list_items(self, *, user_id: str | None = None) -> list[TrackedItem]:  # noqa: ARG002
         return list(self.items.values())
+
+    def get_item_by_source_url(
+        self,
+        source_url: str,
+        *,
+        user_id: str | None = None,  # noqa: ARG002
+    ) -> TrackedItem | None:
+        for item in self.items.values():
+            if item.source_url == source_url:
+                return item
+        return None
 
     def get_detail(
         self,
@@ -323,6 +338,51 @@ def test_tracked_items_bootstrap_without_target_is_monitor_mode() -> None:
     assert body["item"]["target_amount"] is None
     assert body["item"]["tracking_mode"] == "monitor"
     assert body["item"]["alerts_enabled"] is False
+
+
+def test_tracked_items_bootstrap_duplicate_policy_reject_returns_409() -> None:
+    now = _now_iso()
+    existing = TrackedItem(
+        item_id="trk_existing_duplicate",
+        source_url="https://example.com/products/duplicate",
+        canonical_url="https://example.com/products/duplicate",
+        product_id="prd_existing",
+        site_key="generic",
+        adapter_key="generic",
+        product_name="Existing Product",
+        brand=None,
+        model=None,
+        sku=None,
+        gtin=None,
+        image_url=None,
+        availability=None,
+        currency="USD",
+        last_amount="20.00",
+        last_raw_text="$20.00",
+        last_source="test:init",
+        status="active",
+        check_interval_minutes=60,
+        target_amount=None,
+        created_at=now,
+        updated_at=now,
+        last_checked_at=now,
+    )
+    service = FakeTrackingService(items={existing.item_id: existing}, snapshots={})
+    client = _build_client(service)
+
+    response = client.post(
+        "/api/v1/tracked-items",
+        json={
+            "url": existing.source_url,
+            "duplicate_policy": "reject",
+        },
+    )
+    _clear_overrides()
+
+    assert response.status_code == 409
+    body = response.json()
+    assert body["detail"] == "Already tracking this product."
+    assert body["item"]["item_id"] == existing.item_id
 
 
 def test_tracked_items_bootstrap_requires_url_or_scrape_result_ref() -> None:
@@ -575,6 +635,52 @@ def test_tracked_items_list_detail_patch_delete_flow() -> None:
 
     assert missing_response.status_code == 404
     assert missing_response.json()["detail"] == "tracked item not found"
+
+
+def test_tracked_items_lookup_by_url() -> None:
+    now = _now_iso()
+    existing = TrackedItem(
+        item_id="trk_lookup",
+        source_url="https://example.com/p/lookup",
+        canonical_url="https://example.com/p/lookup",
+        product_id="prd_lookup",
+        site_key="generic",
+        adapter_key="generic",
+        product_name="Lookup Product",
+        brand=None,
+        model=None,
+        sku=None,
+        gtin=None,
+        image_url=None,
+        availability=None,
+        currency="USD",
+        last_amount="20.00",
+        last_raw_text="$20.00",
+        last_source="test:init",
+        status="active",
+        check_interval_minutes=60,
+        target_amount=None,
+        created_at=now,
+        updated_at=now,
+        last_checked_at=now,
+    )
+    service = FakeTrackingService(items={existing.item_id: existing}, snapshots={})
+    client = _build_client(service)
+
+    match_response = client.get(
+        "/api/v1/tracked-items/lookup",
+        params={"url": existing.source_url},
+    )
+    missing_response = client.get(
+        "/api/v1/tracked-items/lookup",
+        params={"url": "https://example.com/p/missing"},
+    )
+    _clear_overrides()
+
+    assert match_response.status_code == 200
+    assert match_response.json()["item"]["item_id"] == existing.item_id
+    assert missing_response.status_code == 200
+    assert missing_response.json()["item"] is None
 
 
 def test_tracked_items_bootstrap_accepts_idempotency_key_header() -> None:
