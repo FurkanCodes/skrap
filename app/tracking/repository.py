@@ -5,6 +5,7 @@ from typing import Protocol
 from app.tracking.domain import (
     AppUser,
     AlertEvent,
+    AffiliateClickEvent,
     NotificationEvent,
     NotificationEventStatus,
     PriceSnapshot,
@@ -111,6 +112,9 @@ class TrackingRepository(Protocol):
         ...
 
     def list_notification_events(self, item_id: str, limit: int) -> list[NotificationEvent]:
+        ...
+
+    def save_affiliate_click_event(self, event: AffiliateClickEvent) -> None:
         ...
 
     def claim_due_items(

@@ -10,6 +10,7 @@ from fastapi import Depends, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.application.discovery_service import DiscoveryBatchService
+from app.application.affiliate_link_service import AffiliateLinkService
 from app.application.scrape_job_service import ScrapeJobService
 from app.application.scrape_result_cache import ScrapeResultCache
 from app.application.scrape_service import ScrapeBatchService
@@ -292,6 +293,45 @@ def get_telegram_integration_service(
         bot_token=settings.telegram_bot_token,
         bot_username=settings.telegram_bot_username,
         connect_ttl_minutes=settings.telegram_connect_ttl_minutes,
+    )
+
+
+@lru_cache
+def _get_affiliate_link_service_cached(
+    database_url: str,
+    db_pool_min_size: int,
+    db_pool_max_size: int,
+    redirect_base_url: str,
+    signing_secret: str,
+    rules_json: str,
+    legacy_template: str,
+) -> AffiliateLinkService:
+    repository = _get_tracking_repository_cached(
+        database_url=database_url,
+        db_pool_min_size=db_pool_min_size,
+        db_pool_max_size=db_pool_max_size,
+    )
+    service = AffiliateLinkService(
+        repository=repository,
+        redirect_base_url=redirect_base_url,
+        signing_secret=signing_secret,
+        rules_json=rules_json,
+        legacy_template=legacy_template,
+    )
+    return _maybe_profile(service, component="affiliate_link_service")
+
+
+def get_affiliate_link_service(
+    settings: Settings = Depends(get_app_settings),
+) -> AffiliateLinkService:
+    return _get_affiliate_link_service_cached(
+        database_url=settings.tracking_database_url,
+        db_pool_min_size=settings.tracking_db_pool_min_size,
+        db_pool_max_size=settings.tracking_db_pool_max_size,
+        redirect_base_url=settings.affiliate_redirect_base_url,
+        signing_secret=settings.affiliate_signing_secret,
+        rules_json=settings.affiliate_link_rules_json,
+        legacy_template=settings.affiliate_link_template,
     )
 
 

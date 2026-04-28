@@ -2,6 +2,7 @@ from .domain import (
     AppUser,
     AlertEvent,
     AlertRuleType,
+    AffiliateClickEvent,
     NotificationEvent,
     NotificationEventStatus,
     PriceSnapshot,
@@ -23,6 +24,7 @@ from .repository import TrackingRepository
 __all__ = [
     "AlertEvent",
     "AlertRuleType",
+    "AffiliateClickEvent",
     "AppUser",
     "NotificationEvent",
     "NotificationEventStatus",

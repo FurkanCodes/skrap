@@ -95,6 +95,8 @@ class TrackedItemResponse(BaseModel):
     last_raw_text: str | None
     last_source: str | None
     created_via: Literal["dashboard", "extension"] | None = None
+    outbound_url: str | None = None
+    outbound_is_affiliate: bool = False
     status: Literal["active", "paused"]
     tracking_mode: Literal["monitor", "alert"]
     alerts_enabled: bool

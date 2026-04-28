@@ -61,6 +61,8 @@ def test_render_price_drop_message_includes_links_and_drop_values() -> None:
         "previous_amount": "100.00",
         "current_amount": "90.00",
         "currency": "USD",
+        "outbound_url": "https://app.example.com/r/signed-token",
+        "outbound_is_affiliate": True,
         "affiliate_url": "https://go.example.com/out?u=https%3A%2F%2Fexample.com%2Fp%2F1",
         "listing_url": "https://merchant.example.com/buy/1",
         "product_url": "https://example.com/p/1",
@@ -71,11 +73,28 @@ def test_render_price_drop_message_includes_links_and_drop_values() -> None:
 
     assert "↓ Price drop: 100.00 → 90.00 USD (-10 USD, -10%)" in message
     assert "Item: Test Product" in message
-    assert "Open product: https://go.example.com/out?u=https%3A%2F%2Fexample.com%2Fp%2F1" in message
+    assert "Open product: https://app.example.com/r/signed-token" in message
+    assert "Affiliate link" in message
     assert "Listing:" not in message
     assert "Product:" not in message
     assert "At:" not in message
     assert "monitor update" not in message.lower()
+
+
+def test_render_price_drop_message_omits_affiliate_label_for_direct_redirect() -> None:
+    payload = {
+        "notification_type": "price_drop",
+        "previous_amount": "100.00",
+        "current_amount": "90.00",
+        "currency": "USD",
+        "outbound_url": "https://app.example.com/r/direct-token",
+        "outbound_is_affiliate": False,
+    }
+
+    message = _render_telegram_message(payload)
+
+    assert "Open product: https://app.example.com/r/direct-token" in message
+    assert "Affiliate link" not in message
 
 
 def test_render_alert_message_uses_target_reached_template() -> None:

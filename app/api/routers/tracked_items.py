@@ -8,12 +8,14 @@ from fastapi.responses import JSONResponse
 from pydantic import AnyHttpUrl
 
 from app.api.dependencies import (
+    get_affiliate_link_service,
     get_app_settings,
     get_current_principal,
     get_scrape_result_cache,
     get_tracking_service,
     get_user_service,
 )
+from app.application.affiliate_link_service import AffiliateLinkService
 from app.api.schemas.tracking import (
     PriceSnapshotResponse,
     TrackedItemBulkBootstrapItemRequest,
@@ -69,12 +71,20 @@ def _normalize_selected_sites(raw_sites: list[str] | None, supported_sites: set[
     return normalized or None
 
 
-def _to_item_response(item: TrackedItem) -> TrackedItemResponse:
+def _to_item_response(
+    item: TrackedItem,
+    *,
+    affiliate_service: AffiliateLinkService | None = None,
+) -> TrackedItemResponse:
     """Map tracking domain object to API response with computed mode flags."""
     payload = asdict(item)
     mode = derive_tracking_mode(item.target_amount)
     payload["tracking_mode"] = mode
     payload["alerts_enabled"] = mode == "alert"
+    if affiliate_service is not None:
+        outbound = affiliate_service.build_outbound_link(item=item, surface="dashboard")
+        payload["outbound_url"] = outbound.outbound_url
+        payload["outbound_is_affiliate"] = outbound.outbound_is_affiliate
     return TrackedItemResponse.model_validate(payload)
 
 
@@ -101,6 +111,7 @@ async def post_tracked_item_bootstrap(
     request: Request,
     settings: Settings = Depends(get_app_settings),
     service: TrackingService = Depends(get_tracking_service),
+    affiliate_service: AffiliateLinkService = Depends(get_affiliate_link_service),
     scrape_result_cache: ScrapeResultCache = Depends(get_scrape_result_cache),
     principal: AuthPrincipal = Depends(get_current_principal),
     user_service: UserService = Depends(get_user_service),
@@ -166,7 +177,10 @@ async def post_tracked_item_bootstrap(
             status_code=409,
             content={
                 "detail": str(exc),
-                "item": _to_item_response(exc.item).model_dump(mode="json"),
+                "item": _to_item_response(
+                    exc.item,
+                    affiliate_service=affiliate_service,
+                ).model_dump(mode="json"),
             },
         )
     except TrackingServiceError as exc:
@@ -176,7 +190,7 @@ async def post_tracked_item_bootstrap(
 
     return TrackedItemBootstrapResponse(
         request_id=request_id,
-        item=_to_item_response(item),
+        item=_to_item_response(item, affiliate_service=affiliate_service),
     )
 
 
@@ -186,6 +200,7 @@ async def post_tracked_items_bulk_bootstrap(
     request: Request,
     settings: Settings = Depends(get_app_settings),
     service: TrackingService = Depends(get_tracking_service),
+    affiliate_service: AffiliateLinkService = Depends(get_affiliate_link_service),
     scrape_result_cache: ScrapeResultCache = Depends(get_scrape_result_cache),
     principal: AuthPrincipal = Depends(get_current_principal),
     user_service: UserService = Depends(get_user_service),
@@ -304,7 +319,7 @@ async def post_tracked_items_bulk_bootstrap(
                 index=index,
                 url=source_url,
                 success=True,
-                item=_to_item_response(item),
+                item=_to_item_response(item, affiliate_service=affiliate_service),
             )
         )
 
@@ -320,6 +335,7 @@ async def post_tracked_items_bulk_bootstrap(
 @router.get("", response_model=TrackedItemListResponse)
 async def get_tracked_items(
     service: TrackingService = Depends(get_tracking_service),
+    affiliate_service: AffiliateLinkService = Depends(get_affiliate_link_service),
     principal: AuthPrincipal = Depends(get_current_principal),
     user_service: UserService = Depends(get_user_service),
 ) -> TrackedItemListResponse:
@@ -327,7 +343,10 @@ async def get_tracked_items(
     current_user = await run_in_threadpool(user_service.provision_from_principal, principal)
     items = await run_in_threadpool(service.list_items, user_id=current_user.user_id)
     return TrackedItemListResponse(
-        items=[_to_item_response(item) for item in items]
+        items=[
+            _to_item_response(item, affiliate_service=affiliate_service)
+            for item in items
+        ]
     )
 
 
@@ -335,6 +354,7 @@ async def get_tracked_items(
 async def get_tracked_item_lookup(
     url: AnyHttpUrl,
     service: TrackingService = Depends(get_tracking_service),
+    affiliate_service: AffiliateLinkService = Depends(get_affiliate_link_service),
     principal: AuthPrincipal = Depends(get_current_principal),
     user_service: UserService = Depends(get_user_service),
 ) -> TrackedItemLookupResponse:
@@ -345,7 +365,9 @@ async def get_tracked_item_lookup(
         str(url),
         user_id=current_user.user_id,
     )
-    return TrackedItemLookupResponse(item=_to_item_response(item) if item else None)
+    return TrackedItemLookupResponse(
+        item=_to_item_response(item, affiliate_service=affiliate_service) if item else None
+    )
 
 
 @router.get("/{item_id}", response_model=TrackedItemDetailResponse)
@@ -353,6 +375,7 @@ async def get_tracked_item(
     item_id: str,
     snapshot_limit: int | None = None,
     service: TrackingService = Depends(get_tracking_service),
+    affiliate_service: AffiliateLinkService = Depends(get_affiliate_link_service),
     principal: AuthPrincipal = Depends(get_current_principal),
     user_service: UserService = Depends(get_user_service),
 ) -> TrackedItemDetailResponse:
@@ -368,7 +391,7 @@ async def get_tracked_item(
         raise HTTPException(status_code=404, detail="tracked item not found")
 
     return TrackedItemDetailResponse(
-        item=_to_item_response(detail.item),
+        item=_to_item_response(detail.item, affiliate_service=affiliate_service),
         recent_snapshots=[
             PriceSnapshotResponse.model_validate(asdict(snapshot))
             for snapshot in detail.recent_snapshots
@@ -381,6 +404,7 @@ async def patch_tracked_item(
     item_id: str,
     payload: TrackedItemUpdateRequest,
     service: TrackingService = Depends(get_tracking_service),
+    affiliate_service: AffiliateLinkService = Depends(get_affiliate_link_service),
     principal: AuthPrincipal = Depends(get_current_principal),
     user_service: UserService = Depends(get_user_service),
 ) -> TrackedItemUpdateResponse:
@@ -408,7 +432,9 @@ async def patch_tracked_item(
     if updated is None:
         raise HTTPException(status_code=404, detail="tracked item not found")
 
-    return TrackedItemUpdateResponse(item=_to_item_response(updated))
+    return TrackedItemUpdateResponse(
+        item=_to_item_response(updated, affiliate_service=affiliate_service)
+    )
 
 
 @router.delete("/{item_id}", status_code=204)

@@ -1063,7 +1063,7 @@ def test_scheduler_emits_alert_event_on_price_below_crossing() -> None:
     assert notifications[0].status == "queued"
     assert notifications[0].alert_event_id == events[0].event_id
     payload = json.loads(notifications[0].payload)
-    assert payload["affiliate_url"] == item.source_url
+    assert "outbound_url" not in payload
     assert payload["product_url"] == item.source_url
 
 
@@ -1114,6 +1114,8 @@ def test_scheduler_includes_affiliate_template_link_in_notification_payload() ->
         jitter_percent=0,
         lease_owner="scheduler-test",
         alert_cooldown_minutes=60,
+        affiliate_redirect_base_url="https://app.example.com",
+        affiliate_signing_secret="secret",
         affiliate_link_template="https://go.example.com/out?u={url}",
     )
 
@@ -1126,7 +1128,8 @@ def test_scheduler_includes_affiliate_template_link_in_notification_payload() ->
     payload = json.loads(notifications[0].payload)
     assert payload["product_url"] == "https://example.com/product/123"
     assert payload["listing_url"] == "https://merchant.example.com/buy/123"
-    assert payload["affiliate_url"] == "https://go.example.com/out?u=https%3A%2F%2Fexample.com%2Fproduct%2F123"
+    assert payload["outbound_url"].startswith("https://app.example.com/r/")
+    assert payload["outbound_is_affiliate"] is True
 
 def test_scheduler_monitor_mode_does_not_notify_when_price_unchanged() -> None:
     repo = _build_repo()

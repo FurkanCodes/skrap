@@ -9,8 +9,8 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 import json
 from typing import Protocol
-from urllib.parse import quote_plus
 
+from app.application.affiliate_link_service import AffiliateLinkService
 from app.application.scrape_service import ScrapeBatchInput, ScrapeBatchOutput
 from app.scraper import PriceResult
 from app.tracking import (
@@ -91,6 +91,9 @@ class TrackingSchedulerService:
         fetch_mode: str = "auto",
         alert_cooldown_minutes: int = 60,
         notification_max_attempts: int = 5,
+        affiliate_redirect_base_url: str = "",
+        affiliate_signing_secret: str = "",
+        affiliate_link_rules_json: str = "",
         affiliate_link_template: str = "",
     ) -> None:
         self._repository = repository
@@ -105,7 +108,13 @@ class TrackingSchedulerService:
         self._fetch_mode = fetch_mode
         self._alert_cooldown_minutes = max(0, alert_cooldown_minutes)
         self._notification_max_attempts = max(1, notification_max_attempts)
-        self._affiliate_link_template = affiliate_link_template.strip()
+        self._affiliate_link_service = AffiliateLinkService(
+            repository=repository,
+            redirect_base_url=affiliate_redirect_base_url,
+            signing_secret=affiliate_signing_secret,
+            rules_json=affiliate_link_rules_json,
+            legacy_template=affiliate_link_template,
+        )
 
     def run_once(self) -> SchedulerCycleResult:
         started = time.perf_counter()
@@ -562,7 +571,7 @@ class TrackingSchedulerService:
             return
         self._enqueue_notification_event(
             event,
-            user_id=getattr(item_before, "user_id", "legacy_owner"),
+            item_before=item_before,
             product_url=product_url,
             listing_url=listing_url,
         )
@@ -590,9 +599,10 @@ class TrackingSchedulerService:
             user_id=getattr(item_before, "user_id", "legacy_owner")
         )
         channel = "telegram" if active_chat_id else "log"
-        affiliate_url = _build_affiliate_url(
+        outbound = self._affiliate_link_service.build_outbound_link(
+            item=item_before,
             product_url=product_url,
-            template=self._affiliate_link_template,
+            surface="telegram",
         )
         payload = {
             "notification_type": "price_drop",
@@ -610,8 +620,11 @@ class TrackingSchedulerService:
             payload["product_url"] = product_url
         if listing_url:
             payload["listing_url"] = listing_url
-        if affiliate_url:
-            payload["affiliate_url"] = affiliate_url
+        if item_before.product_name:
+            payload["product_name"] = item_before.product_name
+        if outbound.outbound_url:
+            payload["outbound_url"] = outbound.outbound_url
+            payload["outbound_is_affiliate"] = outbound.outbound_is_affiliate
         if active_chat_id is not None:
             payload["chat_id"] = active_chat_id
 
@@ -671,9 +684,10 @@ class TrackingSchedulerService:
             user_id=getattr(item_before, "user_id", "legacy_owner")
         )
         channel = "telegram" if active_chat_id else "log"
-        affiliate_url = _build_affiliate_url(
+        outbound = self._affiliate_link_service.build_outbound_link(
+            item=item_before,
             product_url=product_url,
-            template=self._affiliate_link_template,
+            surface="telegram",
         )
         payload = {
             "notification_type": "price_increase",
@@ -691,8 +705,9 @@ class TrackingSchedulerService:
             payload["product_url"] = product_url
         if listing_url:
             payload["listing_url"] = listing_url
-        if affiliate_url:
-            payload["affiliate_url"] = affiliate_url
+        if outbound.outbound_url:
+            payload["outbound_url"] = outbound.outbound_url
+            payload["outbound_is_affiliate"] = outbound.outbound_is_affiliate
         if active_chat_id is not None:
             payload["chat_id"] = active_chat_id
 
@@ -746,16 +761,19 @@ class TrackingSchedulerService:
         self,
         event: AlertEvent,
         *,
-        user_id: str,
+        item_before: TrackedItem,
         product_url: str | None,
         listing_url: str | None,
     ) -> None:
         now = event.triggered_at
-        active_chat_id = self._get_active_telegram_chat(user_id=user_id)
+        active_chat_id = self._get_active_telegram_chat(
+            user_id=getattr(item_before, "user_id", "legacy_owner")
+        )
         channel = "telegram" if active_chat_id else "log"
-        affiliate_url = _build_affiliate_url(
+        outbound = self._affiliate_link_service.build_outbound_link(
+            item=item_before,
             product_url=product_url,
-            template=self._affiliate_link_template,
+            surface="telegram",
         )
         payload = {
             "notification_type": "alert",
@@ -773,8 +791,9 @@ class TrackingSchedulerService:
             payload["product_url"] = product_url
         if listing_url:
             payload["listing_url"] = listing_url
-        if affiliate_url:
-            payload["affiliate_url"] = affiliate_url
+        if outbound.outbound_url:
+            payload["outbound_url"] = outbound.outbound_url
+            payload["outbound_is_affiliate"] = outbound.outbound_is_affiliate
         if active_chat_id is not None:
             payload["chat_id"] = active_chat_id
         notification = NotificationEvent(
@@ -1080,24 +1099,6 @@ def _resolve_listing_url(scrape_result: PriceResult) -> str | None:
         return None
     listing_url = (scrape_result.listings[0].listing_url or "").strip()
     return listing_url or None
-
-
-def _build_affiliate_url(*, product_url: str | None, template: str) -> str | None:
-    url = (product_url or "").strip()
-    if not url:
-        return None
-
-    normalized_template = template.strip()
-    if not normalized_template:
-        # No template configured: fall back to direct product URL.
-        return url
-
-    encoded = quote_plus(url)
-    if "{url}" in normalized_template:
-        return normalized_template.replace("{url}", encoded)
-
-    separator = "&" if "?" in normalized_template else "?"
-    return f"{normalized_template}{separator}url={encoded}"
 
 
 def _parse_decimal(value: str | None) -> Decimal | None:

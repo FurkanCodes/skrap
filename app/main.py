@@ -10,6 +10,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.dependencies import warm_application_dependencies
+from app.api.routers.affiliate import router as affiliate_router
 from app.api.routers.discover import router as discover_router
 from app.api.routers.health import router as health_router
 from app.api.routers.me import router as me_router
@@ -106,6 +107,7 @@ def create_app() -> FastAPI:
     app.include_router(me_router, prefix=settings.api_prefix)
     app.include_router(tracked_items_router, prefix=settings.api_prefix)
     app.include_router(telegram_router, prefix=settings.api_prefix)
+    app.include_router(affiliate_router, prefix=settings.api_prefix)
     return app
 
 

@@ -196,12 +196,15 @@ def _render_telegram_message(payload: dict) -> str:
     item_id = str(payload.get("item_id", "")).strip()
     product_name = str(payload.get("product_name", "")).strip()
     tracking_mode = str(payload.get("tracking_mode", "")).strip().lower()
+    outbound_url = str(payload.get("outbound_url", "")).strip()
+    outbound_is_affiliate = bool(payload.get("outbound_is_affiliate"))
     affiliate_url = str(payload.get("affiliate_url", "")).strip()
     listing_url = str(payload.get("listing_url", "")).strip()
     product_url = str(payload.get("product_url", "")).strip()
 
     currency_suffix = f" {currency}" if currency else ""
     primary_url = _primary_product_url(
+        outbound_url=outbound_url,
         affiliate_url=affiliate_url,
         listing_url=listing_url,
         product_url=product_url,
@@ -251,11 +254,19 @@ def _render_telegram_message(payload: dict) -> str:
 
     if primary_url:
         lines.append(f"Open product: {primary_url}")
+    if primary_url and outbound_is_affiliate:
+        lines.append("Affiliate link")
     return "\n".join(lines)
 
 
-def _primary_product_url(*, affiliate_url: str, listing_url: str, product_url: str) -> str:
-    for candidate in (affiliate_url, listing_url, product_url):
+def _primary_product_url(
+    *,
+    outbound_url: str,
+    affiliate_url: str,
+    listing_url: str,
+    product_url: str,
+) -> str:
+    for candidate in (outbound_url, affiliate_url, listing_url, product_url):
         if candidate:
             return candidate
     return ""

@@ -74,6 +74,9 @@ def _build_worker_service() -> TrackingSchedulerWorkerService:
         fetch_mode="auto",
         alert_cooldown_minutes=settings.scheduler_alert_cooldown_minutes,
         notification_max_attempts=settings.notifier_max_attempts,
+        affiliate_redirect_base_url=settings.affiliate_redirect_base_url,
+        affiliate_signing_secret=settings.affiliate_signing_secret,
+        affiliate_link_rules_json=settings.affiliate_link_rules_json,
         affiliate_link_template=settings.affiliate_link_template,
     )
     return TrackingSchedulerWorkerService.from_scheduler_service(

@@ -139,6 +139,9 @@ class Settings:
     telegram_bot_username: str
     telegram_webhook_secret: str
     telegram_connect_ttl_minutes: int
+    affiliate_redirect_base_url: str
+    affiliate_signing_secret: str
+    affiliate_link_rules_json: str
     affiliate_link_template: str
     auth_required: bool
     better_auth_jwks_url: str
@@ -274,6 +277,9 @@ def get_settings() -> Settings:
         telegram_bot_username=_parse_str_env("TELEGRAM_BOT_USERNAME", ""),
         telegram_webhook_secret=_parse_str_env("TELEGRAM_WEBHOOK_SECRET", ""),
         telegram_connect_ttl_minutes=_parse_int_env("TELEGRAM_CONNECT_TTL_MINUTES", 15),
+        affiliate_redirect_base_url=_parse_str_env("AFFILIATE_REDIRECT_BASE_URL", ""),
+        affiliate_signing_secret=_parse_str_env("AFFILIATE_SIGNING_SECRET", ""),
+        affiliate_link_rules_json=_parse_str_env("AFFILIATE_LINK_RULES_JSON", ""),
         affiliate_link_template=_parse_str_env("AFFILIATE_LINK_TEMPLATE", ""),
         auth_required=_parse_str_env("AUTH_REQUIRED", "false").lower() == "true",
         better_auth_jwks_url=_parse_str_env("BETTER_AUTH_JWKS_URL", ""),

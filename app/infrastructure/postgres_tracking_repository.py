@@ -12,6 +12,7 @@ from psycopg_pool import ConnectionPool
 from app.tracking.domain import (
     AppUser,
     AlertEvent,
+    AffiliateClickEvent,
     NotificationEvent,
     NotificationEventStatus,
     PriceSnapshot,
@@ -221,6 +222,18 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS affiliate_click_events (
+        event_id TEXT PRIMARY KEY,
+        item_id TEXT,
+        user_id TEXT,
+        surface TEXT NOT NULL,
+        merchant_domain TEXT,
+        rule_id TEXT,
+        is_affiliate BOOLEAN NOT NULL DEFAULT FALSE,
+        created_at TIMESTAMPTZ NOT NULL
+    )
+    """,
+    """
     CREATE INDEX IF NOT EXISTS idx_tracked_items_due_active
       ON tracked_items(next_check_at, item_id)
       WHERE status = 'active'
@@ -292,6 +305,14 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
     """
     CREATE INDEX IF NOT EXISTS idx_telegram_connect_sessions_user_status
       ON telegram_connect_sessions(user_id, status, expires_at)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_affiliate_click_events_created
+      ON affiliate_click_events(created_at DESC)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_affiliate_click_events_item_created
+      ON affiliate_click_events(item_id, created_at DESC)
     """,
 )
 
@@ -1542,6 +1563,34 @@ class PostgresTrackingRepository:
                 (item_id, limit),
             ).fetchall()
         return [self._row_to_notification_event(row) for row in rows]
+
+    def save_affiliate_click_event(self, event: AffiliateClickEvent) -> None:
+        with self._pool.connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO affiliate_click_events (
+                    event_id,
+                    item_id,
+                    user_id,
+                    surface,
+                    merchant_domain,
+                    rule_id,
+                    is_affiliate,
+                    created_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT(event_id) DO NOTHING
+                """,
+                (
+                    event.event_id,
+                    event.item_id,
+                    event.user_id,
+                    event.surface,
+                    event.merchant_domain,
+                    event.rule_id,
+                    event.is_affiliate,
+                    _parse_timestamp(event.created_at),
+                ),
+            )
 
     def claim_due_items(
         self,

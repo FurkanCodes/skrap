@@ -149,6 +149,20 @@ class NotificationEvent:
     updated_at: str
 
 
+@dataclass(frozen=True)
+class AffiliateClickEvent:
+    """Minimal outbound click audit event."""
+
+    event_id: str
+    item_id: str | None
+    user_id: str | None
+    surface: str
+    merchant_domain: str | None
+    rule_id: str | None
+    is_affiliate: bool
+    created_at: str
+
+
 @dataclass(frozen=True, kw_only=True)
 class TelegramConnectSession:
     """Short-lived Telegram connection handshake state."""
