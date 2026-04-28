@@ -5,7 +5,7 @@ from decimal import Decimal
 import pytest
 from scrapling.parser import Selector
 
-from app.scraper.adapters import AkakceAdapter, N11Adapter, TeknosaAdapter
+from app.scraper.adapters import AkakceAdapter, HepsiburadaAdapter, N11Adapter, TeknosaAdapter
 from app.scraper.domain import PriceCandidate
 from app.scraper.extractors.generic import extract_price_listings_from_selector
 from app.scraper.fetching import (
@@ -451,6 +451,51 @@ def test_teknosa_adapter_ignores_hidden_mini_cart_zero_price() -> None:
     assert listings[0].currency == "TRY"
     assert listings[0].raw_text == "13.299,00 TL"
     assert all(str(listing.amount) != "0.00" for listing in listings)
+
+
+def test_hepsiburada_adapter_prefers_cart_special_price_and_flags_source() -> None:
+    page = Selector(
+        """
+        <html>
+          <body>
+            <section class="price-box">
+              <div>Sepete özel fiyat</div>
+              <div>105,75 TL</div>
+              <div data-test-id="price-current-price">124,41 TL</div>
+              <button>Kazancımı gör</button>
+              <div>18,66 TL</div>
+            </section>
+          </body>
+        </html>
+        """
+    )
+
+    listings = HepsiburadaAdapter().extract(page, "https://www.hepsiburada.com/example-p-HBC000")
+
+    assert len(listings) == 1
+    assert str(listings[0].amount) == "105.75"
+    assert listings[0].currency == "TRY"
+    assert listings[0].raw_text == "Sepete özel fiyat 105,75 TL"
+    assert listings[0].source == "hepsiburada:cart-special"
+
+
+def test_hepsiburada_adapter_falls_back_to_current_price_without_cart_special() -> None:
+    page = Selector(
+        """
+        <html>
+          <body>
+            <div data-test-id="price-current-price">124,41 TL</div>
+          </body>
+        </html>
+        """
+    )
+
+    listings = HepsiburadaAdapter().extract(page, "https://www.hepsiburada.com/example-p-HBC000")
+
+    assert len(listings) == 1
+    assert str(listings[0].amount) == "124.41"
+    assert listings[0].currency == "TRY"
+    assert listings[0].source == "hepsiburada:selector:0"
 
 
 def test_parse_sites_blob() -> None:

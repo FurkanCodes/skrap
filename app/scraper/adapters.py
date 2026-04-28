@@ -184,6 +184,60 @@ class TeknosaAdapter(SiteAdapter):
         return self._positive_only(generic_candidates)
 
 
+class HepsiburadaAdapter(SiteAdapter):
+    """Hepsiburada parser that flags basket-only discounted prices."""
+
+    key = "hepsiburada"
+
+    _cart_special_pattern = re.compile(
+        r"(?P<label>sepete\s+özel\s+fiyat)\s+"
+        r"(?P<amount>(?:\d{1,3}(?:[\s.]\d{3})+|\d+)(?:,\d{2})?)\s*"
+        r"(?P<currency>tl|try|₺)?",
+        re.IGNORECASE,
+    )
+    _price_selectors = (
+        "[data-test-id='price-current-price']::text",
+        "[itemprop='price']::attr(content)",
+        ".price::text",
+    )
+
+    def _extract_cart_special_price(self, page: Selector) -> PriceCandidate | None:
+        page_text = str(page.get_all_text(separator=" ", strip=True))
+        compact = " ".join(page_text.split())
+        match = self._cart_special_pattern.search(compact)
+        if not match:
+            return None
+
+        currency_text = match.group("currency") or "TL"
+        price_text = f"{match.group('amount')} {currency_text}"
+        parsed = scan_price_in_text(price_text, source="hepsiburada:cart-special", require_currency=False)
+        if not parsed:
+            return None
+
+        return PriceCandidate(
+            raw_text=f"{match.group('label')} {parsed.raw_text}",
+            amount=parsed.amount,
+            currency=parsed.currency or "TRY",
+            source="hepsiburada:cart-special",
+        )
+
+    def extract(self, page: Selector, url: str) -> list[PriceCandidate]:
+        cart_special = self._extract_cart_special_price(page)
+        if cart_special is not None:
+            return [cart_special]
+
+        selector_candidates = _extract_candidates_from_selectors(
+            page,
+            selectors=self._price_selectors,
+            source_prefix=self.key,
+            default_currency="TRY",
+        )
+        if selector_candidates:
+            return selector_candidates
+
+        return extract_price_listings_from_selector(page)
+
+
 class TrendyolAdapter(SiteAdapter):
     """Trendyol parser that prefers PDP winner-variant state over stale JSON-LD."""
 

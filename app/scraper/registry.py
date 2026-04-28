@@ -8,6 +8,7 @@ from .adapters import (
     AkakceAdapter,
     ConfiguredSiteAdapter,
     GenericAdapter,
+    HepsiburadaAdapter,
     N11Adapter,
     NeweggAdapter,
     SiteAdapter,
@@ -166,15 +167,7 @@ ADAPTERS: dict[str, SiteAdapter] = {
         ),
         default_currency="TRY",
     ),
-    "hepsiburada": ConfiguredSiteAdapter(
-        key="hepsiburada",
-        price_selectors=(
-            "[data-test-id='price-current-price']::text",
-            "[itemprop='price']::attr(content)",
-            ".price::text",
-        ),
-        default_currency="TRY",
-    ),
+    "hepsiburada": HepsiburadaAdapter(),
     "homedepot": ConfiguredSiteAdapter(
         key="homedepot",
         price_selectors=(
