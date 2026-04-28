@@ -17,6 +17,7 @@ from app.scraper.inputs import parse_fetch_mode, parse_sites_blob, parse_urls_bl
 from app.scraper.metadata import extract_product_metadata
 from app.scraper.parsing import make_item_id, normalize_runtime_url
 from app.scraper.registry import ADAPTERS, detect_site_key, list_supported_sites
+from app.scraper.scrape_spider import MODE_TO_SESSION_ID
 from app.scraper.service import extract_price_from_page, is_result_qualified, missing_required_result_fields
 
 
@@ -515,11 +516,19 @@ def test_auto_escalation_signals_and_followup_order() -> None:
             return list(self)
 
     class _FakePage:
-        def __init__(self, status: int | None, text: str, script_count: int = 0, noscript: list[str] | None = None):
+        def __init__(
+            self,
+            status: int | None,
+            text: str,
+            script_count: int = 0,
+            noscript: list[str] | None = None,
+            html_content: str = "",
+        ):
             self.status = status
             self._text = text
             self._script_count = script_count
             self._noscript = noscript or []
+            self.html_content = html_content
 
         def get_all_text(self, separator: str = " ", strip: bool = True) -> str:
             return self._text
@@ -533,20 +542,43 @@ def test_auto_escalation_signals_and_followup_order() -> None:
 
     protection_page = _FakePage(status=403, text="welcome")
     js_page = _FakePage(status=None, text="Please enable JavaScript to continue", script_count=20)
+    amazon_captcha_page = _FakePage(
+        status=200,
+        text="Amazon.com.tr",
+        html_content='<html><script>ue_sn = "opfcaptcha.amazon.com.tr";</script></html>',
+    )
 
     protection_signals = detect_auto_escalation_signals(protection_page)
     js_signals = detect_auto_escalation_signals(js_page)
+    amazon_captcha_signals = detect_auto_escalation_signals(amazon_captcha_page)
 
     assert protection_signals == {"protection"}
     assert js_signals == {"javascript"}
+    assert amazon_captcha_signals == {"amazon_captcha", "protection"}
     assert auto_remaining_modes("http_direct", signals=protection_signals, proxy_enabled=True)[:2] == [
         "http_proxy",
         "stealth_proxy",
     ]
     assert auto_remaining_modes("http_direct", signals=js_signals, proxy_enabled=False) == [
-        "dynamic_proxy",
-        "stealth_proxy",
+        "dynamic_direct",
+        "stealth_direct",
     ]
+
+
+def test_amazon_auto_mode_uses_proxy_browsers_before_direct_browser_fallback() -> None:
+    modes = auto_remaining_modes(
+        "http_direct",
+        signals={"amazon_captcha", "protection"},
+        proxy_enabled=True,
+        url="https://www.amazon.com.tr/example/dp/B000000000",
+    )
+
+    assert modes == ["dynamic_proxy", "stealth_proxy", "dynamic_direct", "stealth_direct"]
+
+
+def test_spider_mode_map_supports_direct_browser_fallbacks() -> None:
+    assert MODE_TO_SESSION_ID["dynamic_direct"] == "dynamic_direct"
+    assert MODE_TO_SESSION_ID["stealth_direct"] == "stealth_direct"
 
 
 def test_auto_mode_starts_protected_sites_with_stealth() -> None:
@@ -657,6 +689,29 @@ def test_dynamic_fetch_passes_configured_proxy_rotator(monkeypatch: pytest.Monke
     assert captured["proxy_rotator"] is proxy_rotator
     assert captured["block_ads"] is True
     assert "doubleclick.net" in captured["blocked_domains"]
+    assert captured["retries"] == 8
+
+
+def test_dynamic_direct_fetch_skips_configured_proxy_rotator(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.scraper import fetching
+
+    proxy_rotator = object()
+    captured: dict[str, object] = {}
+
+    def _fake_fetch(url: str, **kwargs: object) -> Selector:
+        captured["url"] = url
+        captured.update(kwargs)
+        return Selector("<html></html>")
+
+    monkeypatch.setattr(fetching, "get_scrape_proxy_rotator", lambda: proxy_rotator)
+    monkeypatch.setattr(fetching, "get_proxy_retry_count", lambda: 8)
+    monkeypatch.setattr(fetching.DynamicFetcher, "fetch", _fake_fetch)
+
+    page = fetching.fetch_page_with_mode("https://www.amazon.com.tr/example/dp/B000000000", timeout=10, mode="dynamic_direct")
+
+    assert isinstance(page, Selector)
+    assert captured["url"] == "https://www.amazon.com.tr/example/dp/B000000000"
+    assert "proxy_rotator" not in captured
     assert captured["retries"] == 1
 
 
@@ -680,7 +735,7 @@ def test_stealth_fetch_passes_configured_proxy_rotator(monkeypatch: pytest.Monke
     assert isinstance(page, Selector)
     assert captured["url"] == "https://example.com/protected"
     assert captured["proxy_rotator"] is proxy_rotator
-    assert captured["retries"] == 1
+    assert captured["retries"] == 8
 
 
 def test_find_fallback_is_bounded() -> None:
@@ -782,6 +837,37 @@ def test_extract_product_metadata_uses_site_fallback_selectors_when_og_missing()
     assert result.image_url == "https://www.target.com/images/target-product.jpg"
     assert result.amount == "149.99"
     assert result.adapter_key == "target"
+
+
+def test_amazon_adapter_extracts_core_price_from_rendered_product_page() -> None:
+    page = Selector(
+        """
+        <html>
+          <head>
+            <meta property="og:title" content="Ninja CREAMi 7-in-1 Dondurma Makinesi">
+            <meta property="og:image" content="https://m.media-amazon.com/images/I/example.jpg">
+          </head>
+          <body>
+            <div id="corePrice_feature_div">
+              <span class="a-price">
+                <span class="a-offscreen">11.877,00TL</span>
+              </span>
+            </div>
+          </body>
+        </html>
+        """
+    )
+
+    result = extract_price_from_page(
+        page,
+        "https://www.amazon.com.tr/Ninja-CREAMi-7-in-1-Dondurma-Makinesi/dp/B0G26N7D9N?th=1",
+    )
+
+    assert result.success is True
+    assert result.amount == "11877.00"
+    assert result.currency == "TRY"
+    assert result.raw_text == "11.877,00TL"
+    assert result.source == "amazon:selector:0"
 
 
 def test_result_qualification_requires_title_image_and_price() -> None:

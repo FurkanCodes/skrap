@@ -3,6 +3,7 @@ from __future__ import annotations
 """Fetcher selection and auto-escalation heuristics."""
 
 import logging
+from urllib.parse import urlparse
 
 from scrapling.fetchers import DynamicFetcher, Fetcher, StealthyFetcher
 from scrapling.parser import Selector
@@ -18,6 +19,18 @@ EXTERNAL_TO_INTERNAL_MODE = {
     "dynamic": "dynamic_proxy",
     "stealth": "stealth_proxy",
 }
+AMAZON_CAPTCHA_HINTS = (
+    "opfcaptcha.amazon",
+    "/errors/validatecaptcha",
+    "validatecaptcha",
+)
+
+
+def _is_amazon_url(url: str | None) -> bool:
+    if not url:
+        return False
+    host = urlparse(url).netloc.lower().removeprefix("www.")
+    return host == "amazon.com.tr" or host.startswith("amazon.") or ".amazon." in host
 
 
 def initial_auto_fetch_mode(url: str) -> str:
@@ -35,6 +48,7 @@ def auto_remaining_modes(
     *,
     signals: set[str] | None = None,
     proxy_enabled: bool | None = None,
+    url: str | None = None,
 ) -> list[str]:
     """Return untried auto-mode fallbacks in the best order for observed signals."""
     normalized_mode = normalize_internal_fetch_mode(current_mode)
@@ -42,7 +56,9 @@ def auto_remaining_modes(
     has_proxy = get_scrape_proxy_rotator() is not None if proxy_enabled is None else proxy_enabled
     observed = signals or set()
 
-    if "cloudflare" in observed:
+    if _is_amazon_url(url) and ("protection" in observed or normalized_mode != "http_direct"):
+        ordered = ["dynamic_proxy", "stealth_proxy", "dynamic_direct", "stealth_direct"]
+    elif "cloudflare" in observed:
         ordered = ["http_proxy", "stealth_cf_proxy", "stealth_proxy", "dynamic_proxy"]
     elif "protection" in observed:
         ordered = ["http_proxy", "stealth_proxy", "dynamic_proxy"]
@@ -51,10 +67,18 @@ def auto_remaining_modes(
     else:
         ordered = ["dynamic_proxy", "stealth_proxy"]
 
-    if has_proxy and normalized_mode == "http_direct":
+    if has_proxy and normalized_mode == "http_direct" and not _is_amazon_url(url):
         ordered = ["http_proxy", *ordered]
     if not has_proxy:
-        ordered = [mode for mode in ordered if mode != "http_proxy"]
+        direct_mode_for_proxy_mode = {
+            "dynamic_proxy": "dynamic_direct",
+            "stealth_proxy": "stealth_direct",
+        }
+        ordered = [
+            direct_mode_for_proxy_mode.get(mode, mode)
+            for mode in ordered
+            if mode != "http_proxy"
+        ]
     remaining: list[str] = []
     for mode in ordered:
         if mode in seen or mode in remaining:
@@ -101,39 +125,42 @@ def fetch_page_with_mode(url: str, timeout: int, mode: str) -> Selector:
         **browser_resource_blocking_kwargs(),
     }
 
-    if internal_mode == "dynamic_proxy":
-        proxy_rotator = get_scrape_proxy_rotator()
+    if internal_mode in {"dynamic_direct", "dynamic_proxy"}:
+        proxy_rotator = get_scrape_proxy_rotator() if internal_mode == "dynamic_proxy" else None
         proxy_kwargs = {"proxy_rotator": proxy_rotator} if proxy_rotator is not None else {}
+        retries = get_proxy_retry_count() if proxy_rotator is not None else 1
         _logger.info(
-            "scrape_fetch_dynamic_config proxy_enabled=%s retries=%s url=%s",
+            "scrape_fetch_dynamic_config mode=%s proxy_enabled=%s retries=%s url=%s",
+            internal_mode,
             proxy_rotator is not None,
-            get_proxy_retry_count(),
+            retries,
             url,
         )
         dynamic_kwargs = {
             **base_kwargs,
-            "retries": 1,
+            "retries": retries,
             **proxy_kwargs,
         }
         page = DynamicFetcher.fetch(url, **dynamic_kwargs)
-        _logger.info("scrape_fetch_complete mode=dynamic_proxy status=%s url=%s", getattr(page, "status", None), url)
+        _logger.info("scrape_fetch_complete mode=%s status=%s url=%s", internal_mode, getattr(page, "status", None), url)
         return page
-    if internal_mode in {"stealth_proxy", "stealth_cf_proxy"}:
-        proxy_rotator = get_scrape_proxy_rotator()
+    if internal_mode in {"stealth_direct", "stealth_proxy", "stealth_cf_proxy"}:
+        proxy_rotator = get_scrape_proxy_rotator() if internal_mode in {"stealth_proxy", "stealth_cf_proxy"} else None
         proxy_kwargs = {"proxy_rotator": proxy_rotator} if proxy_rotator is not None else {}
         solve_cloudflare = internal_mode == "stealth_cf_proxy"
+        retries = get_proxy_retry_count() if proxy_rotator is not None else 1
         _logger.info(
             "scrape_fetch_stealth_config mode=%s proxy_enabled=%s retries=%s solve_cloudflare=%s url=%s",
             internal_mode,
             proxy_rotator is not None,
-            get_proxy_retry_count(),
+            retries,
             solve_cloudflare,
             url,
         )
         stealth_kwargs = {
             **base_kwargs,
             "timeout": cloudflare_timeout_ms if solve_cloudflare else stealth_timeout_ms,
-            "retries": 1,
+            "retries": retries,
             "disable_resources": not solve_cloudflare,
             "network_idle": solve_cloudflare,
             "wait": 1500 if solve_cloudflare else 1000,
@@ -163,6 +190,12 @@ def detect_auto_escalation_signals(page: Selector) -> set[str]:
         signals.add("protection")
 
     page_text = str(page.get_all_text(separator=" ", strip=True)).lower()
+    html_text = str(getattr(page, "html_content", "") or "").lower()
+    if any(token in html_text for token in AMAZON_CAPTCHA_HINTS) or (
+        "captcha" in html_text and "amazon" in html_text
+    ):
+        signals.add("amazon_captcha")
+        signals.add("protection")
     if any(token in page_text for token in PROTECTION_HINTS):
         signals.add("protection")
     if any(token in page_text for token in CLOUDFLARE_HINTS):

@@ -25,6 +25,34 @@ from .registry import ADAPTERS, detect_site_key, list_supported_sites
 
 REQUIRED_RESULT_FIELDS: tuple[str, ...] = ("amount", "product_name", "image_url")
 _logger = logging.getLogger("scraper_api.scraper")
+_PROXY_ERROR_HINTS = (
+    "connect tunnel failed",
+    "err_tunnel_connection_failed",
+    "proxy",
+)
+
+
+def _classify_fetch_errors(errors: list[str]) -> str:
+    if not errors:
+        return "unknown"
+    joined = " ".join(errors).lower()
+    if any(hint in joined for hint in _PROXY_ERROR_HINTS):
+        return "proxy_failed"
+    if "timeout" in joined:
+        return "timeout"
+    if "connection" in joined or "network" in joined:
+        return "network"
+    return "fetch_failed"
+
+
+def _classify_extraction_signals(signals: set[str]) -> str | None:
+    if "amazon_captcha" in signals:
+        return "blocked_by_amazon_captcha"
+    if "cloudflare" in signals:
+        return "blocked_by_cloudflare"
+    if "protection" in signals:
+        return "blocked_by_protection"
+    return None
 
 
 def _utc_now_iso() -> str:
@@ -132,6 +160,7 @@ def fetch_price(
 
     modes_to_try = [initial_auto_fetch_mode(runtime_url)] if normalized_fetch_mode == "auto" else [normalized_fetch_mode]
     attempted_fetch_errors: list[str] = []
+    blocked_extract_error: str | None = None
     fetched_any_page = False
     _logger.info(
         "scrape_start url=%s fetch_mode=%s initial_modes=%s site=%s adapter=%s",
@@ -154,14 +183,15 @@ def fetch_price(
                 exc,
             )
             if normalized_fetch_mode == "auto":
-                for followup_mode in auto_remaining_modes(mode):
+                followup_modes = auto_remaining_modes(mode, url=runtime_url)
+                for followup_mode in followup_modes:
                     if followup_mode not in modes_to_try:
                         modes_to_try.append(followup_mode)
                 _logger.info(
                     "scrape_auto_escalate url=%s from_mode=%s to_modes=%s reason=fetch_error",
                     runtime_url,
                     mode,
-                    ",".join(auto_remaining_modes(mode)) or "<none>",
+                    ",".join(followup_modes) or "<none>",
                 )
             continue
 
@@ -197,7 +227,8 @@ def fetch_price(
         )
         if normalized_fetch_mode == "auto":
             signals = detect_auto_escalation_signals(page)
-            followup_modes = auto_remaining_modes(mode, signals=signals)
+            blocked_extract_error = blocked_extract_error or _classify_extraction_signals(signals)
+            followup_modes = auto_remaining_modes(mode, signals=signals, url=runtime_url)
             for followup_mode in followup_modes:
                 if followup_mode not in modes_to_try:
                     modes_to_try.append(followup_mode)
@@ -210,26 +241,28 @@ def fetch_price(
             )
 
     if fetched_any_page:
-        _logger.info("scrape_failed url=%s error=price_not_found attempted_modes=%s", runtime_url, ",".join(modes_to_try))
+        error = blocked_extract_error or "price_not_found"
+        _logger.info("scrape_failed url=%s error=%s attempted_modes=%s", runtime_url, error, ",".join(modes_to_try))
         return PriceResult(
             url=runtime_url,
             success=False,
             product_id=product_id,
             site_key=site_key,
             adapter_key=adapter_key,
-            error="price_not_found",
+            error=error,
             extracted_at=extracted_at,
         )
 
     error_detail = "; ".join(attempted_fetch_errors) if attempted_fetch_errors else "unknown"
-    _logger.info("scrape_failed url=%s error=fetch_failed attempted_modes=%s detail=%s", runtime_url, ",".join(modes_to_try), error_detail)
+    error_class = _classify_fetch_errors(attempted_fetch_errors)
+    _logger.info("scrape_failed url=%s error=%s attempted_modes=%s detail=%s", runtime_url, error_class, ",".join(modes_to_try), error_detail)
     return PriceResult(
         url=runtime_url,
         success=False,
         product_id=product_id,
         site_key=site_key,
         adapter_key=adapter_key,
-        error=f"fetch_failed: {error_detail}",
+        error=f"{error_class}: {error_detail}",
         extracted_at=extracted_at,
     )
 

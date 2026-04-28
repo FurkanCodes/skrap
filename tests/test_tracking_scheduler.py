@@ -802,6 +802,7 @@ def test_scheduler_run_once_failure_keeps_last_good_price() -> None:
         last_amount="120.00",
     )
     repo.save_item(item)
+    previous_checked_at = item.last_checked_at
 
     scrape_result = PriceResult(
         url=item.source_url,
@@ -832,6 +833,9 @@ def test_scheduler_run_once_failure_keeps_last_good_price() -> None:
     updated = repo.get_item(item.item_id)
     assert updated is not None
     assert updated.last_amount == "120.00"
+    assert updated.last_checked_at == previous_checked_at
+    assert updated.last_check_finished_at is not None
+    assert updated.last_check_finished_at != previous_checked_at
     assert updated.lease_owner is None
     assert updated.lease_until is None
     assert updated.next_check_at is not None

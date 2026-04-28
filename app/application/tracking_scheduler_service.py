@@ -482,7 +482,6 @@ class TrackingSchedulerService:
         error = scrape_result.error or "price_not_found"
         updated_item = replace(
             item,
-            last_checked_at=finished_at,
             updated_at=finished_at,
             next_check_at=next_check_at,
             lease_owner=None,
@@ -1031,6 +1030,8 @@ def _classify_error(error: str | None) -> str:
     normalized = error.strip().lower()
     if "protection" in normalized or "blocked" in normalized or "cloudflare" in normalized:
         return "blocked"
+    if "proxy_failed" in normalized or "proxy" in normalized:
+        return "proxy_failed"
     if "timeout" in normalized:
         return "timeout"
     if "price_not_found" in normalized or "no_result" in normalized:
