@@ -182,6 +182,7 @@ def test_bootstrap_creates_item_and_snapshot() -> None:
     assert item.check_interval_minutes == 45
     assert item.target_amount == "9.00"
     assert item.notify_on_price_increase is False
+    assert item.created_via == "dashboard"
     assert item.tracking_mode == "alert"
     assert item.alerts_enabled is True
     assert repository.list_snapshots(item.item_id, limit=10)
@@ -269,6 +270,97 @@ def test_bootstrap_can_enable_price_increase_notifications() -> None:
     assert item.notify_on_price_increase is True
 
 
+def test_bootstrap_can_create_extension_origin_item() -> None:
+    service, _, _ = _build_service(_success_result("https://example.com/p/from-extension"))
+
+    item = service.bootstrap(
+        TrackingBootstrapInput(
+            request_id="req_extension_origin",
+            url="https://example.com/p/from-extension",
+            timeout_seconds=20,
+            selected_sites=None,
+            fetch_mode="auto",
+            check_interval_minutes=60,
+            target_amount=None,
+            created_via="extension",
+        )
+    )
+
+    assert item.created_via == "extension"
+
+
+def test_bootstrap_preserves_existing_created_via_on_upsert() -> None:
+    service, repository, _ = _build_service(_success_result("https://example.com/p/preserve-origin"))
+
+    first = service.bootstrap(
+        TrackingBootstrapInput(
+            request_id="req_first_origin",
+            url="https://example.com/p/preserve-origin",
+            timeout_seconds=20,
+            selected_sites=None,
+            fetch_mode="auto",
+            check_interval_minutes=60,
+            target_amount=None,
+            created_via="extension",
+        )
+    )
+    second = service.bootstrap(
+        TrackingBootstrapInput(
+            request_id="req_second_origin",
+            url="https://example.com/p/preserve-origin",
+            timeout_seconds=20,
+            selected_sites=None,
+            fetch_mode="auto",
+            check_interval_minutes=120,
+            target_amount=None,
+            created_via="dashboard",
+        )
+    )
+
+    assert first.item_id == second.item_id
+    assert second.created_via == "extension"
+    assert repository.items[first.item_id].created_via == "extension"
+
+
+def test_bootstrap_preserves_legacy_null_created_via_on_upsert() -> None:
+    service, repository, _ = _build_service(_success_result("https://example.com/p/legacy-origin"))
+
+    first = service.bootstrap(
+        TrackingBootstrapInput(
+            request_id="req_first_legacy_origin",
+            url="https://example.com/p/legacy-origin",
+            timeout_seconds=20,
+            selected_sites=None,
+            fetch_mode="auto",
+            check_interval_minutes=60,
+            target_amount=None,
+            created_via="extension",
+        )
+    )
+    repository.items[first.item_id] = TrackedItem(
+        **{
+            **first.__dict__,
+            "created_via": None,
+        }
+    )
+
+    second = service.bootstrap(
+        TrackingBootstrapInput(
+            request_id="req_second_legacy_origin",
+            url="https://example.com/p/legacy-origin",
+            timeout_seconds=20,
+            selected_sites=None,
+            fetch_mode="auto",
+            check_interval_minutes=120,
+            target_amount=None,
+            created_via="extension",
+        )
+    )
+
+    assert second.item_id == first.item_id
+    assert second.created_via is None
+
+
 def test_bootstrap_new_item_enqueues_tracking_started_notification_when_chat_connected() -> None:
     service, repository, _ = _build_service(_success_result())
 
@@ -338,6 +430,7 @@ def test_bootstrap_duplicate_policy_reject_returns_existing_without_mutation() -
             fetch_mode="auto",
             check_interval_minutes=60,
             target_amount=None,
+            created_via="extension",
         )
     )
     snapshots_after_first = len(repository.snapshots)
@@ -353,13 +446,16 @@ def test_bootstrap_duplicate_policy_reject_returns_existing_without_mutation() -
                 check_interval_minutes=120,
                 target_amount="8.00",
                 duplicate_policy="reject",
+                created_via="dashboard",
             )
         )
 
     assert exc_info.value.item.item_id == first.item_id
+    assert exc_info.value.item.created_via == "extension"
     assert len(repository.snapshots) == snapshots_after_first
     assert repository.items[first.item_id].target_amount is None
     assert repository.items[first.item_id].check_interval_minutes == 60
+    assert repository.items[first.item_id].created_via == "extension"
     assert scrape_service.calls == 2
 
 

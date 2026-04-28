@@ -144,6 +144,7 @@ async def post_tracked_item_bootstrap(
         target_amount=payload.target_amount,
         notify_on_price_increase=payload.notify_on_price_increase,
         duplicate_policy=payload.duplicate_policy,
+        created_via=payload.created_via,
         scrape_result_ref=scrape_result_ref,
         pre_fetched_result=pre_fetched_result,
         user_id=current_user.user_id,

@@ -5,6 +5,7 @@ from typing import Literal
 
 TrackingStatus = Literal["active", "paused"]
 TrackingMode = Literal["monitor", "alert"]
+TrackingCreatedVia = Literal["dashboard", "extension"]
 TrackingCheckRunStatus = Literal["running", "succeeded", "failed"]
 AlertRuleType = Literal["price_below"]
 NotificationEventStatus = Literal["queued", "sending", "sent", "failed", "dead"]
@@ -47,6 +48,7 @@ class TrackedItem:
     created_at: str
     updated_at: str
     last_checked_at: str | None
+    created_via: TrackingCreatedVia | None = None
     notify_on_price_increase: bool = False
     next_check_at: str | None = None
     lease_owner: str | None = None

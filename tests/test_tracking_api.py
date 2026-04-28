@@ -74,6 +74,7 @@ class FakeTrackingService:
             last_amount="99.99",
             last_raw_text="$99.99",
             last_source="test:fake",
+            created_via=payload.created_via or "dashboard",
             status="active",
             check_interval_minutes=payload.check_interval_minutes,
             target_amount=payload.target_amount,
@@ -162,6 +163,7 @@ class FakeTrackingService:
             last_amount=item.last_amount,
             last_raw_text=item.last_raw_text,
             last_source=item.last_source,
+            created_via=item.created_via,
             status=payload.status or item.status,
             check_interval_minutes=payload.check_interval_minutes or item.check_interval_minutes,
             target_amount=(
@@ -260,6 +262,7 @@ def test_tracked_items_bootstrap_creates_item() -> None:
     assert body["item"]["check_interval_minutes"] == 30
     assert body["item"]["target_amount"] == "89.99"
     assert body["item"]["notify_on_price_increase"] is True
+    assert body["item"]["created_via"] == "dashboard"
     assert body["item"]["tracking_mode"] == "alert"
     assert body["item"]["alerts_enabled"] is True
     assert "next_check_at" in body["item"]
@@ -301,6 +304,27 @@ def test_tracked_items_bootstrap_from_scrape_result_ref_without_url() -> None:
     assert service.last_bootstrap_payload is not None
     assert service.last_bootstrap_payload.scrape_result_ref == "result-ref-1"
     assert service.last_bootstrap_payload.pre_fetched_result is not None
+    assert body["item"]["created_via"] == "dashboard"
+
+
+def test_tracked_items_bootstrap_accepts_extension_origin() -> None:
+    service = FakeTrackingService(items={}, snapshots={})
+    client = _build_client(service)
+
+    response = client.post(
+        "/api/v1/tracked-items",
+        json={
+            "url": "https://example.com/products/from-extension",
+            "created_via": "extension",
+        },
+    )
+    _clear_overrides()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["item"]["created_via"] == "extension"
+    assert service.last_bootstrap_payload is not None
+    assert service.last_bootstrap_payload.created_via == "extension"
 
 
 def test_tracked_items_bootstrap_rejects_expired_scrape_result_ref() -> None:
@@ -360,6 +384,7 @@ def test_tracked_items_bootstrap_duplicate_policy_reject_returns_409() -> None:
         last_amount="20.00",
         last_raw_text="$20.00",
         last_source="test:init",
+        created_via="extension",
         status="active",
         check_interval_minutes=60,
         target_amount=None,
@@ -383,6 +408,7 @@ def test_tracked_items_bootstrap_duplicate_policy_reject_returns_409() -> None:
     body = response.json()
     assert body["detail"] == "Already tracking this product."
     assert body["item"]["item_id"] == existing.item_id
+    assert body["item"]["created_via"] == "extension"
 
 
 def test_tracked_items_bootstrap_requires_url_or_scrape_result_ref() -> None:

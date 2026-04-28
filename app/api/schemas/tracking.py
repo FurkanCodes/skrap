@@ -15,6 +15,7 @@ class TrackedItemBootstrapRequest(BaseModel):
     target_amount: str | None = None
     notify_on_price_increase: bool | None = None
     duplicate_policy: Literal["upsert", "reject"] = "upsert"
+    created_via: Literal["dashboard", "extension"] | None = None
 
     @model_validator(mode="after")
     def validate_source(self) -> "TrackedItemBootstrapRequest":
@@ -93,6 +94,7 @@ class TrackedItemResponse(BaseModel):
     last_amount: str | None
     last_raw_text: str | None
     last_source: str | None
+    created_via: Literal["dashboard", "extension"] | None = None
     status: Literal["active", "paused"]
     tracking_mode: Literal["monitor", "alert"]
     alerts_enabled: bool

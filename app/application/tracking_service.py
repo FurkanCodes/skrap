@@ -51,6 +51,7 @@ class TrackingBootstrapInput:
     target_amount: str | None
     notify_on_price_increase: bool | None = None
     duplicate_policy: str = "upsert"
+    created_via: str | None = None
     scrape_result_ref: str | None = None
     pre_fetched_result: PriceResult | None = None
     user_id: str | None = None
@@ -206,6 +207,7 @@ class TrackingService:
             notify_on_price_increase = bool(payload.notify_on_price_increase)
 
         status: TrackingStatus = existing.status if existing is not None else "active"
+        created_via = existing.created_via if existing is not None else payload.created_via or "dashboard"
 
         item = TrackedItem(
             item_id=item_id,
@@ -226,6 +228,7 @@ class TrackingService:
             last_amount=result.amount,
             last_raw_text=result.raw_text,
             last_source=result.source,
+            created_via=created_via,
             status=status,
             check_interval_minutes=interval,
             target_amount=target_amount,
@@ -650,6 +653,7 @@ def _build_bootstrap_request_hash(payload: TrackingBootstrapInput) -> str:
         "target_amount": _normalize_target_amount(payload.target_amount),
         "notify_on_price_increase": payload.notify_on_price_increase,
         "duplicate_policy": payload.duplicate_policy,
+        "created_via": payload.created_via or "dashboard",
     }
     serialized = json.dumps(normalized, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()

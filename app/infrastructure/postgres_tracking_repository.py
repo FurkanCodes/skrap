@@ -47,6 +47,7 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
         last_amount TEXT,
         last_raw_text TEXT,
         last_source TEXT,
+        created_via TEXT CHECK (created_via IN ('dashboard', 'extension')),
         status TEXT NOT NULL CHECK (status IN ('active', 'paused')),
         check_interval_minutes INTEGER NOT NULL CHECK (check_interval_minutes >= 1),
         target_amount TEXT,
@@ -475,6 +476,24 @@ class PostgresTrackingRepository:
                         """
                         ALTER TABLE tracked_items
                         ADD COLUMN IF NOT EXISTS notify_on_price_increase BOOLEAN NOT NULL DEFAULT FALSE
+                        """
+                    )
+                    conn.execute(
+                        """
+                        ALTER TABLE tracked_items
+                        ADD COLUMN IF NOT EXISTS created_via TEXT
+                        """
+                    )
+                    conn.execute(
+                        """
+                        DO $$
+                        BEGIN
+                            ALTER TABLE tracked_items
+                            ADD CONSTRAINT tracked_items_created_via_check
+                            CHECK (created_via IN ('dashboard', 'extension'));
+                        EXCEPTION WHEN duplicate_object THEN
+                            NULL;
+                        END $$;
                         """
                     )
                     conn.execute(
@@ -1061,6 +1080,7 @@ class PostgresTrackingRepository:
                     last_amount,
                     last_raw_text,
                     last_source,
+                    created_via,
                     status,
                     check_interval_minutes,
                     target_amount,
@@ -1092,6 +1112,7 @@ class PostgresTrackingRepository:
                     %(last_amount)s,
                     %(last_raw_text)s,
                     %(last_source)s,
+                    %(created_via)s,
                     %(status)s,
                     %(check_interval_minutes)s,
                     %(target_amount)s,
@@ -1164,6 +1185,7 @@ class PostgresTrackingRepository:
                         last_amount,
                         last_raw_text,
                         last_source,
+                        created_via,
                         status,
                         check_interval_minutes,
                         target_amount,
@@ -1195,6 +1217,7 @@ class PostgresTrackingRepository:
                         %(last_amount)s,
                         %(last_raw_text)s,
                         %(last_source)s,
+                        %(created_via)s,
                         %(status)s,
                         %(check_interval_minutes)s,
                         %(target_amount)s,
@@ -2051,6 +2074,7 @@ class PostgresTrackingRepository:
             "last_amount": item.last_amount,
             "last_raw_text": item.last_raw_text,
             "last_source": item.last_source,
+            "created_via": item.created_via,
             "status": item.status,
             "check_interval_minutes": item.check_interval_minutes,
             "target_amount": item.target_amount,
@@ -2086,6 +2110,7 @@ class PostgresTrackingRepository:
             last_amount=_as_str(row.get("last_amount")),
             last_raw_text=_as_str(row.get("last_raw_text")),
             last_source=_as_str(row.get("last_source")),
+            created_via=_as_str(row.get("created_via")),
             status=str(row["status"]),
             check_interval_minutes=int(row["check_interval_minutes"]),
             target_amount=_as_str(row.get("target_amount")),
