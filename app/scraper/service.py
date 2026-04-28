@@ -28,7 +28,9 @@ _logger = logging.getLogger("scraper_api.scraper")
 _PROXY_ERROR_HINTS = (
     "connect tunnel failed",
     "err_tunnel_connection_failed",
-    "proxy",
+    "proxy failed",
+    "proxyerror",
+    "tunnel_connection_failed",
 )
 
 
@@ -53,6 +55,18 @@ def _classify_extraction_signals(signals: set[str]) -> str | None:
     if "protection" in signals:
         return "blocked_by_protection"
     return None
+
+
+def _direct_followups_after_proxy_failure(mode: str) -> list[str]:
+    if mode == "dynamic_proxy":
+        return ["dynamic_direct", "stealth_direct"]
+    if mode == "stealth_proxy":
+        return ["stealth_direct"]
+    if mode == "stealth_cf_proxy":
+        return ["stealth_direct"]
+    if mode == "http_proxy":
+        return ["dynamic_direct", "stealth_direct"]
+    return []
 
 
 def _utc_now_iso() -> str:
@@ -171,31 +185,66 @@ def fetch_price(
         adapter_key,
     )
 
-    for mode in modes_to_try:
+    cursor = 0
+    while cursor < len(modes_to_try):
+        mode = modes_to_try[cursor]
+        cursor += 1
+        attempt_index = cursor
+        _logger.info(
+            "scrape_attempt_start index=%s mode=%s url=%s queued_modes=%s",
+            attempt_index,
+            mode,
+            runtime_url,
+            ",".join(modes_to_try),
+        )
         try:
             page = fetch_page_with_mode(runtime_url, timeout=timeout, mode=mode)
         except Exception as exc:
-            attempted_fetch_errors.append(f"{mode}: {exc}")
+            error_text = str(exc)
+            attempted_fetch_errors.append(f"{mode}: {error_text}")
+            fetch_error_class = _classify_fetch_errors([error_text])
             _logger.warning(
-                "scrape_fetch_error mode=%s url=%s error=%s",
+                "scrape_fetch_error mode=%s url=%s error_class=%s error=%s",
                 mode,
                 runtime_url,
+                fetch_error_class,
                 exc,
             )
             if normalized_fetch_mode == "auto":
-                followup_modes = auto_remaining_modes(mode, url=runtime_url)
+                if fetch_error_class == "proxy_failed":
+                    followup_modes = _direct_followups_after_proxy_failure(mode)
+                    reason = "proxy_failed_direct_fallback"
+                else:
+                    followup_modes = auto_remaining_modes(mode, url=runtime_url)
+                    reason = "fetch_error"
                 for followup_mode in followup_modes:
                     if followup_mode not in modes_to_try:
                         modes_to_try.append(followup_mode)
+                if reason == "proxy_failed_direct_fallback":
+                    pending_proxy_modes = {"http_proxy", "dynamic_proxy", "stealth_proxy", "stealth_cf_proxy"}
+                    modes_to_try[:] = [
+                        queued_mode
+                        for index, queued_mode in enumerate(modes_to_try)
+                        if index < cursor or queued_mode not in pending_proxy_modes
+                    ]
                 _logger.info(
-                    "scrape_auto_escalate url=%s from_mode=%s to_modes=%s reason=fetch_error",
+                    "scrape_auto_escalate url=%s from_mode=%s to_modes=%s queued_modes=%s reason=%s",
                     runtime_url,
                     mode,
                     ",".join(followup_modes) or "<none>",
+                    ",".join(modes_to_try),
+                    reason,
                 )
             continue
 
         fetched_any_page = True
+        _logger.info(
+            "scrape_fetch_page_ready index=%s mode=%s url=%s status=%s",
+            attempt_index,
+            mode,
+            runtime_url,
+            getattr(page, "status", None),
+        )
         _logger.info("scrape_extract_start mode=%s url=%s adapter=%s", mode, runtime_url, adapter_key)
         extracted = extract_price_from_page(
             page=page,
@@ -208,22 +257,26 @@ def fetch_price(
         )
         if extracted.success:
             _logger.info(
-                "scrape_success mode=%s url=%s adapter=%s amount=%s currency=%s source=%s",
+                "scrape_success index=%s mode=%s url=%s adapter=%s amount=%s currency=%s source=%s listing_count=%s",
+                attempt_index,
                 mode,
                 runtime_url,
                 extracted.adapter_key,
                 extracted.amount,
                 extracted.currency,
                 extracted.source,
+                extracted.listing_count,
             )
             return extracted
 
         _logger.info(
-            "scrape_extract_failed mode=%s url=%s adapter=%s error=%s",
+            "scrape_extract_failed index=%s mode=%s url=%s adapter=%s error=%s required_missing=%s",
+            attempt_index,
             mode,
             runtime_url,
             extracted.adapter_key,
             extracted.error,
+            ",".join(missing_required_result_fields(extracted)),
         )
         if normalized_fetch_mode == "auto":
             signals = detect_auto_escalation_signals(page)
@@ -233,11 +286,13 @@ def fetch_price(
                 if followup_mode not in modes_to_try:
                     modes_to_try.append(followup_mode)
             _logger.info(
-                "scrape_auto_escalate url=%s from_mode=%s to_modes=%s signals=%s reason=extract_failed",
+                "scrape_auto_escalate url=%s from_mode=%s to_modes=%s queued_modes=%s signals=%s blocked_error=%s reason=extract_failed",
                 runtime_url,
                 mode,
                 ",".join(followup_modes) or "<none>",
+                ",".join(modes_to_try),
                 ",".join(sorted(signals)) or "<none>",
+                blocked_extract_error or "<none>",
             )
 
     if fetched_any_page:

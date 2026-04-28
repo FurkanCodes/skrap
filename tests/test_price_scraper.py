@@ -18,7 +18,7 @@ from app.scraper.metadata import extract_product_metadata
 from app.scraper.parsing import make_item_id, normalize_runtime_url
 from app.scraper.registry import ADAPTERS, detect_site_key, list_supported_sites
 from app.scraper.scrape_spider import MODE_TO_SESSION_ID
-from app.scraper.service import extract_price_from_page, is_result_qualified, missing_required_result_fields
+from app.scraper.service import extract_price_from_page, fetch_price, is_result_qualified, missing_required_result_fields
 
 
 def test_extract_from_meta_tags_single_listing() -> None:
@@ -619,6 +619,47 @@ def test_amazon_auto_mode_uses_proxy_browsers_before_direct_browser_fallback() -
     )
 
     assert modes == ["dynamic_proxy", "stealth_proxy", "dynamic_direct", "stealth_direct"]
+
+
+def test_amazon_auto_jumps_to_direct_browser_after_proxy_tunnel_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.scraper import fetching
+    from app.scraper import service
+
+    attempted_modes: list[str] = []
+
+    def _fake_fetch_page(url: str, timeout: int, mode: str) -> Selector:
+        attempted_modes.append(mode)
+        if mode == "http_direct":
+            return Selector('<html><script>ue_sn = "opfcaptcha.amazon.com.tr";</script></html>')
+        if mode == "dynamic_proxy":
+            raise RuntimeError("CONNECT tunnel failed, response 402")
+        if mode == "dynamic_direct":
+            return Selector(
+                """
+                <html>
+                  <head>
+                    <meta property="og:title" content="Ninja CREAMi 7-in-1 Dondurma Makinesi">
+                    <meta property="og:image" content="https://m.media-amazon.com/images/I/example.jpg">
+                  </head>
+                  <body>
+                    <div id="corePrice_feature_div"><span class="a-offscreen">11.877,00TL</span></div>
+                  </body>
+                </html>
+                """
+            )
+        raise AssertionError(f"unexpected mode: {mode}")
+
+    monkeypatch.setattr(service, "fetch_page_with_mode", _fake_fetch_page)
+    monkeypatch.setattr(fetching, "get_scrape_proxy_rotator", lambda: object())
+
+    result = fetch_price(
+        "https://www.amazon.com.tr/Ninja-CREAMi-7-in-1-Dondurma-Makinesi/dp/B0G26N7D9N?th=1",
+        fetch_mode="auto",
+    )
+
+    assert result.success is True
+    assert result.amount == "11877.00"
+    assert attempted_modes == ["http_direct", "dynamic_proxy", "dynamic_direct"]
 
 
 def test_spider_mode_map_supports_direct_browser_fallbacks() -> None:
