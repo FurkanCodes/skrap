@@ -43,6 +43,7 @@ BROWSER_BLOCKED_DOMAINS: frozenset[str] = frozenset(
         "weborama.fr",
         "yandex.ru",
         "yieldmo.com",
+        "m.media-amazon.com"
     }
 )
 
