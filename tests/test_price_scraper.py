@@ -595,17 +595,31 @@ def test_auto_escalation_signals_and_followup_order() -> None:
     mediamarkt_normal_page = _FakePage(
         status=200,
         text="MediaMarkt privacy copy mentions captcha vendors while showing a normal product page",
+        html_content="<html>captcha Amazon privacy vendor references</html>",
+    )
+    amazon_generic_captcha_page = _FakePage(
+        status=200,
+        text="Amazon.com.tr",
+        html_content="<html>captcha Amazon</html>",
     )
 
     protection_signals = detect_auto_escalation_signals(protection_page)
     js_signals = detect_auto_escalation_signals(js_page)
     amazon_captcha_signals = detect_auto_escalation_signals(amazon_captcha_page)
-    mediamarkt_signals = detect_auto_escalation_signals(mediamarkt_normal_page)
+    mediamarkt_signals = detect_auto_escalation_signals(
+        mediamarkt_normal_page,
+        url="https://www.mediamarkt.com.tr/tr/product/_sample-12345.html",
+    )
+    amazon_generic_captcha_signals = detect_auto_escalation_signals(
+        amazon_generic_captcha_page,
+        url="https://www.amazon.com.tr/example/dp/B000000000",
+    )
 
     assert protection_signals == {"protection"}
     assert js_signals == {"javascript"}
     assert amazon_captcha_signals == {"amazon_captcha", "protection"}
     assert mediamarkt_signals == set()
+    assert amazon_generic_captcha_signals == {"amazon_captcha", "protection"}
     assert auto_remaining_modes("http_direct", signals=protection_signals, proxy_enabled=True)[:2] == [
         "http_proxy",
         "stealth_proxy",

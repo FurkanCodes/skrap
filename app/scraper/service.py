@@ -279,7 +279,7 @@ def fetch_price(
             ",".join(missing_required_result_fields(extracted)),
         )
         if normalized_fetch_mode == "auto":
-            signals = detect_auto_escalation_signals(page)
+            signals = detect_auto_escalation_signals(page, url=runtime_url)
             blocked_extract_error = blocked_extract_error or _classify_extraction_signals(signals)
             followup_modes = auto_remaining_modes(mode, signals=signals, url=runtime_url)
             for followup_mode in followup_modes:

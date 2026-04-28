@@ -181,7 +181,7 @@ def fetch_page_with_mode(url: str, timeout: int, mode: str) -> Selector:
     raise ValueError(f"Unsupported fetch mode '{mode}'")
 
 
-def detect_auto_escalation_signals(page: Selector) -> set[str]:
+def detect_auto_escalation_signals(page: Selector, *, url: str | None = None) -> set[str]:
     """Detect whether HTTP results indicate JS/protection escalation is needed."""
     signals: set[str] = set()
 
@@ -189,10 +189,11 @@ def detect_auto_escalation_signals(page: Selector) -> set[str]:
     if isinstance(status, int) and status in PROTECTION_STATUS_CODES:
         signals.add("protection")
 
+    page_url = url or str(getattr(page, "url", "") or "")
     page_text = str(page.get_all_text(separator=" ", strip=True)).lower()
     html_text = str(getattr(page, "html_content", "") or "").lower()
     if any(token in html_text for token in AMAZON_CAPTCHA_HINTS) or (
-        "captcha" in html_text and "amazon" in html_text
+        _is_amazon_url(page_url) and "captcha" in html_text and "amazon" in html_text
     ):
         signals.add("amazon_captcha")
         signals.add("protection")

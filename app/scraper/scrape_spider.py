@@ -126,16 +126,6 @@ class PriceScrapeSpider(Spider):
             self.concurrent_requests,
         )
         manager.add(
-            "http",
-            FetcherSession(
-                timeout=self._timeout_seconds,
-                retries=2,
-                retry_delay=1,
-                stealthy_headers=True,
-                follow_redirects="safe",
-            ),
-        )
-        manager.add(
             "http_direct",
             FetcherSession(
                 timeout=self._timeout_seconds,
@@ -156,7 +146,6 @@ class PriceScrapeSpider(Spider):
                     follow_redirects="safe",
                     proxy_rotator=proxy_rotator,
                 ),
-                lazy=True,
             )
         manager.add(
             "dynamic_direct",
@@ -270,7 +259,7 @@ class PriceScrapeSpider(Spider):
             )
 
     async def is_blocked(self, response: Response) -> bool:
-        return "protection" in detect_auto_escalation_signals(response)
+        return "protection" in detect_auto_escalation_signals(response, url=str(response.url))
 
     async def retry_blocked_request(self, request: Request, response: Response) -> Request:
         if self._fetch_mode != "auto":
@@ -281,7 +270,7 @@ class PriceScrapeSpider(Spider):
             )
             return request
         current_mode = str(request.meta.get("current_mode", "http"))
-        signals = detect_auto_escalation_signals(response)
+        signals = detect_auto_escalation_signals(response, url=str(response.url))
         remaining_modes = _balanced_spider_remaining_modes(
             current_mode,
             signals=signals,
@@ -356,7 +345,7 @@ class PriceScrapeSpider(Spider):
         )
         if self._fetch_mode == "auto":
             remaining_modes = list(response.meta.get("remaining_modes", []))
-            signals = detect_auto_escalation_signals(response)
+            signals = detect_auto_escalation_signals(response, url=url)
             if not remaining_modes:
                 remaining_modes = _balanced_spider_remaining_modes(
                     current_mode,
