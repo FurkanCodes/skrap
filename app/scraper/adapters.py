@@ -12,6 +12,7 @@ from urllib.parse import parse_qs, urljoin, urlparse
 
 from scrapling.parser import Selector
 
+from .availability import normalize_availability
 from .domain import PriceCandidate
 from .extractors.generic import deduplicate_candidates, extract_price_listings_from_selector
 from .parsing import scan_price_in_text
@@ -157,16 +158,6 @@ class AmazonAdapter(SiteAdapter):
         "#priceblock_dealprice::text",
         "#kindle-price::text",
     )
-    _out_of_stock_markers = (
-        "currently unavailable",
-        "temporarily out of stock",
-        "out of stock",
-        "mevcut değil",
-        "şu anda mevcut değil",
-        "su anda mevcut degil",
-        "stokta yok",
-    )
-
     def _is_unavailable(self, page: Selector) -> bool:
         checks: list[str | None] = [
             page.css("#availability span::text").get(),
@@ -177,14 +168,11 @@ class AmazonAdapter(SiteAdapter):
             page.css("#outOfStock_feature_div span::text").get(),
         ]
         for value in checks:
-            normalized = " ".join(str(value or "").split()).strip().lower()
-            if not normalized:
-                continue
-            if any(marker in normalized for marker in self._out_of_stock_markers):
+            if normalize_availability(value) == "out_of_stock":
                 return True
 
-        page_text = " ".join(str(page.get_all_text(separator=" ", strip=True)).split()).lower()
-        return any(marker in page_text for marker in self._out_of_stock_markers)
+        page_text = " ".join(str(page.get_all_text(separator=" ", strip=True)).split())
+        return normalize_availability(page_text) == "out_of_stock"
 
     def extract(self, page: Selector, url: str) -> list[PriceCandidate]:
         if self._is_unavailable(page):

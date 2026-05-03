@@ -1032,6 +1032,75 @@ def test_extract_price_from_page_returns_stock_only_when_amazon_is_unavailable()
     assert result.source is None
 
 
+def test_extract_price_from_page_returns_stock_only_when_amazon_is_unavailable_in_spanish() -> None:
+    page = Selector(
+        """
+        <html>
+          <head>
+            <meta property="og:title" content="Ninja CREAMi 7-in-1 Dondurma Makinesi">
+            <meta property="og:image" content="https://m.media-amazon.com/images/I/example.jpg">
+          </head>
+          <body>
+            <div id="availabilityInsideBuyBox_feature_div">
+              <div id="availability">
+                <span>Actualmente no disponible.</span>
+              </div>
+            </div>
+            <div class="widgets">
+              <span class="a-price"><span class="a-offscreen">9.999,00 TL</span></span>
+              <span class="price">11.999,00 TL</span>
+            </div>
+          </body>
+        </html>
+        """
+    )
+
+    result = extract_price_from_page(
+        page,
+        "https://www.amazon.es/Ninja-CREAMi-7-in-1-Dondurma-Makinesi/dp/B0G26N7D9N?th=1",
+    )
+
+    assert result.success is True
+    assert result.amount is None
+    assert result.availability == "out_of_stock"
+    assert result.listing_count == 0
+    assert result.source is None
+
+
+def test_extract_price_from_page_returns_stock_only_when_amazon_is_unavailable_in_french() -> None:
+    page = Selector(
+        """
+        <html>
+          <head>
+            <meta property="og:title" content="Ninja CREAMi 7-in-1 Dondurma Makinesi">
+            <meta property="og:image" content="https://m.media-amazon.com/images/I/example.jpg">
+          </head>
+          <body>
+            <div id="availabilityInsideBuyBox_feature_div">
+              <div id="availability">
+                <span>Actuellement indisponible.</span>
+              </div>
+            </div>
+            <div class="widgets">
+              <span class="a-price"><span class="a-offscreen">9.999,00 TL</span></span>
+            </div>
+          </body>
+        </html>
+        """
+    )
+
+    result = extract_price_from_page(
+        page,
+        "https://www.amazon.fr/Ninja-CREAMi-7-in-1-Dondurma-Makinesi/dp/B0G26N7D9N?th=1",
+    )
+
+    assert result.success is True
+    assert result.amount is None
+    assert result.availability == "out_of_stock"
+    assert result.listing_count == 0
+    assert result.source is None
+
+
 def test_extract_price_from_page_returns_stock_only_for_non_amazon_adapter_when_oos() -> None:
     page = Selector(
         """
@@ -1181,6 +1250,75 @@ def test_extract_product_metadata_normalizes_data_stock_status_attribute() -> No
     )
 
     assert metadata["availability"] == "out_of_stock"
+
+
+def test_extract_product_metadata_normalizes_spanish_out_of_stock_phrase() -> None:
+    metadata = extract_product_metadata(
+        Selector(
+            """
+            <html>
+              <head>
+                <meta property='og:title' content='Producto de Prueba'>
+                <meta property='og:image' content='https://cdn.example.com/test.jpg'>
+              </head>
+              <body>
+                <div class='availability'>Actualmente no disponible</div>
+              </body>
+            </html>
+            """
+        ),
+        "https://example.com/products/availability",
+    )
+
+    assert metadata["availability"] == "out_of_stock"
+
+
+@pytest.mark.parametrize(
+    ("availability_text", "expected"),
+    [
+        ("Rupture de stock", "out_of_stock"),  # French
+        ("Nicht auf Lager", "out_of_stock"),  # German
+        ("Esaurito", "out_of_stock"),  # Italian
+        ("Esgotado", "out_of_stock"),  # Portuguese
+        ("Niet op voorraad", "out_of_stock"),  # Dutch
+        ("Brak w magazynie", "out_of_stock"),  # Polish
+        ("Нет в наличии", "out_of_stock"),  # Russian
+        ("Немає в наявності", "out_of_stock"),  # Ukrainian
+        ("缺货", "out_of_stock"),  # Chinese
+        ("在庫切れ", "out_of_stock"),  # Japanese
+        ("품절", "out_of_stock"),  # Korean
+        ("غير متوفر", "out_of_stock"),  # Arabic
+        ("במלאי", "in_stock"),  # Hebrew
+        ("Auf Lager", "in_stock"),  # German in-stock
+        ("En stock", "in_stock"),  # French/Spanish in-stock
+        ("预售", "preorder"),  # Chinese preorder
+        ("Предзаказ", "preorder"),  # Russian preorder
+        ("Discontinuado", "discontinued"),  # Spanish discontinued
+        ("Eingestellt", "discontinued"),  # German discontinued
+    ],
+)
+def test_extract_product_metadata_normalizes_multilingual_availability(
+    availability_text: str,
+    expected: str,
+) -> None:
+    metadata = extract_product_metadata(
+        Selector(
+            f"""
+            <html>
+              <head>
+                <meta property='og:title' content='Global Availability Product'>
+                <meta property='og:image' content='https://cdn.example.com/test.jpg'>
+              </head>
+              <body>
+                <div class='availability'>{availability_text}</div>
+              </body>
+            </html>
+            """
+        ),
+        "https://example.com/products/availability",
+    )
+
+    assert metadata["availability"] == expected
 
 
 def test_extract_product_metadata_prefers_embedded_product_state_over_site_org() -> None:

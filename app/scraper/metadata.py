@@ -9,56 +9,7 @@ from urllib.parse import urljoin, urlparse
 
 from scrapling.parser import Selector
 
-_CANONICAL_AVAILABILITY_VALUES = {"in_stock", "out_of_stock", "preorder", "discontinued"}
-
-_OUT_OF_STOCK_MARKERS = (
-    "outofstock",
-    "out of stock",
-    "currently unavailable",
-    "temporarily out of stock",
-    "sold out",
-    "not in stock",
-    "not available",
-    "no longer available",
-    "unavailable",
-    "stokta yok",
-    "stokta bulunmuyor",
-    "mevcut değil",
-    "mevcut degil",
-    "şu anda mevcut değil",
-    "su anda mevcut degil",
-    "tükendi",
-    "tukendi",
-    "satışta değil",
-    "satista degil",
-    "satışı yok",
-    "satisi yok",
-)
-
-_IN_STOCK_MARKERS = (
-    "instock",
-    "in stock",
-    "available to ship",
-    "available now",
-    "ready to ship",
-    "stokta var",
-    "stokta mevcut",
-)
-
-_PREORDER_MARKERS = (
-    "pre-order",
-    "preorder",
-    "stoklara gelince",
-    "ön sipariş",
-    "on siparis",
-)
-
-_DISCONTINUED_MARKERS = (
-    "discontinued",
-    "production discontinued",
-    "uretimi durduruldu",
-    "üretimi durduruldu",
-)
+from .availability import is_canonical_availability, normalize_availability as _normalize_availability
 
 _COMMON_AVAILABILITY_SELECTORS = (
     "link[itemprop='availability']::attr(href)",
@@ -201,23 +152,6 @@ def _pick_image(value: Any) -> str | None:
     if isinstance(value, dict):
         return _clean_text(value.get("url")) or _clean_text(value.get("contentUrl"))
     return None
-
-
-def _normalize_availability(value: str | None) -> str | None:
-    if not value:
-        return None
-    normalized = " ".join(value.split()).strip().lower()
-    if not normalized:
-        return None
-    if normalized.endswith("/outofstock") or any(marker in normalized for marker in _OUT_OF_STOCK_MARKERS):
-        return "out_of_stock"
-    if normalized.endswith("/preorder") or any(marker in normalized for marker in _PREORDER_MARKERS):
-        return "preorder"
-    if normalized.endswith("/discontinued") or any(marker in normalized for marker in _DISCONTINUED_MARKERS):
-        return "discontinued"
-    if normalized.endswith("/instock") or any(marker in normalized for marker in _IN_STOCK_MARKERS):
-        return "in_stock"
-    return _clean_text(value)
 
 
 def _extract_json_object_after_marker(text: str, marker: str) -> dict[str, Any] | None:
@@ -386,7 +320,7 @@ def _extract_common_availability_hint(page: Selector) -> str | None:
             if not cleaned:
                 continue
             normalized = _normalize_availability(cleaned)
-            if normalized in _CANONICAL_AVAILABILITY_VALUES:
+            if is_canonical_availability(normalized):
                 return cleaned
     return None
 

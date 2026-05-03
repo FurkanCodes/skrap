@@ -20,6 +20,7 @@ from .constants import SUPPORTED_FETCH_MODES
 from .domain import PriceListing, PriceResult
 from .fetching import auto_remaining_modes, detect_auto_escalation_signals, fetch_page_with_mode, initial_auto_fetch_mode
 from .inputs import parse_fetch_mode
+from .availability import normalize_availability
 from .metadata import extract_product_metadata
 from .parsing import make_item_id, make_product_id, normalize_runtime_url, normalize_url
 from .registry import ADAPTERS, detect_site_key, list_supported_sites
@@ -98,8 +99,8 @@ def is_result_qualified(result: PriceResult) -> bool:
 
 
 def _normalize_availability(value: str | None) -> str | None:
-    normalized = (value or "").strip().lower()
-    return normalized or None
+    normalized = normalize_availability(value)
+    return normalized.lower() if normalized else None
 
 
 def _is_not_in_stock(value: str | None) -> bool:
