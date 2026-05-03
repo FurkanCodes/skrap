@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.dependencies import warm_application_dependencies
 from app.api.routers.affiliate import router as affiliate_router
 from app.api.routers.billing import router as billing_router
+from app.api.routers.debug_product import router as debug_product_router
 from app.api.routers.discover import router as discover_router
 from app.api.routers.health import router as health_router
 from app.api.routers.me import router as me_router
@@ -101,6 +102,7 @@ def create_app() -> FastAPI:
         return response
 
     app.include_router(health_router)
+    app.include_router(debug_product_router)
     app.include_router(sites_router, prefix=settings.api_prefix)
     app.include_router(discover_router, prefix=settings.api_prefix)
     app.include_router(scrapes_router, prefix=settings.api_prefix)
