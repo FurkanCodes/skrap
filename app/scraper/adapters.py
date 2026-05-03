@@ -137,6 +137,65 @@ class ConfiguredSiteAdapter(SiteAdapter):
         return extract_price_listings_from_selector(page)
 
 
+class AmazonAdapter(SiteAdapter):
+    """Amazon parser constrained to buy-box/product scope.
+
+    Amazon pages often include unrelated merchandising prices. We intentionally
+    avoid generic fallback so only PDP/buy-box prices are returned.
+    """
+
+    key = "amazon"
+
+    _price_selectors = (
+        "#corePrice_feature_div .a-price .a-offscreen::text",
+        "#corePrice_feature_div .a-offscreen::text",
+        "#corePriceDisplay_desktop_feature_div .a-price .a-offscreen::text",
+        "#corePriceDisplay_desktop_feature_div .a-offscreen::text",
+        "#corePriceDisplay_mobile_feature_div .a-price .a-offscreen::text",
+        "#corePriceDisplay_mobile_feature_div .a-offscreen::text",
+        "#priceblock_ourprice::text",
+        "#priceblock_dealprice::text",
+        "#kindle-price::text",
+    )
+    _out_of_stock_markers = (
+        "currently unavailable",
+        "temporarily out of stock",
+        "out of stock",
+        "mevcut değil",
+        "şu anda mevcut değil",
+        "su anda mevcut degil",
+        "stokta yok",
+    )
+
+    def _is_unavailable(self, page: Selector) -> bool:
+        checks: list[str | None] = [
+            page.css("#availability span::text").get(),
+            page.css("#availabilityInsideBuyBox_feature_div #availability span::text").get(),
+            page.css("#availabilityOutsideBuyBox_feature_div #availability span::text").get(),
+            page.css("#outOfStock span::text").get(),
+            page.css("#outOfStock::text").get(),
+            page.css("#outOfStock_feature_div span::text").get(),
+        ]
+        for value in checks:
+            normalized = " ".join(str(value or "").split()).strip().lower()
+            if not normalized:
+                continue
+            if any(marker in normalized for marker in self._out_of_stock_markers):
+                return True
+
+        page_text = " ".join(str(page.get_all_text(separator=" ", strip=True)).split()).lower()
+        return any(marker in page_text for marker in self._out_of_stock_markers)
+
+    def extract(self, page: Selector, url: str) -> list[PriceCandidate]:
+        if self._is_unavailable(page):
+            return []
+        return _extract_candidates_from_selectors(
+            page,
+            selectors=self._price_selectors,
+            source_prefix=self.key,
+        )
+
+
 class TeknosaAdapter(SiteAdapter):
     """Teknosa parser that avoids hidden mini-cart zero totals."""
 

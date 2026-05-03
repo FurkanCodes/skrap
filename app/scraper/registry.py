@@ -6,6 +6,7 @@ from urllib.parse import urlparse
 
 from .adapters import (
     AkakceAdapter,
+    AmazonAdapter,
     ConfiguredSiteAdapter,
     GenericAdapter,
     HepsiburadaAdapter,
@@ -108,15 +109,7 @@ ADAPTERS: dict[str, SiteAdapter] = {
             "[itemprop='price']::attr(content)",
         ),
     ),
-    "amazon": ConfiguredSiteAdapter(
-        key="amazon",
-        price_selectors=(
-            "#corePrice_feature_div span.a-offscreen::text",
-            "span#priceblock_ourprice::text",
-            "span#priceblock_dealprice::text",
-            "[data-a-color='price'] .a-offscreen::text",
-        ),
-    ),
+    "amazon": AmazonAdapter(),
     "bestbuy": ConfiguredSiteAdapter(
         key="bestbuy",
         price_selectors=(

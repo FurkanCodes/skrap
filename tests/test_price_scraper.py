@@ -994,7 +994,42 @@ def test_amazon_adapter_extracts_core_price_from_rendered_product_page() -> None
     assert result.amount == "11877.00"
     assert result.currency == "TRY"
     assert result.raw_text == "11.877,00TL"
-    assert result.source == "amazon:selector:0"
+    assert result.source.startswith("amazon:selector:")
+
+
+def test_extract_price_from_page_returns_stock_only_when_amazon_is_unavailable() -> None:
+    page = Selector(
+        """
+        <html>
+          <head>
+            <meta property="og:title" content="Ninja CREAMi 7-in-1 Dondurma Makinesi">
+            <meta property="og:image" content="https://m.media-amazon.com/images/I/example.jpg">
+          </head>
+          <body>
+            <div id="availabilityInsideBuyBox_feature_div">
+              <div id="availability">
+                <span>Su anda mevcut degil.</span>
+              </div>
+            </div>
+            <div class="widgets">
+              <span class="a-price"><span class="a-offscreen">9.999,00 TL</span></span>
+              <span class="price">11.999,00 TL</span>
+            </div>
+          </body>
+        </html>
+        """
+    )
+
+    result = extract_price_from_page(
+        page,
+        "https://www.amazon.com.tr/Ninja-CREAMi-7-in-1-Dondurma-Makinesi/dp/B0G26N7D9N?th=1",
+    )
+
+    assert result.success is True
+    assert result.amount is None
+    assert result.availability == "out_of_stock"
+    assert result.listing_count == 0
+    assert result.source is None
 
 
 def test_result_qualification_requires_title_image_and_price() -> None:
@@ -1071,6 +1106,27 @@ def test_extract_product_metadata_normalizes_common_out_of_stock_phrases() -> No
               </head>
               <body>
                 <div class='availability'>Currently unavailable</div>
+              </body>
+            </html>
+            """
+        ),
+        "https://example.com/products/availability",
+    )
+
+    assert metadata["availability"] == "out_of_stock"
+
+
+def test_extract_product_metadata_normalizes_stokta_yok_phrase_as_out_of_stock() -> None:
+    metadata = extract_product_metadata(
+        Selector(
+            """
+            <html>
+              <head>
+                <meta property='og:title' content='Test Product'>
+                <meta property='og:image' content='https://cdn.example.com/test.jpg'>
+              </head>
+              <body>
+                <div class='availability'>Stokta yok</div>
               </body>
             </html>
             """

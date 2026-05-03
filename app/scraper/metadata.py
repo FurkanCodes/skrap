@@ -136,7 +136,9 @@ def _pick_image(value: Any) -> str | None:
 def _normalize_availability(value: str | None) -> str | None:
     if not value:
         return None
-    normalized = value.strip().lower()
+    normalized = " ".join(value.split()).strip().lower()
+    if not normalized:
+        return None
     if normalized.endswith("/instock") or "in stock" in normalized:
         return "in_stock"
     if "available to ship" in normalized:
@@ -149,20 +151,30 @@ def _normalize_availability(value: str | None) -> str | None:
         return "out_of_stock"
     if normalized == "unavailable":
         return "out_of_stock"
+    if "stokta yok" in normalized:
+        return "out_of_stock"
+    if "stokta bulunmuyor" in normalized:
+        return "out_of_stock"
+    if "mevcut değil" in normalized or "mevcut degil" in normalized:
+        return "out_of_stock"
+    if "şu anda mevcut değil" in normalized or "su anda mevcut degil" in normalized:
+        return "out_of_stock"
+    if "tükendi" in normalized or "tukendi" in normalized:
+        return "out_of_stock"
+    if "satışta değil" in normalized or "satista degil" in normalized:
+        return "out_of_stock"
     if normalized.endswith("/preorder") or "pre-order" in normalized:
         return "preorder"
     if "preorder" in normalized:
+        return "preorder"
+    if "stoklara gelince" in normalized:
         return "preorder"
     if normalized.endswith("/discontinued"):
         return "discontinued"
     if "discontinued" in normalized:
         return "discontinued"
-    if "stokta" in normalized:
+    if "stokta var" in normalized or "stokta mevcut" in normalized:
         return "in_stock"
-    if "stoklara gelince" in normalized:
-        return "preorder"
-    if "tukendi" in normalized:
-        return "out_of_stock"
     return _clean_text(value)
 
 
@@ -299,6 +311,30 @@ def _is_trendyol_host(source_url: str) -> bool:
     if host.startswith("www."):
         host = host[4:]
     return host == "trendyol.com" or host.endswith(".trendyol.com")
+
+
+def _is_amazon_host(source_url: str) -> bool:
+    host = urlparse(source_url).netloc.lower()
+    if host.startswith("www."):
+        host = host[4:]
+    return host == "amazon.com.tr" or host.startswith("amazon.") or ".amazon." in host
+
+
+def _extract_amazon_availability(page: Selector) -> str | None:
+    selectors = (
+        "#availability span::text",
+        "#availabilityInsideBuyBox_feature_div #availability span::text",
+        "#availabilityOutsideBuyBox_feature_div #availability span::text",
+        "#outOfStock span::text",
+        "#outOfStock::text",
+        "#outOfStock_feature_div span::text",
+    )
+    for selector in selectors:
+        for value in page.css(selector).getall():
+            cleaned = _clean_text(value)
+            if cleaned:
+                return cleaned
+    return None
 
 
 def _detect_site_key_from_url(source_url: str) -> str | None:
@@ -609,6 +645,10 @@ def extract_product_metadata(page: Selector, source_url: str) -> dict[str, str |
     metadata["canonical_url"] = urljoin(source_url, canonical_url) if canonical_url else source_url
     if _is_homepage_url(metadata["canonical_url"], source_url):
         metadata["canonical_url"] = source_url
+
+    if not metadata["availability"]:
+        if _is_amazon_host(source_url):
+            metadata["availability"] = _normalize_availability(_extract_amazon_availability(page))
 
     if not metadata["availability"]:
         availability_hint = _first_css(

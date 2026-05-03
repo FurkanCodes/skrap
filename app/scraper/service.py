@@ -415,6 +415,7 @@ def extract_price_from_page(
     resolved_adapter_key = adapter_key or (resolved_site_key if resolved_site_key in ADAPTERS else "generic")
     resolved_extracted_at = extracted_at or _utc_now_iso()
     metadata = extract_product_metadata(page, url)
+    normalized_availability = _normalize_availability(metadata["availability"])
 
     if selected_sites is not None and resolved_adapter_key not in selected_sites:
         return PriceResult(
@@ -431,8 +432,30 @@ def extract_price_from_page(
             gtin=metadata["gtin"],
             image_url=metadata["image_url"],
             canonical_url=metadata["canonical_url"],
-            availability=metadata["availability"],
+            availability=normalized_availability,
             extracted_at=resolved_extracted_at,
+        )
+
+    if _is_not_in_stock(normalized_availability) and _is_present(metadata["product_name"]) and (
+        _is_present(metadata["image_url"]) or _is_present(metadata["canonical_url"])
+    ):
+        return PriceResult(
+            url=url,
+            success=True,
+            product_id=resolved_product_id,
+            site_key=resolved_site_key,
+            adapter_key=resolved_adapter_key,
+            product_name=metadata["product_name"],
+            brand=metadata["brand"],
+            model=metadata["model"],
+            sku=metadata["sku"],
+            gtin=metadata["gtin"],
+            image_url=metadata["image_url"],
+            canonical_url=metadata["canonical_url"],
+            availability=normalized_availability,
+            extracted_at=resolved_extracted_at,
+            listing_count=0,
+            listings=[],
         )
 
     adapter = ADAPTERS[resolved_adapter_key]
@@ -454,7 +477,7 @@ def extract_price_from_page(
             gtin=metadata["gtin"],
             image_url=metadata["image_url"],
             canonical_url=metadata["canonical_url"],
-            availability=metadata["availability"],
+            availability=normalized_availability,
             extracted_at=resolved_extracted_at,
         )
 
@@ -493,7 +516,7 @@ def extract_price_from_page(
         gtin=metadata["gtin"],
         image_url=metadata["image_url"],
         canonical_url=metadata["canonical_url"],
-        availability=metadata["availability"],
+        availability=normalized_availability,
         extracted_at=resolved_extracted_at,
         listing_count=len(listings),
         listings=listings,
