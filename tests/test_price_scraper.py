@@ -1032,6 +1032,31 @@ def test_extract_price_from_page_returns_stock_only_when_amazon_is_unavailable()
     assert result.source is None
 
 
+def test_extract_price_from_page_returns_stock_only_for_non_amazon_adapter_when_oos() -> None:
+    page = Selector(
+        """
+        <html>
+          <head>
+            <meta property="og:title" content="Target Product">
+            <meta property="og:image" content="https://target.scene7.com/image/example">
+          </head>
+          <body>
+            <div data-stock-status="sold out">Sold out</div>
+            <div data-test='product-price'>$149.99</div>
+          </body>
+        </html>
+        """
+    )
+
+    result = extract_price_from_page(page, "https://www.target.com/p/sample-product/-/A-123456")
+
+    assert result.success is True
+    assert result.amount is None
+    assert result.availability == "out_of_stock"
+    assert result.listing_count == 0
+    assert result.source is None
+
+
 def test_result_qualification_requires_title_image_and_price() -> None:
     complete = extract_price_from_page(
         Selector(
@@ -1127,6 +1152,27 @@ def test_extract_product_metadata_normalizes_stokta_yok_phrase_as_out_of_stock()
               </head>
               <body>
                 <div class='availability'>Stokta yok</div>
+              </body>
+            </html>
+            """
+        ),
+        "https://example.com/products/availability",
+    )
+
+    assert metadata["availability"] == "out_of_stock"
+
+
+def test_extract_product_metadata_normalizes_data_stock_status_attribute() -> None:
+    metadata = extract_product_metadata(
+        Selector(
+            """
+            <html>
+              <head>
+                <meta property='og:title' content='Test Product'>
+                <meta property='og:image' content='https://cdn.example.com/test.jpg'>
+              </head>
+              <body>
+                <div data-stock-status="sold out">Sold out</div>
               </body>
             </html>
             """

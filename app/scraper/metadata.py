@@ -9,6 +9,76 @@ from urllib.parse import urljoin, urlparse
 
 from scrapling.parser import Selector
 
+_CANONICAL_AVAILABILITY_VALUES = {"in_stock", "out_of_stock", "preorder", "discontinued"}
+
+_OUT_OF_STOCK_MARKERS = (
+    "outofstock",
+    "out of stock",
+    "currently unavailable",
+    "temporarily out of stock",
+    "sold out",
+    "not in stock",
+    "not available",
+    "no longer available",
+    "unavailable",
+    "stokta yok",
+    "stokta bulunmuyor",
+    "mevcut değil",
+    "mevcut degil",
+    "şu anda mevcut değil",
+    "su anda mevcut degil",
+    "tükendi",
+    "tukendi",
+    "satışta değil",
+    "satista degil",
+    "satışı yok",
+    "satisi yok",
+)
+
+_IN_STOCK_MARKERS = (
+    "instock",
+    "in stock",
+    "available to ship",
+    "available now",
+    "ready to ship",
+    "stokta var",
+    "stokta mevcut",
+)
+
+_PREORDER_MARKERS = (
+    "pre-order",
+    "preorder",
+    "stoklara gelince",
+    "ön sipariş",
+    "on siparis",
+)
+
+_DISCONTINUED_MARKERS = (
+    "discontinued",
+    "production discontinued",
+    "uretimi durduruldu",
+    "üretimi durduruldu",
+)
+
+_COMMON_AVAILABILITY_SELECTORS = (
+    "link[itemprop='availability']::attr(href)",
+    "[itemprop='availability']::attr(href)",
+    "[data-availability]::attr(data-availability)",
+    "[data-stock]::attr(data-stock)",
+    "[data-stock-status]::attr(data-stock-status)",
+    "[data-stock-status]::text",
+    "[data-testid*='availability']::text",
+    "[data-test-id*='availability']::text",
+    "[data-test*='availability']::text",
+    "[id*='availability']::text",
+    "[class*='availability']::text",
+    "[id*='stock']::text",
+    "[class*='stock']::text",
+    "[aria-label*='stock']::attr(aria-label)",
+    "[aria-label*='stok']::attr(aria-label)",
+    ".availability::text",
+)
+
 _SITE_DOMAIN_SUFFIXES: dict[str, tuple[str, ...]] = {
     "a101": ("a101.com.tr",),
     "aliexpress": ("aliexpress.com",),
@@ -139,41 +209,13 @@ def _normalize_availability(value: str | None) -> str | None:
     normalized = " ".join(value.split()).strip().lower()
     if not normalized:
         return None
-    if normalized.endswith("/instock") or "in stock" in normalized:
-        return "in_stock"
-    if "available to ship" in normalized:
-        return "in_stock"
-    if normalized.endswith("/outofstock") or "out of stock" in normalized:
+    if normalized.endswith("/outofstock") or any(marker in normalized for marker in _OUT_OF_STOCK_MARKERS):
         return "out_of_stock"
-    if "currently unavailable" in normalized:
-        return "out_of_stock"
-    if "temporarily out of stock" in normalized:
-        return "out_of_stock"
-    if normalized == "unavailable":
-        return "out_of_stock"
-    if "stokta yok" in normalized:
-        return "out_of_stock"
-    if "stokta bulunmuyor" in normalized:
-        return "out_of_stock"
-    if "mevcut değil" in normalized or "mevcut degil" in normalized:
-        return "out_of_stock"
-    if "şu anda mevcut değil" in normalized or "su anda mevcut degil" in normalized:
-        return "out_of_stock"
-    if "tükendi" in normalized or "tukendi" in normalized:
-        return "out_of_stock"
-    if "satışta değil" in normalized or "satista degil" in normalized:
-        return "out_of_stock"
-    if normalized.endswith("/preorder") or "pre-order" in normalized:
+    if normalized.endswith("/preorder") or any(marker in normalized for marker in _PREORDER_MARKERS):
         return "preorder"
-    if "preorder" in normalized:
-        return "preorder"
-    if "stoklara gelince" in normalized:
-        return "preorder"
-    if normalized.endswith("/discontinued"):
+    if normalized.endswith("/discontinued") or any(marker in normalized for marker in _DISCONTINUED_MARKERS):
         return "discontinued"
-    if "discontinued" in normalized:
-        return "discontinued"
-    if "stokta var" in normalized or "stokta mevcut" in normalized:
+    if normalized.endswith("/instock") or any(marker in normalized for marker in _IN_STOCK_MARKERS):
         return "in_stock"
     return _clean_text(value)
 
@@ -333,6 +375,18 @@ def _extract_amazon_availability(page: Selector) -> str | None:
         for value in page.css(selector).getall():
             cleaned = _clean_text(value)
             if cleaned:
+                return cleaned
+    return None
+
+
+def _extract_common_availability_hint(page: Selector) -> str | None:
+    for selector in _COMMON_AVAILABILITY_SELECTORS:
+        for value in page.css(selector).getall():
+            cleaned = _clean_text(value)
+            if not cleaned:
+                continue
+            normalized = _normalize_availability(cleaned)
+            if normalized in _CANONICAL_AVAILABILITY_VALUES:
                 return cleaned
     return None
 
@@ -651,14 +705,7 @@ def extract_product_metadata(page: Selector, source_url: str) -> dict[str, str |
             metadata["availability"] = _normalize_availability(_extract_amazon_availability(page))
 
     if not metadata["availability"]:
-        availability_hint = _first_css(
-            page,
-            [
-                "link[itemprop='availability']::attr(href)",
-                "[itemprop='availability']::attr(href)",
-                ".availability::text",
-            ],
-        )
+        availability_hint = _extract_common_availability_hint(page)
         metadata["availability"] = _normalize_availability(availability_hint)
 
     return metadata
