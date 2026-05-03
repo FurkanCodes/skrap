@@ -39,3 +39,12 @@ def test_debug_test_product_route_respects_query_parameters() -> None:
     assert "Currently unavailable" in response.text
     assert "https://schema.org/OutOfStock" in response.text
     assert "Intentional noise block" not in response.text
+
+
+def test_debug_test_product_route_is_also_available_under_api_prefix() -> None:
+    client = TestClient(app)
+
+    response = client.get("/api/v1/debug/test-product")
+
+    assert response.status_code == 200
+    assert "Skrap Test Product" in response.text
