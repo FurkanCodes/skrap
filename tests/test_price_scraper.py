@@ -1031,6 +1031,56 @@ def test_result_qualification_requires_title_image_and_price() -> None:
     assert missing_required_result_fields(missing) == ["product_name", "image_url"]
 
 
+def test_fetch_price_marks_out_of_stock_metadata_as_success_without_price(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.scraper import service
+
+    page = Selector(
+        """
+        <html>
+          <head>
+            <meta property='og:title' content='Sold Out Product'>
+            <meta property='og:image' content='https://cdn.example.com/oos.jpg'>
+          </head>
+          <body>
+            <div class='availability'>Currently unavailable</div>
+          </body>
+        </html>
+        """
+    )
+    monkeypatch.setattr(service, "fetch_page_with_mode", lambda *_args, **_kwargs: page)
+
+    result = fetch_price("https://example.com/products/oos", fetch_mode="http")
+
+    assert result.success is True
+    assert result.amount is None
+    assert result.availability == "out_of_stock"
+    assert missing_required_result_fields(result) == []
+    assert is_result_qualified(result) is True
+
+
+def test_extract_product_metadata_normalizes_common_out_of_stock_phrases() -> None:
+    metadata = extract_product_metadata(
+        Selector(
+            """
+            <html>
+              <head>
+                <meta property='og:title' content='Test Product'>
+                <meta property='og:image' content='https://cdn.example.com/test.jpg'>
+              </head>
+              <body>
+                <div class='availability'>Currently unavailable</div>
+              </body>
+            </html>
+            """
+        ),
+        "https://example.com/products/availability",
+    )
+
+    assert metadata["availability"] == "out_of_stock"
+
+
 def test_extract_product_metadata_prefers_embedded_product_state_over_site_org() -> None:
     source_url = "https://www.n11.com/urun/example-phone?magaza=n11&renk=siyah"
     page = Selector(

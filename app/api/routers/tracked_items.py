@@ -154,6 +154,7 @@ async def post_tracked_item_bootstrap(
         check_interval_minutes=payload.check_interval_minutes,
         target_amount=payload.target_amount,
         notify_on_price_increase=payload.notify_on_price_increase,
+        notify_on_stock_change=payload.notify_on_stock_change,
         duplicate_policy=payload.duplicate_policy,
         created_via=payload.created_via,
         scrape_result_ref=scrape_result_ref,
@@ -269,6 +270,11 @@ async def post_tracked_items_bulk_bootstrap(
             if item_payload.notify_on_price_increase is not None
             else payload.notify_on_price_increase
         )
+        notify_on_stock_change = (
+            item_payload.notify_on_stock_change
+            if item_payload.notify_on_stock_change is not None
+            else payload.notify_on_stock_change
+        )
         bootstrap_input = TrackingBootstrapInput(
             request_id=request_id,
             url=source_url,
@@ -278,6 +284,7 @@ async def post_tracked_items_bulk_bootstrap(
             check_interval_minutes=check_interval,
             target_amount=target_amount,
             notify_on_price_increase=notify_on_price_increase,
+            notify_on_stock_change=notify_on_stock_change,
             scrape_result_ref=scrape_result_ref,
             pre_fetched_result=pre_fetched_result,
             user_id=current_user.user_id,
@@ -422,6 +429,10 @@ async def patch_tracked_item(
                 notify_on_price_increase=payload.notify_on_price_increase,
                 notify_on_price_increase_provided=(
                     "notify_on_price_increase" in payload.model_fields_set
+                ),
+                notify_on_stock_change=payload.notify_on_stock_change,
+                notify_on_stock_change_provided=(
+                    "notify_on_stock_change" in payload.model_fields_set
                 ),
                 user_id=current_user.user_id,
             ),

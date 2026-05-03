@@ -9,6 +9,7 @@ This module is the application-facing entry point for scraping. It coordinates:
 - final result shaping
 """
 
+from dataclasses import replace
 from collections.abc import Iterable
 from datetime import UTC, datetime
 import logging
@@ -25,6 +26,7 @@ from .registry import ADAPTERS, detect_site_key, list_supported_sites
 
 REQUIRED_RESULT_FIELDS: tuple[str, ...] = ("amount", "product_name", "image_url")
 _logger = logging.getLogger("scraper_api.scraper")
+_NOT_IN_STOCK_AVAILABILITIES = {"out_of_stock", "preorder", "discontinued"}
 _PROXY_ERROR_HINTS = (
     "connect tunnel failed",
     "err_tunnel_connection_failed",
@@ -80,7 +82,8 @@ def _is_present(value: str | None) -> bool:
 def missing_required_result_fields(result: PriceResult) -> list[str]:
     """Return required field names missing from a scrape result."""
     missing: list[str] = []
-    if not _is_present(result.amount):
+    availability = _normalize_availability(result.availability)
+    if not _is_present(result.amount) and not _is_not_in_stock(availability):
         missing.append("amount")
     if not _is_present(result.product_name):
         missing.append("product_name")
@@ -92,6 +95,42 @@ def missing_required_result_fields(result: PriceResult) -> list[str]:
 def is_result_qualified(result: PriceResult) -> bool:
     """Check if a result has required output fields for on-demand adapters."""
     return result.success and not missing_required_result_fields(result)
+
+
+def _normalize_availability(value: str | None) -> str | None:
+    normalized = (value or "").strip().lower()
+    return normalized or None
+
+
+def _is_not_in_stock(value: str | None) -> bool:
+    return _normalize_availability(value) in _NOT_IN_STOCK_AVAILABILITIES
+
+
+def _has_product_identity(result: PriceResult) -> bool:
+    has_name = _is_present(result.product_name)
+    has_image = _is_present(result.image_url)
+    has_canonical = _is_present(result.canonical_url)
+    return has_name and (has_image or has_canonical)
+
+
+def _build_stock_only_success_result(result: PriceResult) -> PriceResult | None:
+    normalized_availability = _normalize_availability(result.availability)
+    if not _is_not_in_stock(normalized_availability):
+        return None
+    if not _has_product_identity(result):
+        return None
+    return replace(
+        result,
+        success=True,
+        amount=None,
+        currency=None,
+        raw_text=None,
+        source=None,
+        error=None,
+        availability=normalized_availability,
+        listing_count=0,
+        listings=[],
+    )
 
 
 def _resolve_primary_listings(
@@ -176,6 +215,7 @@ def fetch_price(
     attempted_fetch_errors: list[str] = []
     blocked_extract_error: str | None = None
     fetched_any_page = False
+    last_extracted_failure: PriceResult | None = None
     _logger.info(
         "scrape_start url=%s fetch_mode=%s initial_modes=%s site=%s adapter=%s",
         runtime_url,
@@ -269,6 +309,19 @@ def fetch_price(
             )
             return extracted
 
+        last_extracted_failure = extracted
+        stock_only_success = _build_stock_only_success_result(extracted)
+        if stock_only_success is not None:
+            _logger.info(
+                "scrape_stock_only_success index=%s mode=%s url=%s adapter=%s availability=%s",
+                attempt_index,
+                mode,
+                runtime_url,
+                extracted.adapter_key,
+                stock_only_success.availability,
+            )
+            return stock_only_success
+
         _logger.info(
             "scrape_extract_failed index=%s mode=%s url=%s adapter=%s error=%s required_missing=%s",
             attempt_index,
@@ -298,6 +351,30 @@ def fetch_price(
     if fetched_any_page:
         error = blocked_extract_error or "price_not_found"
         _logger.info("scrape_failed url=%s error=%s attempted_modes=%s", runtime_url, error, ",".join(modes_to_try))
+        if last_extracted_failure is not None:
+            return PriceResult(
+                url=runtime_url,
+                success=False,
+                product_id=last_extracted_failure.product_id or product_id,
+                site_key=last_extracted_failure.site_key or site_key,
+                adapter_key=last_extracted_failure.adapter_key or adapter_key,
+                amount=last_extracted_failure.amount,
+                currency=last_extracted_failure.currency,
+                raw_text=last_extracted_failure.raw_text,
+                source=last_extracted_failure.source,
+                product_name=last_extracted_failure.product_name,
+                brand=last_extracted_failure.brand,
+                model=last_extracted_failure.model,
+                sku=last_extracted_failure.sku,
+                gtin=last_extracted_failure.gtin,
+                image_url=last_extracted_failure.image_url,
+                canonical_url=last_extracted_failure.canonical_url,
+                availability=last_extracted_failure.availability,
+                extracted_at=extracted_at,
+                listing_count=last_extracted_failure.listing_count,
+                listings=last_extracted_failure.listings,
+                error=error,
+            )
         return PriceResult(
             url=runtime_url,
             success=False,

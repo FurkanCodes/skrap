@@ -24,6 +24,7 @@ from app.tracking import (
 
 _TEST_INTERVAL_15_SECONDS_SENTINEL = 10_079
 _TEST_INTERVAL_15_SECONDS_VALUE = 15
+_NOT_IN_STOCK_AVAILABILITIES = {"out_of_stock", "preorder", "discontinued"}
 
 
 class TrackingSchedulerError(RuntimeError):
@@ -408,8 +409,27 @@ class TrackingSchedulerService:
             jitter_percent=self._jitter_percent,
             align_checks_to_interval=self._align_checks_to_interval,
         )
+        previous_availability = _normalize_availability(item.availability)
+        current_availability = _normalize_availability(scrape_result.availability)
+        was_not_in_stock = _is_not_in_stock(previous_availability)
+        is_not_in_stock = _is_not_in_stock(current_availability)
+        is_explicit_in_stock = current_availability == "in_stock"
+        has_current_price = _parse_decimal(scrape_result.amount) is not None
+        stock_transition = (not was_not_in_stock and is_not_in_stock) or (
+            was_not_in_stock and is_explicit_in_stock
+        )
 
-        if scrape_result.success:
+        stock_signal_without_price = (
+            (not scrape_result.success)
+            and is_explicit_in_stock
+            and was_not_in_stock
+        )
+        if scrape_result.success or stock_signal_without_price:
+            should_update_price_fields = (
+                has_current_price
+                and (not is_not_in_stock)
+                and (scrape_result.success or stock_signal_without_price)
+            )
             updated_item = replace(
                 item,
                 canonical_url=scrape_result.canonical_url or item.canonical_url,
@@ -422,11 +442,15 @@ class TrackingSchedulerService:
                 sku=scrape_result.sku or item.sku,
                 gtin=scrape_result.gtin or item.gtin,
                 image_url=scrape_result.image_url or item.image_url,
-                availability=scrape_result.availability or item.availability,
-                currency=scrape_result.currency or item.currency,
-                last_amount=scrape_result.amount,
-                last_raw_text=scrape_result.raw_text,
-                last_source=scrape_result.source,
+                availability=current_availability or item.availability,
+                currency=(
+                    scrape_result.currency or item.currency
+                    if should_update_price_fields
+                    else item.currency
+                ),
+                last_amount=scrape_result.amount if should_update_price_fields else item.last_amount,
+                last_raw_text=scrape_result.raw_text if should_update_price_fields else item.last_raw_text,
+                last_source=scrape_result.source if should_update_price_fields else item.last_source,
                 last_checked_at=finished_at,
                 updated_at=finished_at,
                 next_check_at=next_check_at,
@@ -440,11 +464,12 @@ class TrackingSchedulerService:
                 item_id=item.item_id,
                 checked_at=finished_at,
                 success=True,
-                amount=scrape_result.amount,
-                currency=scrape_result.currency or item.currency,
-                raw_text=scrape_result.raw_text,
-                source=scrape_result.source,
+                amount=scrape_result.amount if should_update_price_fields else None,
+                currency=(scrape_result.currency or item.currency) if should_update_price_fields else None,
+                raw_text=scrape_result.raw_text if should_update_price_fields else None,
+                source=scrape_result.source if should_update_price_fields else None,
                 error=None,
+                availability=current_availability or item.availability,
                 scheduled_for=context.scheduled_for,
             )
             self._repository.save_item_and_snapshot(updated_item, snapshot)
@@ -455,16 +480,18 @@ class TrackingSchedulerService:
                 # Preserve the latest status and suppress notifications.
                 pass
             else:
-                self._emit_price_increase_notification_if_enabled(
+                self._emit_stock_change_notification_if_enabled(
                     item_before=item,
                     snapshot=snapshot,
-                    previous_amount=item.last_amount,
-                    current_amount=scrape_result.amount,
+                    previous_availability=previous_availability,
+                    current_availability=current_availability,
+                    current_amount=(scrape_result.amount if has_current_price else None),
                     product_url=product_url,
                     listing_url=listing_url,
                 )
-                if item.tracking_mode == "monitor":
-                    self._emit_price_drop_notification(
+
+                if should_update_price_fields and not stock_transition:
+                    self._emit_price_increase_notification_if_enabled(
                         item_before=item,
                         snapshot=snapshot,
                         previous_amount=item.last_amount,
@@ -472,14 +499,23 @@ class TrackingSchedulerService:
                         product_url=product_url,
                         listing_url=listing_url,
                     )
-                else:
-                    self._emit_alert_if_crossed(
-                        item_before=item,
-                        snapshot=snapshot,
-                        current_amount=scrape_result.amount,
-                        product_url=product_url,
-                        listing_url=listing_url,
-                    )
+                    if item.tracking_mode == "monitor":
+                        self._emit_price_drop_notification(
+                            item_before=item,
+                            snapshot=snapshot,
+                            previous_amount=item.last_amount,
+                            current_amount=scrape_result.amount,
+                            product_url=product_url,
+                            listing_url=listing_url,
+                        )
+                    else:
+                        self._emit_alert_if_crossed(
+                            item_before=item,
+                            snapshot=snapshot,
+                            current_amount=scrape_result.amount,
+                            product_url=product_url,
+                            listing_url=listing_url,
+                        )
             self._repository.finish_check_run(
                 run_id=context.run_id,
                 status="succeeded",
@@ -508,6 +544,7 @@ class TrackingSchedulerService:
             raw_text=scrape_result.raw_text,
             source=scrape_result.source,
             error=error,
+            availability=current_availability or item.availability,
             scheduled_for=context.scheduled_for,
         )
         self._repository.save_item_and_snapshot(updated_item, snapshot)
@@ -719,6 +756,100 @@ class TrackingSchedulerService:
                     scheduled_for=snapshot.scheduled_for,
                     checked_at=snapshot.checked_at,
                     change_type="increase",
+                ),
+                channel=channel,
+            ),
+            alert_event_id=None,
+            item_id=item_before.item_id,
+            channel=channel,
+            payload=json.dumps(payload, separators=(",", ":"), sort_keys=True),
+            status="queued",
+            attempt_count=0,
+            max_attempts=self._notification_max_attempts,
+            next_attempt_at=now,
+            last_attempt_at=None,
+            sent_at=None,
+            provider_name=None,
+            provider_message_id=None,
+            last_error=None,
+            lease_owner=None,
+            lease_until=None,
+            created_at=now,
+            updated_at=now,
+        )
+        self._repository.enqueue_notification_event(notification)
+
+    def _emit_stock_change_notification_if_enabled(
+        self,
+        *,
+        item_before: TrackedItem,
+        snapshot: PriceSnapshot,
+        previous_availability: str | None,
+        current_availability: str | None,
+        current_amount: str | None,
+        product_url: str | None,
+        listing_url: str | None,
+    ) -> None:
+        if not item_before.notify_on_stock_change:
+            return
+
+        was_not_in_stock = _is_not_in_stock(previous_availability)
+        is_not_in_stock = _is_not_in_stock(current_availability)
+        is_explicit_in_stock = current_availability == "in_stock"
+
+        notification_type: str | None = None
+        change_type: str | None = None
+        if not was_not_in_stock and is_not_in_stock:
+            notification_type = "stock_out"
+            change_type = "out"
+        elif was_not_in_stock and is_explicit_in_stock:
+            notification_type = "stock_restocked"
+            change_type = "restocked"
+
+        if notification_type is None or change_type is None:
+            return
+
+        now = snapshot.checked_at
+        active_chat_id = self._get_active_telegram_chat(
+            user_id=getattr(item_before, "user_id", "legacy_owner")
+        )
+        channel = "telegram" if active_chat_id else "log"
+        outbound = self._affiliate_link_service.build_outbound_link(
+            item=item_before,
+            product_url=product_url,
+            surface="telegram",
+        )
+        payload = {
+            "notification_type": notification_type,
+            "item_id": item_before.item_id,
+            "snapshot_id": snapshot.snapshot_id,
+            "previous_availability": previous_availability,
+            "current_availability": current_availability,
+            "currency": snapshot.currency or item_before.currency,
+            "triggered_at": snapshot.checked_at,
+        }
+        if current_amount is not None:
+            payload["current_amount"] = current_amount
+        if item_before.product_name:
+            payload["product_name"] = item_before.product_name
+        if product_url:
+            payload["product_url"] = product_url
+        if listing_url:
+            payload["listing_url"] = listing_url
+        if outbound.outbound_url:
+            payload["outbound_url"] = outbound.outbound_url
+            payload["outbound_is_affiliate"] = outbound.outbound_is_affiliate
+        if active_chat_id is not None:
+            payload["chat_id"] = active_chat_id
+
+        notification = NotificationEvent(
+            notification_id=_new_notification_event_id(),
+            idempotency_key=_build_notification_idempotency_key(
+                event_key=_build_stock_change_notification_event_key(
+                    item_id=item_before.item_id,
+                    scheduled_for=snapshot.scheduled_for,
+                    checked_at=snapshot.checked_at,
+                    change_type=change_type,
                 ),
                 channel=channel,
             ),
@@ -1084,6 +1215,17 @@ def _build_price_change_notification_event_key(
     return f"price_{change_type}:{item_id}:{marker}"
 
 
+def _build_stock_change_notification_event_key(
+    *,
+    item_id: str,
+    scheduled_for: str | None,
+    checked_at: str,
+    change_type: str,
+) -> str:
+    marker = scheduled_for or checked_at
+    return f"stock_{change_type}:{item_id}:{marker}"
+
+
 def _resolve_product_url(item: TrackedItem, scrape_result: PriceResult) -> str | None:
     candidate = (
         (scrape_result.canonical_url or "").strip()
@@ -1116,3 +1258,12 @@ def _parse_decimal(value: str | None) -> Decimal | None:
 def _decimal_to_str(value: Decimal) -> str:
     # Keep a stable non-scientific string representation for storage and APIs.
     return format(value, "f")
+
+
+def _normalize_availability(value: str | None) -> str | None:
+    normalized = (value or "").strip().lower()
+    return normalized or None
+
+
+def _is_not_in_stock(availability: str | None) -> bool:
+    return _normalize_availability(availability) in _NOT_IN_STOCK_AVAILABILITIES

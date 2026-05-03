@@ -31,6 +31,8 @@ _TRACKED_ITEMS_COLUMNS = (
     "status",
     "check_interval_minutes",
     "target_amount",
+    "notify_on_price_increase",
+    "notify_on_stock_change",
     "created_at",
     "updated_at",
     "last_checked_at",
@@ -52,6 +54,7 @@ _PRICE_SNAPSHOT_COLUMNS = (
     "raw_text",
     "source",
     "error",
+    "availability",
 )
 
 _CHECK_RUN_COLUMNS = (
@@ -405,6 +408,8 @@ def _migrate(
                         status,
                         check_interval_minutes,
                         target_amount,
+                        notify_on_price_increase,
+                        notify_on_stock_change,
                         created_at,
                         updated_at,
                         last_checked_at,
@@ -434,6 +439,8 @@ def _migrate(
                         %(status)s,
                         %(check_interval_minutes)s,
                         %(target_amount)s,
+                        %(notify_on_price_increase)s,
+                        %(notify_on_stock_change)s,
                         %(created_at)s,
                         %(updated_at)s,
                         %(last_checked_at)s,
@@ -462,6 +469,8 @@ def _migrate(
                         status = EXCLUDED.status,
                         check_interval_minutes = EXCLUDED.check_interval_minutes,
                         target_amount = EXCLUDED.target_amount,
+                        notify_on_price_increase = EXCLUDED.notify_on_price_increase,
+                        notify_on_stock_change = EXCLUDED.notify_on_stock_change,
                         updated_at = EXCLUDED.updated_at,
                         last_checked_at = EXCLUDED.last_checked_at,
                         next_check_at = EXCLUDED.next_check_at,
@@ -474,6 +483,8 @@ def _migrate(
                         {
                             **row,
                             "check_interval_minutes": int(row["check_interval_minutes"] or 1),
+                            "notify_on_price_increase": bool(row["notify_on_price_increase"] or False),
+                            "notify_on_stock_change": bool(row["notify_on_stock_change"] or False),
                             "created_at": _parse_timestamp(row["created_at"]),
                             "updated_at": _parse_timestamp(row["updated_at"]),
                             "last_checked_at": _parse_timestamp(row["last_checked_at"]),
@@ -500,7 +511,8 @@ def _migrate(
                         currency,
                         raw_text,
                         source,
-                        error
+                        error,
+                        availability
                     ) VALUES (
                         %(snapshot_id)s,
                         %(item_id)s,
@@ -511,7 +523,8 @@ def _migrate(
                         %(currency)s,
                         %(raw_text)s,
                         %(source)s,
-                        %(error)s
+                        %(error)s,
+                        %(availability)s
                     )
                     ON CONFLICT DO NOTHING
                     """,

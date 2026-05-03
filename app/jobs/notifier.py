@@ -243,6 +243,16 @@ def _render_telegram_message(payload: dict) -> str:
             lines.append(f"Last price: {current}{currency_suffix}")
         if target != "?":
             lines.append(f"Target price: {target}{currency_suffix}")
+    elif notification_type == "stock_out":
+        lines = ["Stock update: out of stock"]
+        if item_label:
+            lines.append(f"Item: {item_label}")
+    elif notification_type == "stock_restocked":
+        lines = ["Stock update: back in stock"]
+        if item_label:
+            lines.append(f"Item: {item_label}")
+        if current != "?":
+            lines.append(f"Current price: {current}{currency_suffix}")
     else:
         lines = [
             "Target reached",

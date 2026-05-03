@@ -139,14 +139,28 @@ def _normalize_availability(value: str | None) -> str | None:
     normalized = value.strip().lower()
     if normalized.endswith("/instock") or "in stock" in normalized:
         return "in_stock"
+    if "available to ship" in normalized:
+        return "in_stock"
     if normalized.endswith("/outofstock") or "out of stock" in normalized:
+        return "out_of_stock"
+    if "currently unavailable" in normalized:
+        return "out_of_stock"
+    if "temporarily out of stock" in normalized:
+        return "out_of_stock"
+    if normalized == "unavailable":
         return "out_of_stock"
     if normalized.endswith("/preorder") or "pre-order" in normalized:
         return "preorder"
+    if "preorder" in normalized:
+        return "preorder"
     if normalized.endswith("/discontinued"):
+        return "discontinued"
+    if "discontinued" in normalized:
         return "discontinued"
     if "stokta" in normalized:
         return "in_stock"
+    if "stoklara gelince" in normalized:
+        return "preorder"
     if "tukendi" in normalized:
         return "out_of_stock"
     return _clean_text(value)

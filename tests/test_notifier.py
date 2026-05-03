@@ -189,6 +189,35 @@ def test_render_tracking_stopped_message_includes_last_price() -> None:
     assert "Target price: 80.00 USD" in message
 
 
+def test_render_stock_out_message() -> None:
+    payload = {
+        "notification_type": "stock_out",
+        "product_name": "Limited Item",
+        "product_url": "https://example.com/p/1",
+    }
+
+    message = _render_telegram_message(payload)
+
+    assert "Stock update: out of stock" in message
+    assert "Item: Limited Item" in message
+    assert "Open product: https://example.com/p/1" in message
+
+
+def test_render_stock_restocked_message_with_price() -> None:
+    payload = {
+        "notification_type": "stock_restocked",
+        "product_name": "Limited Item",
+        "current_amount": "90.00",
+        "currency": "USD",
+    }
+
+    message = _render_telegram_message(payload)
+
+    assert "Stock update: back in stock" in message
+    assert "Item: Limited Item" in message
+    assert "Current price: 90.00 USD" in message
+
+
 def test_extract_telegram_retry_after_seconds_prefers_parameters() -> None:
     payload = {
         "ok": False,

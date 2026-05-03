@@ -14,6 +14,7 @@ class TrackedItemBootstrapRequest(BaseModel):
     check_interval_minutes: int = Field(default=60, ge=1, le=10080)
     target_amount: str | None = None
     notify_on_price_increase: bool | None = None
+    notify_on_stock_change: bool | None = None
     duplicate_policy: Literal["upsert", "reject"] = "upsert"
     created_via: Literal["dashboard", "extension"] | None = None
 
@@ -30,6 +31,7 @@ class TrackedItemBulkBootstrapItemRequest(BaseModel):
     check_interval_minutes: int | None = Field(default=None, ge=1, le=10080)
     target_amount: str | None = None
     notify_on_price_increase: bool | None = None
+    notify_on_stock_change: bool | None = None
 
     @model_validator(mode="after")
     def validate_source(self) -> "TrackedItemBulkBootstrapItemRequest":
@@ -47,6 +49,7 @@ class TrackedItemBulkBootstrapRequest(BaseModel):
     check_interval_minutes: int = Field(default=60, ge=1, le=10080)
     target_amount: str | None = None
     notify_on_price_increase: bool | None = None
+    notify_on_stock_change: bool | None = None
 
     @model_validator(mode="after")
     def validate_item_sources(self) -> "TrackedItemBulkBootstrapRequest":
@@ -62,6 +65,7 @@ class TrackedItemUpdateRequest(BaseModel):
     check_interval_minutes: int | None = Field(default=None, ge=1, le=10080)
     target_amount: str | None = None
     notify_on_price_increase: bool | None = None
+    notify_on_stock_change: bool | None = None
 
 
 class PriceSnapshotResponse(BaseModel):
@@ -74,6 +78,7 @@ class PriceSnapshotResponse(BaseModel):
     raw_text: str | None
     source: str | None
     error: str | None
+    availability: str | None = None
 
 
 class TrackedItemResponse(BaseModel):
@@ -103,6 +108,7 @@ class TrackedItemResponse(BaseModel):
     check_interval_minutes: int
     target_amount: str | None
     notify_on_price_increase: bool
+    notify_on_stock_change: bool
     created_at: str
     updated_at: str
     last_checked_at: str | None

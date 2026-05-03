@@ -50,6 +50,7 @@ class TrackedItem:
     last_checked_at: str | None
     created_via: TrackingCreatedVia | None = None
     notify_on_price_increase: bool = False
+    notify_on_stock_change: bool = False
     next_check_at: str | None = None
     lease_owner: str | None = None
     lease_until: str | None = None
@@ -80,6 +81,7 @@ class PriceSnapshot:
     raw_text: str | None
     source: str | None
     error: str | None
+    availability: str | None = None
     scheduled_for: str | None = None
 
 @dataclass(frozen=True)

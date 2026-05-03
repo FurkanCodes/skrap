@@ -20,6 +20,7 @@ _LEGACY_USER_ID = "legacy_owner"
 _TEST_INTERVAL_15_SECONDS_SENTINEL = 10_079
 _TEST_INTERVAL_15_SECONDS_VALUE = 15
 _DEFAULT_NOTIFICATION_MAX_ATTEMPTS = 5
+_NOT_IN_STOCK_AVAILABILITIES = {"out_of_stock", "preorder", "discontinued"}
 
 
 class TrackingServiceError(RuntimeError):
@@ -50,6 +51,7 @@ class TrackingBootstrapInput:
     check_interval_minutes: int
     target_amount: str | None
     notify_on_price_increase: bool | None = None
+    notify_on_stock_change: bool | None = None
     duplicate_policy: str = "upsert"
     created_via: str | None = None
     scrape_result_ref: str | None = None
@@ -68,6 +70,8 @@ class TrackingUpdateInput:
     target_amount_provided: bool
     notify_on_price_increase: bool | None = None
     notify_on_price_increase_provided: bool = False
+    notify_on_stock_change: bool | None = None
+    notify_on_stock_change_provided: bool = False
     user_id: str | None = None
 
 
@@ -205,6 +209,13 @@ class TrackingService:
         )
         if payload.notify_on_price_increase is not None:
             notify_on_price_increase = bool(payload.notify_on_price_increase)
+        notify_on_stock_change = (
+            existing.notify_on_stock_change if existing is not None else False
+        )
+        if payload.notify_on_stock_change is not None:
+            notify_on_stock_change = bool(payload.notify_on_stock_change)
+        normalized_availability = _normalize_availability(result.availability)
+        is_not_in_stock = _is_not_in_stock(normalized_availability)
 
         status: TrackingStatus = existing.status if existing is not None else "active"
         created_via = existing.created_via if existing is not None else payload.created_via or "dashboard"
@@ -223,16 +234,23 @@ class TrackingService:
             sku=result.sku,
             gtin=result.gtin,
             image_url=result.image_url,
-            availability=result.availability,
-            currency=result.currency,
-            last_amount=result.amount,
-            last_raw_text=result.raw_text,
-            last_source=result.source,
+            availability=normalized_availability,
+            currency=(result.currency or (existing.currency if existing is not None else None)),
+            last_amount=(
+                existing.last_amount if (is_not_in_stock and existing is not None) else result.amount
+            ),
+            last_raw_text=(
+                existing.last_raw_text if (is_not_in_stock and existing is not None) else result.raw_text
+            ),
+            last_source=(
+                existing.last_source if (is_not_in_stock and existing is not None) else result.source
+            ),
             created_via=created_via,
             status=status,
             check_interval_minutes=interval,
             target_amount=target_amount,
             notify_on_price_increase=notify_on_price_increase,
+            notify_on_stock_change=notify_on_stock_change,
             created_at=created_at,
             updated_at=checked_at,
             last_checked_at=checked_at,
@@ -251,14 +269,19 @@ class TrackingService:
                 item_id=saved.item_id,
                 checked_at=checked_at,
                 success=True,
-                amount=result.amount,
-                currency=result.currency,
-                raw_text=result.raw_text,
-                source=result.source,
+                amount=(None if is_not_in_stock else result.amount),
+                currency=(
+                    (result.currency or saved.currency)
+                    if not is_not_in_stock
+                    else None
+                ),
+                raw_text=(None if is_not_in_stock else result.raw_text),
+                source=(None if is_not_in_stock else result.source),
                 error=None,
+                availability=saved.availability,
             )
         )
-        if is_new_item:
+        if is_new_item and not is_not_in_stock:
             self._enqueue_tracking_started_notification(
                 item=saved,
                 result=result,
@@ -322,6 +345,9 @@ class TrackingService:
         notify_on_price_increase = current.notify_on_price_increase
         if payload.notify_on_price_increase_provided and payload.notify_on_price_increase is not None:
             notify_on_price_increase = bool(payload.notify_on_price_increase)
+        notify_on_stock_change = current.notify_on_stock_change
+        if payload.notify_on_stock_change_provided and payload.notify_on_stock_change is not None:
+            notify_on_stock_change = bool(payload.notify_on_stock_change)
 
         updated_at = _utcnow_iso()
         next_status = payload.status or current.status
@@ -331,6 +357,7 @@ class TrackingService:
             check_interval_minutes=interval,
             target_amount=target_amount,
             notify_on_price_increase=notify_on_price_increase,
+            notify_on_stock_change=notify_on_stock_change,
             updated_at=updated_at,
             next_check_at=(
                 _add_interval_iso(updated_at, interval)
@@ -652,6 +679,7 @@ def _build_bootstrap_request_hash(payload: TrackingBootstrapInput) -> str:
         "check_interval_minutes": payload.check_interval_minutes,
         "target_amount": _normalize_target_amount(payload.target_amount),
         "notify_on_price_increase": payload.notify_on_price_increase,
+        "notify_on_stock_change": payload.notify_on_stock_change,
         "duplicate_policy": payload.duplicate_policy,
         "created_via": payload.created_via or "dashboard",
     }
@@ -661,3 +689,12 @@ def _build_bootstrap_request_hash(payload: TrackingBootstrapInput) -> str:
 
 def _build_notification_idempotency_key(*, event_key: str, channel: str) -> str:
     return f"{event_key}:{channel}"
+
+
+def _normalize_availability(value: str | None) -> str | None:
+    normalized = (value or "").strip().lower()
+    return normalized or None
+
+
+def _is_not_in_stock(availability: str | None) -> bool:
+    return _normalize_availability(availability) in _NOT_IN_STOCK_AVAILABILITIES

@@ -55,6 +55,7 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
         check_interval_minutes INTEGER NOT NULL CHECK (check_interval_minutes >= 1),
         target_amount TEXT,
         notify_on_price_increase BOOLEAN NOT NULL DEFAULT FALSE,
+        notify_on_stock_change BOOLEAN NOT NULL DEFAULT FALSE,
         created_at TIMESTAMPTZ NOT NULL,
         updated_at TIMESTAMPTZ NOT NULL,
         last_checked_at TIMESTAMPTZ,
@@ -147,7 +148,8 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
         currency TEXT,
         raw_text TEXT,
         source TEXT,
-        error TEXT
+        error TEXT,
+        availability TEXT
     )
     """,
     """
@@ -510,6 +512,12 @@ class PostgresTrackingRepository:
                     conn.execute(
                         """
                         ALTER TABLE tracked_items
+                        ADD COLUMN IF NOT EXISTS notify_on_stock_change BOOLEAN NOT NULL DEFAULT FALSE
+                        """
+                    )
+                    conn.execute(
+                        """
+                        ALTER TABLE tracked_items
                         ADD COLUMN IF NOT EXISTS created_via TEXT
                         """
                     )
@@ -610,6 +618,12 @@ class PostgresTrackingRepository:
                         UPDATE tracked_items
                         SET user_id = COALESCE(user_id, 'legacy_owner')
                         WHERE user_id IS NULL
+                        """
+                    )
+                    conn.execute(
+                        """
+                        ALTER TABLE tracker_snapshots
+                        ADD COLUMN IF NOT EXISTS availability TEXT
                         """
                     )
                     conn.execute(
@@ -1337,6 +1351,7 @@ class PostgresTrackingRepository:
                     check_interval_minutes,
                     target_amount,
                     notify_on_price_increase,
+                    notify_on_stock_change,
                     created_at,
                     updated_at,
                     last_checked_at,
@@ -1369,6 +1384,7 @@ class PostgresTrackingRepository:
                     %(check_interval_minutes)s,
                     %(target_amount)s,
                     %(notify_on_price_increase)s,
+                    %(notify_on_stock_change)s,
                     %(created_at)s,
                     %(updated_at)s,
                     %(last_checked_at)s,
@@ -1398,6 +1414,7 @@ class PostgresTrackingRepository:
                     check_interval_minutes = EXCLUDED.check_interval_minutes,
                     target_amount = EXCLUDED.target_amount,
                     notify_on_price_increase = EXCLUDED.notify_on_price_increase,
+                    notify_on_stock_change = EXCLUDED.notify_on_stock_change,
                     updated_at = EXCLUDED.updated_at,
                     last_checked_at = EXCLUDED.last_checked_at,
                     next_check_at = EXCLUDED.next_check_at,
@@ -1442,6 +1459,7 @@ class PostgresTrackingRepository:
                         check_interval_minutes,
                         target_amount,
                         notify_on_price_increase,
+                        notify_on_stock_change,
                         created_at,
                         updated_at,
                         last_checked_at,
@@ -1474,6 +1492,7 @@ class PostgresTrackingRepository:
                         %(check_interval_minutes)s,
                         %(target_amount)s,
                         %(notify_on_price_increase)s,
+                        %(notify_on_stock_change)s,
                         %(created_at)s,
                         %(updated_at)s,
                         %(last_checked_at)s,
@@ -1503,6 +1522,7 @@ class PostgresTrackingRepository:
                         check_interval_minutes = EXCLUDED.check_interval_minutes,
                         target_amount = EXCLUDED.target_amount,
                         notify_on_price_increase = EXCLUDED.notify_on_price_increase,
+                        notify_on_stock_change = EXCLUDED.notify_on_stock_change,
                         updated_at = EXCLUDED.updated_at,
                         last_checked_at = EXCLUDED.last_checked_at,
                         next_check_at = EXCLUDED.next_check_at,
@@ -2285,8 +2305,9 @@ class PostgresTrackingRepository:
                 currency,
                 raw_text,
                 source,
-                error
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                error,
+                availability
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT(item_id, scheduled_for) DO UPDATE SET
                 checked_at = EXCLUDED.checked_at,
                 success = CASE
@@ -2317,6 +2338,11 @@ class PostgresTrackingRepository:
                     WHEN EXCLUDED.success THEN NULL
                     WHEN tracker_snapshots.success THEN tracker_snapshots.error
                     ELSE EXCLUDED.error
+                END,
+                availability = CASE
+                    WHEN EXCLUDED.success OR NOT tracker_snapshots.success
+                    THEN EXCLUDED.availability
+                    ELSE tracker_snapshots.availability
                 END
             """,
             (
@@ -2330,6 +2356,7 @@ class PostgresTrackingRepository:
                 snapshot.raw_text,
                 snapshot.source,
                 snapshot.error,
+                snapshot.availability,
             ),
         )
 
@@ -2359,6 +2386,7 @@ class PostgresTrackingRepository:
             "check_interval_minutes": item.check_interval_minutes,
             "target_amount": item.target_amount,
             "notify_on_price_increase": bool(item.notify_on_price_increase),
+            "notify_on_stock_change": bool(item.notify_on_stock_change),
             "created_at": _parse_timestamp(item.created_at),
             "updated_at": _parse_timestamp(item.updated_at),
             "last_checked_at": _parse_timestamp(item.last_checked_at),
@@ -2395,6 +2423,7 @@ class PostgresTrackingRepository:
             check_interval_minutes=int(row["check_interval_minutes"]),
             target_amount=_as_str(row.get("target_amount")),
             notify_on_price_increase=bool(row.get("notify_on_price_increase", False)),
+            notify_on_stock_change=bool(row.get("notify_on_stock_change", False)),
             created_at=_format_timestamp(row.get("created_at")),
             updated_at=_format_timestamp(row.get("updated_at")),
             last_checked_at=_format_timestamp(row.get("last_checked_at")),
@@ -2417,6 +2446,7 @@ class PostgresTrackingRepository:
             raw_text=_as_str(row.get("raw_text")),
             source=_as_str(row.get("source")),
             error=_as_str(row.get("error")),
+            availability=_as_str(row.get("availability")),
             scheduled_for=_format_timestamp(row.get("scheduled_for")),
         )
 

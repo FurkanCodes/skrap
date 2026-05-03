@@ -51,6 +51,7 @@ def _item(
     last_amount: str | None = "100.00",
     target_amount: str | None = None,
     notify_on_price_increase: bool = False,
+    notify_on_stock_change: bool = False,
 ) -> TrackedItem:
     stamp = _iso(now)
     return TrackedItem(
@@ -75,6 +76,7 @@ def _item(
         check_interval_minutes=60,
         target_amount=target_amount,
         notify_on_price_increase=notify_on_price_increase,
+        notify_on_stock_change=notify_on_stock_change,
         created_at=stamp,
         updated_at=stamp,
         last_checked_at=stamp,
@@ -532,6 +534,7 @@ class _InMemoryTrackingRepository:
                 if snapshot.success
                 else (existing.error if existing.success else snapshot.error)
             ),
+            availability=snapshot.availability if can_replace_values else existing.availability,
         )
 
 
@@ -1309,6 +1312,161 @@ def test_scheduler_monitor_mode_notifies_when_price_drops() -> None:
     assert payload["notification_type"] == "price_drop"
     assert payload["previous_amount"] == "95.00"
     assert payload["current_amount"] == "90.00"
+
+
+def test_scheduler_out_of_stock_success_keeps_last_price_and_skips_price_notifications() -> None:
+    repo = _build_repo()
+    now = datetime.now(tz=UTC)
+    due_time = _iso(now - timedelta(minutes=1))
+    item = _item(
+        item_id="trk_out_of_stock",
+        url="https://example.com/out-of-stock",
+        now=now,
+        next_check_at=due_time,
+        last_amount="95.00",
+        target_amount=None,
+        notify_on_price_increase=True,
+    )
+    repo.save_item(item)
+
+    scrape_result = PriceResult(
+        url=item.source_url,
+        success=True,
+        amount=None,
+        currency=None,
+        raw_text=None,
+        source=None,
+        availability="out_of_stock",
+        product_name="Stockless",
+        image_url="https://example.com/image.jpg",
+        site_key="generic",
+        adapter_key="generic",
+    )
+    scheduler = TrackingSchedulerService(
+        repository=repo,
+        scrape_runner=_FakeScrapeRunner({item.source_url: scrape_result}),
+        timeout_seconds=30,
+        claim_batch_size=50,
+        max_inflight=4,
+        lease_seconds=180,
+        jitter_percent=0,
+        lease_owner="scheduler-test",
+    )
+
+    outcome = scheduler.run_once()
+    assert outcome.success_count == 1
+    updated = repo.get_item(item.item_id)
+    assert updated is not None
+    assert updated.last_amount == "95.00"
+    assert updated.availability == "out_of_stock"
+    snapshots = repo.list_snapshots(item.item_id, limit=5)
+    assert len(snapshots) == 1
+    assert snapshots[0].success is True
+    assert snapshots[0].amount is None
+    assert snapshots[0].availability == "out_of_stock"
+    assert repo.list_notification_events(item.item_id, limit=10) == []
+
+
+def test_scheduler_emits_stock_out_notification_when_enabled() -> None:
+    repo = _build_repo()
+    now = datetime.now(tz=UTC)
+    due_time = _iso(now - timedelta(minutes=1))
+    item = _item(
+        item_id="trk_stock_out_notify",
+        url="https://example.com/stock-out",
+        now=now,
+        next_check_at=due_time,
+        last_amount="105.00",
+        target_amount=None,
+        notify_on_stock_change=True,
+    )
+    repo.save_item(item)
+
+    scrape_result = PriceResult(
+        url=item.source_url,
+        success=True,
+        amount=None,
+        currency=None,
+        raw_text=None,
+        source=None,
+        availability="out_of_stock",
+        product_name="Stock Out Item",
+        image_url="https://example.com/image.jpg",
+        site_key="generic",
+        adapter_key="generic",
+    )
+    scheduler = TrackingSchedulerService(
+        repository=repo,
+        scrape_runner=_FakeScrapeRunner({item.source_url: scrape_result}),
+        timeout_seconds=30,
+        claim_batch_size=50,
+        max_inflight=4,
+        lease_seconds=180,
+        jitter_percent=0,
+        lease_owner="scheduler-test",
+    )
+
+    outcome = scheduler.run_once()
+    assert outcome.success_count == 1
+    notifications = repo.list_notification_events(item.item_id, limit=10)
+    assert len(notifications) == 1
+    payload = json.loads(notifications[0].payload)
+    assert payload["notification_type"] == "stock_out"
+    assert payload["current_availability"] == "out_of_stock"
+    assert "current_amount" not in payload
+
+
+def test_scheduler_emits_restocked_notification_without_price_after_out_of_stock() -> None:
+    repo = _build_repo()
+    now = datetime.now(tz=UTC)
+    due_time = _iso(now - timedelta(minutes=1))
+    item = _item(
+        item_id="trk_restock_notify",
+        url="https://example.com/restock",
+        now=now,
+        next_check_at=due_time,
+        last_amount="105.00",
+        target_amount=None,
+        notify_on_stock_change=True,
+    )
+    repo.save_item(replace(item, availability="out_of_stock"))
+
+    scrape_result = PriceResult(
+        url=item.source_url,
+        success=False,
+        amount=None,
+        currency=None,
+        raw_text=None,
+        source=None,
+        availability="in_stock",
+        product_name="Restocked Item",
+        image_url="https://example.com/image.jpg",
+        error="price_not_found",
+        site_key="generic",
+        adapter_key="generic",
+    )
+    scheduler = TrackingSchedulerService(
+        repository=repo,
+        scrape_runner=_FakeScrapeRunner({item.source_url: scrape_result}),
+        timeout_seconds=30,
+        claim_batch_size=50,
+        max_inflight=4,
+        lease_seconds=180,
+        jitter_percent=0,
+        lease_owner="scheduler-test",
+    )
+
+    outcome = scheduler.run_once()
+    assert outcome.success_count == 1
+    updated = repo.get_item(item.item_id)
+    assert updated is not None
+    assert updated.availability == "in_stock"
+    notifications = repo.list_notification_events(item.item_id, limit=10)
+    assert len(notifications) == 1
+    payload = json.loads(notifications[0].payload)
+    assert payload["notification_type"] == "stock_restocked"
+    assert payload["current_availability"] == "in_stock"
+    assert "current_amount" not in payload
 
 
 def test_scheduler_does_not_notify_when_item_is_paused_during_inflight_run() -> None:

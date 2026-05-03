@@ -163,6 +163,25 @@ def _success_result(url: str = "https://example.com/p/1") -> PriceResult:
     )
 
 
+def _out_of_stock_result(url: str = "https://example.com/p/oos") -> PriceResult:
+    return PriceResult(
+        url=url,
+        success=True,
+        product_id="prd_test_oos",
+        site_key="generic",
+        adapter_key="generic",
+        amount=None,
+        currency=None,
+        raw_text=None,
+        source=None,
+        product_name="Out Of Stock Product",
+        image_url="https://example.com/oos.jpg",
+        availability="out_of_stock",
+        listing_count=0,
+        listings=[],
+    )
+
+
 def test_bootstrap_creates_item_and_snapshot() -> None:
     service, repository, _ = _build_service(_success_result())
 
@@ -182,6 +201,7 @@ def test_bootstrap_creates_item_and_snapshot() -> None:
     assert item.check_interval_minutes == 45
     assert item.target_amount == "9.00"
     assert item.notify_on_price_increase is False
+    assert item.notify_on_stock_change is False
     assert item.created_via == "dashboard"
     assert item.tracking_mode == "alert"
     assert item.alerts_enabled is True
@@ -268,6 +288,50 @@ def test_bootstrap_can_enable_price_increase_notifications() -> None:
     )
 
     assert item.notify_on_price_increase is True
+
+
+def test_bootstrap_can_enable_stock_change_notifications() -> None:
+    service, _, _ = _build_service(_success_result("https://example.com/p/stock-change"))
+
+    item = service.bootstrap(
+        TrackingBootstrapInput(
+            request_id="req_monitor_stock_change",
+            url="https://example.com/p/stock-change",
+            timeout_seconds=20,
+            selected_sites=None,
+            fetch_mode="auto",
+            check_interval_minutes=60,
+            target_amount=None,
+            notify_on_stock_change=True,
+        )
+    )
+
+    assert item.notify_on_stock_change is True
+
+
+def test_bootstrap_out_of_stock_keeps_snapshot_without_price_and_skips_started_notification() -> None:
+    service, repository, _ = _build_service(_out_of_stock_result())
+
+    item = service.bootstrap(
+        TrackingBootstrapInput(
+            request_id="req_out_of_stock",
+            url="https://example.com/p/oos",
+            timeout_seconds=20,
+            selected_sites=None,
+            fetch_mode="auto",
+            check_interval_minutes=60,
+            target_amount=None,
+        )
+    )
+
+    snapshots = repository.list_snapshots(item.item_id, limit=10)
+    assert len(snapshots) == 1
+    assert snapshots[0].success is True
+    assert snapshots[0].amount is None
+    assert snapshots[0].availability == "out_of_stock"
+    assert item.last_amount is None
+    assert item.availability == "out_of_stock"
+    assert repository.notification_events == []
 
 
 def test_bootstrap_can_create_extension_origin_item() -> None:
@@ -500,6 +564,8 @@ def test_update_item_applies_patch_fields() -> None:
             target_amount_provided=True,
             notify_on_price_increase=True,
             notify_on_price_increase_provided=True,
+            notify_on_stock_change=True,
+            notify_on_stock_change_provided=True,
         )
     )
 
@@ -508,6 +574,7 @@ def test_update_item_applies_patch_fields() -> None:
     assert updated.check_interval_minutes == 120
     assert updated.target_amount == "8.50"
     assert updated.notify_on_price_increase is True
+    assert updated.notify_on_stock_change is True
     assert updated.tracking_mode == "alert"
 
 

@@ -79,6 +79,7 @@ class FakeTrackingService:
             check_interval_minutes=payload.check_interval_minutes,
             target_amount=payload.target_amount,
             notify_on_price_increase=bool(payload.notify_on_price_increase),
+            notify_on_stock_change=bool(payload.notify_on_stock_change),
             created_at=now,
             updated_at=now,
             last_checked_at=now,
@@ -176,6 +177,11 @@ class FakeTrackingService:
                 if payload.notify_on_price_increase_provided and payload.notify_on_price_increase is not None
                 else item.notify_on_price_increase
             ),
+            notify_on_stock_change=(
+                bool(payload.notify_on_stock_change)
+                if payload.notify_on_stock_change_provided and payload.notify_on_stock_change is not None
+                else item.notify_on_stock_change
+            ),
             created_at=item.created_at,
             updated_at=_now_iso(),
             last_checked_at=item.last_checked_at,
@@ -251,6 +257,7 @@ def test_tracked_items_bootstrap_creates_item() -> None:
             "check_interval_minutes": 30,
             "target_amount": "89.99",
             "notify_on_price_increase": True,
+            "notify_on_stock_change": True,
         },
     )
     _clear_overrides()
@@ -262,6 +269,7 @@ def test_tracked_items_bootstrap_creates_item() -> None:
     assert body["item"]["check_interval_minutes"] == 30
     assert body["item"]["target_amount"] == "89.99"
     assert body["item"]["notify_on_price_increase"] is True
+    assert body["item"]["notify_on_stock_change"] is True
     assert body["item"]["created_via"] == "dashboard"
     assert body["item"]["tracking_mode"] == "alert"
     assert body["item"]["alerts_enabled"] is True
@@ -644,12 +652,14 @@ def test_tracked_items_list_detail_patch_delete_flow() -> None:
             "status": "paused",
             "target_amount": "18.00",
             "notify_on_price_increase": True,
+            "notify_on_stock_change": True,
         },
     )
     assert patch_response.status_code == 200
     assert patch_response.json()["item"]["status"] == "paused"
     assert patch_response.json()["item"]["target_amount"] == "18.00"
     assert patch_response.json()["item"]["notify_on_price_increase"] is True
+    assert patch_response.json()["item"]["notify_on_stock_change"] is True
     assert patch_response.json()["item"]["tracking_mode"] == "alert"
     assert patch_response.json()["item"]["alerts_enabled"] is True
 
