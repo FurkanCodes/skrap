@@ -13,6 +13,8 @@ from app.tracking.domain import (
     AppUser,
     AlertEvent,
     AffiliateClickEvent,
+    BillingSubscription,
+    BillingSubscriptionApplyResult,
     NotificationEvent,
     NotificationEventStatus,
     PriceSnapshot,
@@ -95,9 +97,15 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
         provider TEXT NOT NULL,
         provider_customer_id TEXT,
         provider_subscription_id TEXT,
+        provider_price_id TEXT,
+        plan_key TEXT REFERENCES billing_plans(plan_key),
         status TEXT NOT NULL,
+        current_period_start TIMESTAMPTZ,
         current_period_end TIMESTAMPTZ,
+        next_billed_at TIMESTAMPTZ,
         cancel_at_period_end BOOLEAN NOT NULL DEFAULT FALSE,
+        last_event_id TEXT,
+        last_event_occurred_at TIMESTAMPTZ,
         created_at TIMESTAMPTZ NOT NULL,
         updated_at TIMESTAMPTZ NOT NULL,
         UNIQUE(user_id)
@@ -557,6 +565,48 @@ class PostgresTrackingRepository:
                     )
                     conn.execute(
                         """
+                        ALTER TABLE billing_subscriptions
+                        ADD COLUMN IF NOT EXISTS provider_price_id TEXT
+                        """
+                    )
+                    conn.execute(
+                        """
+                        ALTER TABLE billing_subscriptions
+                        ADD COLUMN IF NOT EXISTS plan_key TEXT
+                        """
+                    )
+                    conn.execute(
+                        """
+                        ALTER TABLE billing_subscriptions
+                        ADD COLUMN IF NOT EXISTS current_period_start TIMESTAMPTZ
+                        """
+                    )
+                    conn.execute(
+                        """
+                        ALTER TABLE billing_subscriptions
+                        ADD COLUMN IF NOT EXISTS next_billed_at TIMESTAMPTZ
+                        """
+                    )
+                    conn.execute(
+                        """
+                        ALTER TABLE billing_subscriptions
+                        ADD COLUMN IF NOT EXISTS last_event_id TEXT
+                        """
+                    )
+                    conn.execute(
+                        """
+                        ALTER TABLE billing_subscriptions
+                        ADD COLUMN IF NOT EXISTS last_event_occurred_at TIMESTAMPTZ
+                        """
+                    )
+                    conn.execute(
+                        """
+                        CREATE INDEX IF NOT EXISTS idx_billing_subscriptions_provider_subscription
+                          ON billing_subscriptions(provider, provider_subscription_id)
+                        """
+                    )
+                    conn.execute(
+                        """
                         UPDATE tracked_items
                         SET user_id = COALESCE(user_id, 'legacy_owner')
                         WHERE user_id IS NULL
@@ -917,6 +967,187 @@ class PostgresTrackingRepository:
         if row is None:  # pragma: no cover - defensive guard
             raise RuntimeError("Failed to resolve current usage counter")
         return self._row_to_usage_counter(row)
+
+    def get_billing_subscription_for_user(self, *, user_id: str) -> BillingSubscription | None:
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                """
+                SELECT *
+                FROM billing_subscriptions
+                WHERE user_id = %s
+                LIMIT 1
+                """,
+                (user_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return self._row_to_billing_subscription(row)
+
+    def get_billing_subscription_by_provider_subscription_id(
+        self,
+        *,
+        provider: str,
+        provider_subscription_id: str,
+    ) -> BillingSubscription | None:
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                """
+                SELECT *
+                FROM billing_subscriptions
+                WHERE provider = %s
+                  AND provider_subscription_id = %s
+                LIMIT 1
+                """,
+                (provider, provider_subscription_id),
+            ).fetchone()
+        if row is None:
+            return None
+        return self._row_to_billing_subscription(row)
+
+    def apply_billing_subscription_update(
+        self,
+        *,
+        user_id: str,
+        provider: str,
+        provider_customer_id: str | None,
+        provider_subscription_id: str,
+        provider_price_id: str | None,
+        plan_key: str | None,
+        status: str,
+        current_period_start: str | None,
+        current_period_end: str | None,
+        next_billed_at: str | None,
+        cancel_at_period_end: bool,
+        last_event_id: str,
+        last_event_occurred_at: str,
+        now: str,
+    ) -> BillingSubscriptionApplyResult:
+        now_dt = _parse_timestamp(now)
+        event_dt = _parse_timestamp(last_event_occurred_at)
+        if now_dt is None or event_dt is None:  # pragma: no cover - defensive guard
+            raise RuntimeError("billing timestamps must be provided")
+
+        active_plan_key = (
+            plan_key if status in {"active", "trialing", "past_due"} else _DEFAULT_PLAN_KEY
+        )
+        if active_plan_key not in _PLAN_DEFINITION_BY_KEY:
+            active_plan_key = _DEFAULT_PLAN_KEY
+
+        with self._pool.connection() as conn:
+            with conn.transaction():
+                current = conn.execute(
+                    """
+                    SELECT *
+                    FROM billing_subscriptions
+                    WHERE user_id = %s
+                    FOR UPDATE
+                    """,
+                    (user_id,),
+                ).fetchone()
+                if current is not None:
+                    current_event_id = _as_str(current.get("last_event_id"))
+                    current_event_at = _parse_timestamp(
+                        _format_timestamp(current.get("last_event_occurred_at"))
+                    )
+                    if current_event_id == last_event_id:
+                        return BillingSubscriptionApplyResult(
+                            processed=False,
+                            reason="duplicate_event",
+                            subscription=self._row_to_billing_subscription(current),
+                        )
+                    if current_event_at is not None and current_event_at > event_dt:
+                        return BillingSubscriptionApplyResult(
+                            processed=False,
+                            reason="stale_event",
+                            subscription=self._row_to_billing_subscription(current),
+                        )
+
+                row = conn.execute(
+                    """
+                    INSERT INTO billing_subscriptions (
+                        subscription_id,
+                        user_id,
+                        provider,
+                        provider_customer_id,
+                        provider_subscription_id,
+                        provider_price_id,
+                        plan_key,
+                        status,
+                        current_period_start,
+                        current_period_end,
+                        next_billed_at,
+                        cancel_at_period_end,
+                        last_event_id,
+                        last_event_occurred_at,
+                        created_at,
+                        updated_at
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT(user_id) DO UPDATE SET
+                        provider = EXCLUDED.provider,
+                        provider_customer_id = EXCLUDED.provider_customer_id,
+                        provider_subscription_id = EXCLUDED.provider_subscription_id,
+                        provider_price_id = EXCLUDED.provider_price_id,
+                        plan_key = EXCLUDED.plan_key,
+                        status = EXCLUDED.status,
+                        current_period_start = EXCLUDED.current_period_start,
+                        current_period_end = EXCLUDED.current_period_end,
+                        next_billed_at = EXCLUDED.next_billed_at,
+                        cancel_at_period_end = EXCLUDED.cancel_at_period_end,
+                        last_event_id = EXCLUDED.last_event_id,
+                        last_event_occurred_at = EXCLUDED.last_event_occurred_at,
+                        updated_at = EXCLUDED.updated_at
+                    RETURNING *
+                    """,
+                    (
+                        f"sub_{uuid.uuid4().hex[:20]}",
+                        user_id,
+                        provider,
+                        provider_customer_id,
+                        provider_subscription_id,
+                        provider_price_id,
+                        plan_key,
+                        status,
+                        _parse_timestamp(current_period_start),
+                        _parse_timestamp(current_period_end),
+                        _parse_timestamp(next_billed_at),
+                        cancel_at_period_end,
+                        last_event_id,
+                        event_dt,
+                        now_dt,
+                        now_dt,
+                    ),
+                ).fetchone()
+                conn.execute(
+                    """
+                    INSERT INTO billing_entitlements (
+                        user_id,
+                        plan_key,
+                        max_active_trackers,
+                        min_check_interval_minutes,
+                        monthly_check_units,
+                        allowed_channels,
+                        overage_policy,
+                        created_at,
+                        updated_at
+                    ) VALUES (%s, %s, 0, 1, 0, '', 'block', %s, %s)
+                    ON CONFLICT(user_id) DO UPDATE SET
+                        plan_key = EXCLUDED.plan_key,
+                        updated_at = EXCLUDED.updated_at
+                    """,
+                    (user_id, active_plan_key, now_dt, now_dt),
+                )
+
+        if row is None:  # pragma: no cover - defensive guard
+            return BillingSubscriptionApplyResult(
+                processed=False,
+                reason="missing_subscription",
+                subscription=None,
+            )
+        return BillingSubscriptionApplyResult(
+            processed=True,
+            reason=None,
+            subscription=self._row_to_billing_subscription(row),
+        )
 
     def try_consume_check_units(
         self,
@@ -2276,6 +2507,27 @@ class PostgresTrackingRepository:
             period_start=_format_timestamp(row.get("period_start")),
             period_end=_format_timestamp(row.get("period_end")),
             consumed_check_units=int(row["consumed_check_units"]),
+            created_at=_format_timestamp(row.get("created_at")),
+            updated_at=_format_timestamp(row.get("updated_at")),
+        )
+
+    @staticmethod
+    def _row_to_billing_subscription(row: dict[str, object]) -> BillingSubscription:
+        return BillingSubscription(
+            subscription_id=str(row["subscription_id"]),
+            user_id=str(row["user_id"]),
+            provider=str(row["provider"]),
+            provider_customer_id=_as_str(row.get("provider_customer_id")),
+            provider_subscription_id=_as_str(row.get("provider_subscription_id")),
+            provider_price_id=_as_str(row.get("provider_price_id")),
+            plan_key=_as_str(row.get("plan_key")),
+            status=str(row["status"]),
+            current_period_start=_format_timestamp(row.get("current_period_start")),
+            current_period_end=_format_timestamp(row.get("current_period_end")),
+            next_billed_at=_format_timestamp(row.get("next_billed_at")),
+            cancel_at_period_end=bool(row.get("cancel_at_period_end", False)),
+            last_event_id=_as_str(row.get("last_event_id")),
+            last_event_occurred_at=_format_timestamp(row.get("last_event_occurred_at")),
             created_at=_format_timestamp(row.get("created_at")),
             updated_at=_format_timestamp(row.get("updated_at")),
         )

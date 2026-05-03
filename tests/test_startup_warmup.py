@@ -60,6 +60,11 @@ def test_warm_application_dependencies_calls_auth_and_db_services(
         "_get_user_service_cached",
         lambda **_kwargs: calls.append("user_service"),
     )
+    monkeypatch.setattr(
+        dependencies,
+        "_get_billing_service_cached",
+        lambda **_kwargs: calls.append("billing_service"),
+    )
 
     dependencies.warm_application_dependencies(get_settings())
 
@@ -69,6 +74,7 @@ def test_warm_application_dependencies_calls_auth_and_db_services(
         "tracking_service",
         "telegram_service",
         "user_service",
+        "billing_service",
     ]
 
 
@@ -107,6 +113,11 @@ def test_warm_application_dependencies_logs_and_continues_on_failure(
         dependencies,
         "_get_user_service_cached",
         lambda **_kwargs: calls.append("user_service"),
+    )
+    monkeypatch.setattr(
+        dependencies,
+        "_get_billing_service_cached",
+        lambda **_kwargs: calls.append("billing_service"),
     )
 
     with caplog.at_level(logging.WARNING, logger="scraper_api.auth"):

@@ -217,3 +217,34 @@ class UsageCounter:
     consumed_check_units: int
     created_at: str
     updated_at: str
+
+
+@dataclass(frozen=True)
+class BillingSubscription:
+    """Current billing provider state for one app user."""
+
+    subscription_id: str
+    user_id: str
+    provider: str
+    provider_customer_id: str | None
+    provider_subscription_id: str | None
+    provider_price_id: str | None
+    plan_key: str | None
+    status: str
+    current_period_start: str | None
+    current_period_end: str | None
+    next_billed_at: str | None
+    cancel_at_period_end: bool
+    last_event_id: str | None
+    last_event_occurred_at: str | None
+    created_at: str
+    updated_at: str
+
+
+@dataclass(frozen=True)
+class BillingSubscriptionApplyResult:
+    """Result of applying a billing event to the subscription store."""
+
+    processed: bool
+    reason: str | None
+    subscription: BillingSubscription | None

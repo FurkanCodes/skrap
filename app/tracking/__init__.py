@@ -1,5 +1,7 @@
 from .domain import (
     AppUser,
+    BillingSubscription,
+    BillingSubscriptionApplyResult,
     AlertEvent,
     AlertRuleType,
     AffiliateClickEvent,
@@ -26,6 +28,8 @@ __all__ = [
     "AlertRuleType",
     "AffiliateClickEvent",
     "AppUser",
+    "BillingSubscription",
+    "BillingSubscriptionApplyResult",
     "NotificationEvent",
     "NotificationEventStatus",
     "PriceSnapshot",

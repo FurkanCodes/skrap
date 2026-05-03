@@ -11,6 +11,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.application.discovery_service import DiscoveryBatchService
 from app.application.affiliate_link_service import AffiliateLinkService
+from app.application.billing_service import BillingService
 from app.application.scrape_job_service import ScrapeJobService
 from app.application.scrape_result_cache import ScrapeResultCache
 from app.application.scrape_service import ScrapeBatchService
@@ -417,6 +418,39 @@ def get_user_service(
     )
 
 
+@lru_cache
+def _get_billing_service_cached(
+    database_url: str,
+    db_pool_min_size: int,
+    db_pool_max_size: int,
+    paddle_plus_price_id: str,
+    paddle_pro_price_id: str,
+) -> BillingService:
+    repository = _get_tracking_repository_cached(
+        database_url=database_url,
+        db_pool_min_size=db_pool_min_size,
+        db_pool_max_size=db_pool_max_size,
+    )
+    service = BillingService(
+        repository=repository,
+        paddle_plus_price_id=paddle_plus_price_id,
+        paddle_pro_price_id=paddle_pro_price_id,
+    )
+    return _maybe_profile(service, component="billing_service")
+
+
+def get_billing_service(
+    settings: Settings = Depends(get_app_settings),
+) -> BillingService:
+    return _get_billing_service_cached(
+        database_url=settings.tracking_database_url,
+        db_pool_min_size=settings.tracking_db_pool_min_size,
+        db_pool_max_size=settings.tracking_db_pool_max_size,
+        paddle_plus_price_id=settings.paddle_plus_price_id,
+        paddle_pro_price_id=settings.paddle_pro_price_id,
+    )
+
+
 def warm_application_dependencies(settings: Settings) -> None:
     """Best-effort cold-path warmup for auth and DB-backed services."""
     if settings.auth_required:
@@ -470,6 +504,16 @@ def warm_application_dependencies(settings: Settings) -> None:
             database_url=settings.tracking_database_url,
             db_pool_min_size=settings.tracking_db_pool_min_size,
             db_pool_max_size=settings.tracking_db_pool_max_size,
+        ),
+    )
+    _soft_warm(
+        "billing_service",
+        lambda: _get_billing_service_cached(
+            database_url=settings.tracking_database_url,
+            db_pool_min_size=settings.tracking_db_pool_min_size,
+            db_pool_max_size=settings.tracking_db_pool_max_size,
+            paddle_plus_price_id=settings.paddle_plus_price_id,
+            paddle_pro_price_id=settings.paddle_pro_price_id,
         ),
     )
 

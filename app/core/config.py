@@ -143,6 +143,9 @@ class Settings:
     affiliate_signing_secret: str
     affiliate_link_rules_json: str
     affiliate_link_template: str
+    billing_backend_secret: str
+    paddle_plus_price_id: str
+    paddle_pro_price_id: str
     auth_required: bool
     better_auth_jwks_url: str
     better_auth_jwt_issuer: str
@@ -281,6 +284,9 @@ def get_settings() -> Settings:
         affiliate_signing_secret=_parse_str_env("AFFILIATE_SIGNING_SECRET", ""),
         affiliate_link_rules_json=_parse_str_env("AFFILIATE_LINK_RULES_JSON", ""),
         affiliate_link_template=_parse_str_env("AFFILIATE_LINK_TEMPLATE", ""),
+        billing_backend_secret=_parse_str_env("BILLING_BACKEND_SECRET", ""),
+        paddle_plus_price_id=_parse_str_env("PADDLE_PLUS_PRICE_ID", ""),
+        paddle_pro_price_id=_parse_str_env("PADDLE_PRO_PRICE_ID", ""),
         auth_required=_parse_str_env("AUTH_REQUIRED", "false").lower() == "true",
         better_auth_jwks_url=_parse_str_env("BETTER_AUTH_JWKS_URL", ""),
         better_auth_jwt_issuer=_parse_str_env("BETTER_AUTH_JWT_ISSUER", ""),
@@ -433,6 +439,18 @@ def get_settings() -> Settings:
         raise RuntimeError(
             "CORS_ALLOW_ORIGINS must be explicit in production when credentials are enabled"
         )
+    if settings.environment == "production" and not settings.billing_backend_secret:
+        raise RuntimeError("BILLING_BACKEND_SECRET is required in production")
+    if settings.environment == "production" and not settings.paddle_plus_price_id:
+        raise RuntimeError("PADDLE_PLUS_PRICE_ID is required in production")
+    if settings.environment == "production" and not settings.paddle_pro_price_id:
+        raise RuntimeError("PADDLE_PRO_PRICE_ID is required in production")
+    if (
+        settings.paddle_plus_price_id
+        and settings.paddle_pro_price_id
+        and settings.paddle_plus_price_id == settings.paddle_pro_price_id
+    ):
+        raise RuntimeError("PADDLE_PLUS_PRICE_ID and PADDLE_PRO_PRICE_ID must be different")
     if not settings.better_auth_jwt_algorithms:
         raise RuntimeError("BETTER_AUTH_JWT_ALGORITHMS must not be empty")
     if settings.better_auth_jwks_cache_ttl_seconds < 30:

@@ -6,6 +6,8 @@ from app.tracking.domain import (
     AppUser,
     AlertEvent,
     AffiliateClickEvent,
+    BillingSubscription,
+    BillingSubscriptionApplyResult,
     NotificationEvent,
     NotificationEventStatus,
     PriceSnapshot,
@@ -254,6 +256,37 @@ class TrackingRepository(Protocol):
         ...
 
     def get_current_usage_counter(self, *, user_id: str, now: str) -> UsageCounter:
+        ...
+
+    def get_billing_subscription_for_user(self, *, user_id: str) -> BillingSubscription | None:
+        ...
+
+    def get_billing_subscription_by_provider_subscription_id(
+        self,
+        *,
+        provider: str,
+        provider_subscription_id: str,
+    ) -> BillingSubscription | None:
+        ...
+
+    def apply_billing_subscription_update(
+        self,
+        *,
+        user_id: str,
+        provider: str,
+        provider_customer_id: str | None,
+        provider_subscription_id: str,
+        provider_price_id: str | None,
+        plan_key: str | None,
+        status: str,
+        current_period_start: str | None,
+        current_period_end: str | None,
+        next_billed_at: str | None,
+        cancel_at_period_end: bool,
+        last_event_id: str,
+        last_event_occurred_at: str,
+        now: str,
+    ) -> BillingSubscriptionApplyResult:
         ...
 
     def try_consume_check_units(

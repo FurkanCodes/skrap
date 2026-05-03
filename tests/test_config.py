@@ -124,6 +124,9 @@ def test_production_enables_rate_limit_by_default(
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "")
     monkeypatch.setenv("SCHEDULER_QUEUE_REDIS_URL", "redis://redis:6379/0")
     monkeypatch.setenv("SERVER_FETCH_RESOLVE_DNS", "")
+    monkeypatch.setenv("BILLING_BACKEND_SECRET", "backend-secret")
+    monkeypatch.setenv("PADDLE_PLUS_PRICE_ID", "pri_plus")
+    monkeypatch.setenv("PADDLE_PRO_PRICE_ID", "pri_pro")
 
     settings = get_settings()
 
@@ -131,6 +134,28 @@ def test_production_enables_rate_limit_by_default(
     assert settings.rate_limit_redis_url == "redis://redis:6379/0"
     assert settings.rate_limit_fail_open is False
     assert settings.server_fetch_resolve_dns is True
+
+
+def test_production_requires_paddle_price_ids(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    monkeypatch.setenv("AUTH_REQUIRED", "false")
+    monkeypatch.setenv("CORS_ALLOW_ORIGINS", "https://app.example.com")
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "")
+    monkeypatch.setenv("BILLING_BACKEND_SECRET", "backend-secret")
+    monkeypatch.setenv("PADDLE_PLUS_PRICE_ID", "")
+    monkeypatch.setenv("PADDLE_PRO_PRICE_ID", "pri_pro")
+
+    with pytest.raises(RuntimeError, match="PADDLE_PLUS_PRICE_ID is required"):
+        get_settings()
+
+
+def test_paddle_price_ids_must_be_distinct(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ENVIRONMENT", "development")
+    monkeypatch.setenv("PADDLE_PLUS_PRICE_ID", "pri_same")
+    monkeypatch.setenv("PADDLE_PRO_PRICE_ID", "pri_same")
+
+    with pytest.raises(RuntimeError, match="must be different"):
+        get_settings()
 
 
 def test_production_requires_telegram_webhook_secret_when_bot_token_configured(
