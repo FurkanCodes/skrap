@@ -12,6 +12,7 @@ from typing import Protocol
 
 from app.application.affiliate_link_service import AffiliateLinkService
 from app.application.scrape_service import ScrapeBatchInput, ScrapeBatchOutput
+from app.application.tracking_price_result import normalize_tracking_price_result
 from app.scraper import PriceResult
 from app.tracking import (
     AlertEvent,
@@ -402,6 +403,7 @@ class TrackingSchedulerService:
 
     def _finalize_result(self, context: _ItemRunContext, scrape_result: PriceResult) -> bool:
         item = self._get_latest_item_state(context.item)
+        scrape_result = normalize_tracking_price_result(scrape_result)
         finished_at = _to_iso(_utcnow())
         next_check_at = compute_next_check_at(
             base_time=finished_at,

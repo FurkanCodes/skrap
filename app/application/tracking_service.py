@@ -7,6 +7,7 @@ import hashlib
 import json
 
 from app.application.scrape_service import ScrapeBatchInput, ScrapeBatchService
+from app.application.tracking_price_result import normalize_tracking_price_result
 from app.scraper import PriceResult
 from app.tracking import (
     NotificationEvent,
@@ -180,6 +181,7 @@ class TrackingService:
                 raise TrackingBootstrapError("bootstrap failed: no_result")
             result = scrape_output.results[0]
 
+        result = normalize_tracking_price_result(result)
         if not result.success:
             raise TrackingBootstrapError(
                 f"bootstrap failed: {result.error or 'price_not_found'}"
@@ -515,6 +517,10 @@ class TrackingService:
             payload["product_name"] = item.product_name
         if product_url:
             payload["product_url"] = product_url
+        if result.listings:
+            listing_url = (result.listings[0].listing_url or "").strip()
+            if listing_url:
+                payload["listing_url"] = listing_url
 
         notification = NotificationEvent(
             notification_id=_new_notification_event_id(),

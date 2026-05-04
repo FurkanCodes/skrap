@@ -328,6 +328,44 @@ def test_akakce_adapter_prefers_campaign_price_over_original_price() -> None:
     assert listings[0].listing_url == "#/p1?s=1"
 
 
+def test_extract_price_from_page_keeps_akakce_dom_order_as_primary_listing() -> None:
+    source_url = "https://www.akakce.com/example,123.html"
+    page = Selector(
+        f"""
+        <html>
+          <head>
+            <link rel="canonical" href="{source_url}">
+          </head>
+          <body>
+            <ul id="PL">
+              <li>
+                <a href="#/p1?s=1">
+                  <span class="pt_v8">19.998<i>,00 TL</i></span>
+                  <span class="v_v8">/First Seller</span>
+                </a>
+              </li>
+              <li>
+                <a href="{source_url}">
+                  <span class="pt_v8">20.761<i>,90 TL</i></span>
+                  <span class="v_v8">/Later Seller</span>
+                </a>
+              </li>
+            </ul>
+          </body>
+        </html>
+        """
+    )
+
+    result = extract_price_from_page(page, source_url)
+
+    assert result.success is True
+    assert result.amount == "19998.00"
+    assert result.listings[0].amount == "19998.00"
+    assert result.listings[0].seller == "First Seller"
+    assert result.listings[1].amount == "20761.90"
+    assert result.listings[1].seller == "Later Seller"
+
+
 def test_n11_adapter_prefers_requested_seller_from_initial_state() -> None:
     page = Selector(
         """

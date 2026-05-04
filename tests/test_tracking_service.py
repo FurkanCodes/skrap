@@ -450,6 +450,63 @@ def test_bootstrap_new_item_enqueues_tracking_started_notification_when_chat_con
     assert payload["tracking_mode"] == "monitor"
 
 
+def test_bootstrap_uses_first_listing_for_saved_price_snapshot_and_notification() -> None:
+    first_listing = PriceListing(
+        item_id="itm_first",
+        amount="90.00",
+        currency="USD",
+        raw_text="$90.00",
+        source="test:first",
+        seller="First Seller",
+        listing_url="https://merchant.example.com/first",
+    )
+    later_listing = PriceListing(
+        item_id="itm_later",
+        amount="120.00",
+        currency="USD",
+        raw_text="$120.00",
+        source="test:later",
+        seller="Later Seller",
+        listing_url="https://merchant.example.com/later",
+    )
+    result = PriceResult(
+        url="https://example.com/p/multi",
+        success=True,
+        product_id="prd_multi",
+        site_key="generic",
+        adapter_key="generic",
+        amount=later_listing.amount,
+        currency=later_listing.currency,
+        raw_text=later_listing.raw_text,
+        source=later_listing.source,
+        product_name="Multi Listing Product",
+        listing_count=2,
+        listings=[first_listing, later_listing],
+    )
+    service, repository, _ = _build_service(result)
+
+    item = service.bootstrap(
+        TrackingBootstrapInput(
+            request_id="req_multi_listing",
+            url=result.url,
+            timeout_seconds=20,
+            selected_sites=None,
+            fetch_mode="auto",
+            check_interval_minutes=60,
+            target_amount=None,
+        )
+    )
+
+    assert item.last_amount == "90.00"
+    assert item.last_raw_text == "$90.00"
+    assert item.last_source == "test:first"
+    assert repository.snapshots[-1].amount == "90.00"
+    assert repository.snapshots[-1].raw_text == "$90.00"
+    payload = json.loads(repository.notification_events[0].payload)
+    assert payload["current_amount"] == "90.00"
+    assert payload["listing_url"] == "https://merchant.example.com/first"
+
+
 def test_bootstrap_existing_item_does_not_enqueue_tracking_started_notification() -> None:
     service, repository, _ = _build_service(_success_result("https://example.com/p/existing"))
 

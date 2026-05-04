@@ -1314,6 +1314,129 @@ def test_scheduler_monitor_mode_notifies_when_price_drops() -> None:
     assert payload["current_amount"] == "90.00"
 
 
+def test_scheduler_monitor_mode_uses_first_listing_for_price_drop_notification() -> None:
+    repo = _build_repo()
+    now = datetime.now(tz=UTC)
+    due_time = _iso(now - timedelta(minutes=1))
+    item = _item(
+        item_id="trk_monitor_drop_primary_listing",
+        url="https://example.com/monitor-drop-primary-listing",
+        now=now,
+        next_check_at=due_time,
+        last_amount="95.00",
+        target_amount=None,
+    )
+    repo.save_item(item)
+
+    first_listing = PriceListing(
+        item_id="itm_first",
+        amount="90.00",
+        currency="USD",
+        raw_text="$90.00",
+        source="test:first-listing",
+        listing_url="https://merchant.example.com/first",
+    )
+    later_listing = PriceListing(
+        item_id="itm_later",
+        amount="110.00",
+        currency="USD",
+        raw_text="$110.00",
+        source="test:later-listing",
+        listing_url="https://merchant.example.com/later",
+    )
+    scrape_result = PriceResult(
+        url=item.source_url,
+        success=True,
+        amount=later_listing.amount,
+        currency=later_listing.currency,
+        raw_text=later_listing.raw_text,
+        source=later_listing.source,
+        site_key="generic",
+        adapter_key="generic",
+        listings=[first_listing, later_listing],
+        listing_count=2,
+    )
+    scheduler = TrackingSchedulerService(
+        repository=repo,
+        scrape_runner=_FakeScrapeRunner({item.source_url: scrape_result}),
+        timeout_seconds=30,
+        claim_batch_size=50,
+        max_inflight=4,
+        lease_seconds=180,
+        jitter_percent=0,
+        lease_owner="scheduler-test",
+    )
+
+    outcome = scheduler.run_once()
+    assert outcome.success_count == 1
+
+    saved_item = repo.get_item(item.item_id)
+    assert saved_item is not None
+    assert saved_item.last_amount == "90.00"
+    notifications = repo.list_notification_events(item.item_id, limit=10)
+    assert len(notifications) == 1
+    payload = json.loads(notifications[0].payload)
+    assert payload["notification_type"] == "price_drop"
+    assert payload["previous_amount"] == "95.00"
+    assert payload["current_amount"] == "90.00"
+    assert payload["listing_url"] == "https://merchant.example.com/first"
+
+
+def test_scheduler_suppresses_price_change_when_primary_listing_has_no_price() -> None:
+    repo = _build_repo()
+    now = datetime.now(tz=UTC)
+    due_time = _iso(now - timedelta(minutes=1))
+    item = _item(
+        item_id="trk_monitor_primary_listing_missing_price",
+        url="https://example.com/monitor-missing-primary-price",
+        now=now,
+        next_check_at=due_time,
+        last_amount="95.00",
+        target_amount=None,
+    )
+    repo.save_item(item)
+
+    scrape_result = PriceResult(
+        url=item.source_url,
+        success=True,
+        amount="90.00",
+        currency="USD",
+        raw_text="$90.00",
+        source="test:stale-top-level",
+        site_key="generic",
+        adapter_key="generic",
+        listings=[
+            PriceListing(
+                item_id="itm_primary_missing",
+                amount="",
+                currency="USD",
+                raw_text="",
+                source="test:primary-missing",
+                listing_url="https://merchant.example.com/primary",
+            )
+        ],
+        listing_count=1,
+    )
+    scheduler = TrackingSchedulerService(
+        repository=repo,
+        scrape_runner=_FakeScrapeRunner({item.source_url: scrape_result}),
+        timeout_seconds=30,
+        claim_batch_size=50,
+        max_inflight=4,
+        lease_seconds=180,
+        jitter_percent=0,
+        lease_owner="scheduler-test",
+    )
+
+    outcome = scheduler.run_once()
+    assert outcome.success_count == 1
+
+    saved_item = repo.get_item(item.item_id)
+    assert saved_item is not None
+    assert saved_item.last_amount == "95.00"
+    assert repo.list_notification_events(item.item_id, limit=10) == []
+
+
 def test_scheduler_out_of_stock_success_keeps_last_price_and_skips_price_notifications() -> None:
     repo = _build_repo()
     now = datetime.now(tz=UTC)

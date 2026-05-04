@@ -494,11 +494,12 @@ def extract_price_from_page(
         )
         for index, candidate in enumerate(candidates, 1)
     ]
-    listings = _resolve_primary_listings(
-        listings,
-        source_url=url,
-        canonical_url=metadata["canonical_url"],
-    )
+    if used_adapter != "akakce":
+        listings = _resolve_primary_listings(
+            listings,
+            source_url=url,
+            canonical_url=metadata["canonical_url"],
+        )
     first = listings[0]
     return PriceResult(
         url=url,
