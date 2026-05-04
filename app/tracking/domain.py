@@ -56,6 +56,8 @@ class TrackedItem:
     lease_until: str | None = None
     last_check_started_at: str | None = None
     last_check_finished_at: str | None = None
+    tracked_listing_id: str | None = None
+    tracked_listing_url: str | None = None
 
     @property
     def tracking_mode(self) -> TrackingMode:

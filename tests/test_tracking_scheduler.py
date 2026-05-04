@@ -1382,6 +1382,136 @@ def test_scheduler_monitor_mode_uses_first_listing_for_price_drop_notification()
     assert payload["listing_url"] == "https://merchant.example.com/first"
 
 
+def test_scheduler_uses_selected_listing_identity_instead_of_current_first_listing() -> None:
+    repo = _build_repo()
+    now = datetime.now(tz=UTC)
+    due_time = _iso(now - timedelta(minutes=1))
+    item = replace(
+        _item(
+            item_id="trk_monitor_selected_listing",
+            url="https://example.com/monitor-selected-listing",
+            now=now,
+            next_check_at=due_time,
+            last_amount="120.00",
+            target_amount=None,
+        ),
+        tracked_listing_id="itm_selected",
+        tracked_listing_url="https://merchant.example.com/selected",
+    )
+    repo.save_item(item)
+
+    scrape_result = PriceResult(
+        url=item.source_url,
+        success=True,
+        amount="90.00",
+        currency="USD",
+        raw_text="$90.00",
+        source="test:current-first",
+        site_key="generic",
+        adapter_key="generic",
+        listings=[
+            PriceListing(
+                item_id="itm_other",
+                amount="90.00",
+                currency="USD",
+                raw_text="$90.00",
+                source="test:current-first",
+                listing_url="https://merchant.example.com/current-first",
+            ),
+            PriceListing(
+                item_id="itm_selected",
+                amount="110.00",
+                currency="USD",
+                raw_text="$110.00",
+                source="test:selected",
+                listing_url="https://merchant.example.com/selected",
+            ),
+        ],
+        listing_count=2,
+    )
+    scheduler = TrackingSchedulerService(
+        repository=repo,
+        scrape_runner=_FakeScrapeRunner({item.source_url: scrape_result}),
+        timeout_seconds=30,
+        claim_batch_size=50,
+        max_inflight=4,
+        lease_seconds=180,
+        jitter_percent=0,
+        lease_owner="scheduler-test",
+    )
+
+    outcome = scheduler.run_once()
+    assert outcome.success_count == 1
+
+    saved_item = repo.get_item(item.item_id)
+    assert saved_item is not None
+    assert saved_item.last_amount == "110.00"
+    notifications = repo.list_notification_events(item.item_id, limit=10)
+    assert len(notifications) == 1
+    payload = json.loads(notifications[0].payload)
+    assert payload["current_amount"] == "110.00"
+    assert payload["listing_url"] == "https://merchant.example.com/selected"
+
+
+def test_scheduler_suppresses_price_change_when_selected_listing_disappears() -> None:
+    repo = _build_repo()
+    now = datetime.now(tz=UTC)
+    due_time = _iso(now - timedelta(minutes=1))
+    item = replace(
+        _item(
+            item_id="trk_monitor_selected_listing_missing",
+            url="https://example.com/monitor-selected-listing-missing",
+            now=now,
+            next_check_at=due_time,
+            last_amount="120.00",
+            target_amount=None,
+        ),
+        tracked_listing_id="itm_selected",
+        tracked_listing_url="https://merchant.example.com/selected",
+    )
+    repo.save_item(item)
+
+    scrape_result = PriceResult(
+        url=item.source_url,
+        success=True,
+        amount="90.00",
+        currency="USD",
+        raw_text="$90.00",
+        source="test:other-listing",
+        site_key="generic",
+        adapter_key="generic",
+        listings=[
+            PriceListing(
+                item_id="itm_other",
+                amount="90.00",
+                currency="USD",
+                raw_text="$90.00",
+                source="test:other-listing",
+                listing_url="https://merchant.example.com/other",
+            )
+        ],
+        listing_count=1,
+    )
+    scheduler = TrackingSchedulerService(
+        repository=repo,
+        scrape_runner=_FakeScrapeRunner({item.source_url: scrape_result}),
+        timeout_seconds=30,
+        claim_batch_size=50,
+        max_inflight=4,
+        lease_seconds=180,
+        jitter_percent=0,
+        lease_owner="scheduler-test",
+    )
+
+    outcome = scheduler.run_once()
+    assert outcome.success_count == 1
+
+    saved_item = repo.get_item(item.item_id)
+    assert saved_item is not None
+    assert saved_item.last_amount == "120.00"
+    assert repo.list_notification_events(item.item_id, limit=10) == []
+
+
 def test_scheduler_suppresses_price_change_when_primary_listing_has_no_price() -> None:
     repo = _build_repo()
     now = datetime.now(tz=UTC)

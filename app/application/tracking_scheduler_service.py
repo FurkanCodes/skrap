@@ -403,7 +403,11 @@ class TrackingSchedulerService:
 
     def _finalize_result(self, context: _ItemRunContext, scrape_result: PriceResult) -> bool:
         item = self._get_latest_item_state(context.item)
-        scrape_result = normalize_tracking_price_result(scrape_result)
+        scrape_result = normalize_tracking_price_result(
+            scrape_result,
+            tracked_listing_id=item.tracked_listing_id,
+            tracked_listing_url=item.tracked_listing_url,
+        )
         finished_at = _to_iso(_utcnow())
         next_check_at = compute_next_check_at(
             base_time=finished_at,
@@ -432,6 +436,7 @@ class TrackingSchedulerService:
                 and (not is_not_in_stock)
                 and (scrape_result.success or stock_signal_without_price)
             )
+            tracked_listing = scrape_result.listings[0] if scrape_result.listings else None
             updated_item = replace(
                 item,
                 canonical_url=scrape_result.canonical_url or item.canonical_url,
@@ -460,6 +465,16 @@ class TrackingSchedulerService:
                 lease_until=None,
                 last_check_started_at=context.started_at,
                 last_check_finished_at=finished_at,
+                tracked_listing_id=(
+                    tracked_listing.item_id
+                    if tracked_listing is not None
+                    else item.tracked_listing_id
+                ),
+                tracked_listing_url=(
+                    tracked_listing.listing_url
+                    if tracked_listing is not None
+                    else item.tracked_listing_url
+                ),
             )
             snapshot = PriceSnapshot(
                 snapshot_id=_new_snapshot_id(),

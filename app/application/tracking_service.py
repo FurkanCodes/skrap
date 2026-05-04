@@ -181,7 +181,6 @@ class TrackingService:
                 raise TrackingBootstrapError("bootstrap failed: no_result")
             result = scrape_output.results[0]
 
-        result = normalize_tracking_price_result(result)
         if not result.success:
             raise TrackingBootstrapError(
                 f"bootstrap failed: {result.error or 'price_not_found'}"
@@ -193,6 +192,16 @@ class TrackingService:
         existing = self._get_item_by_source_url_for_user(source_url=source_url, user_id=user_id)
         if existing is not None and payload.duplicate_policy == "reject":
             raise TrackingDuplicateError(existing)
+
+        result = normalize_tracking_price_result(
+            result,
+            tracked_listing_id=(existing.tracked_listing_id if existing is not None else None),
+            tracked_listing_url=(existing.tracked_listing_url if existing is not None else None),
+        )
+        normalized_availability = _normalize_availability(result.availability)
+        is_not_in_stock = _is_not_in_stock(normalized_availability)
+        if existing is None and not is_not_in_stock and not (result.amount or "").strip():
+            raise TrackingBootstrapError("bootstrap failed: price_not_found")
 
         is_new_item = existing is None
         if existing is None:
@@ -216,8 +225,9 @@ class TrackingService:
         )
         if payload.notify_on_stock_change is not None:
             notify_on_stock_change = bool(payload.notify_on_stock_change)
-        normalized_availability = _normalize_availability(result.availability)
-        is_not_in_stock = _is_not_in_stock(normalized_availability)
+        has_current_price = bool((result.amount or "").strip())
+        should_update_price_fields = has_current_price and not is_not_in_stock
+        tracked_listing = result.listings[0] if result.listings else None
 
         status: TrackingStatus = existing.status if existing is not None else "active"
         created_via = existing.created_via if existing is not None else payload.created_via or "dashboard"
@@ -239,13 +249,19 @@ class TrackingService:
             availability=normalized_availability,
             currency=(result.currency or (existing.currency if existing is not None else None)),
             last_amount=(
-                existing.last_amount if (is_not_in_stock and existing is not None) else result.amount
+                result.amount
+                if should_update_price_fields
+                else (existing.last_amount if existing is not None else result.amount)
             ),
             last_raw_text=(
-                existing.last_raw_text if (is_not_in_stock and existing is not None) else result.raw_text
+                result.raw_text
+                if should_update_price_fields
+                else (existing.last_raw_text if existing is not None else result.raw_text)
             ),
             last_source=(
-                existing.last_source if (is_not_in_stock and existing is not None) else result.source
+                result.source
+                if should_update_price_fields
+                else (existing.last_source if existing is not None else result.source)
             ),
             created_via=created_via,
             status=status,
@@ -261,6 +277,16 @@ class TrackingService:
             lease_until=None,
             last_check_started_at=None,
             last_check_finished_at=checked_at,
+            tracked_listing_id=(
+                tracked_listing.item_id
+                if tracked_listing is not None
+                else (existing.tracked_listing_id if existing is not None else None)
+            ),
+            tracked_listing_url=(
+                tracked_listing.listing_url
+                if tracked_listing is not None
+                else (existing.tracked_listing_url if existing is not None else None)
+            ),
         )
 
         saved = self._repository.save_item(item)
@@ -271,14 +297,14 @@ class TrackingService:
                 item_id=saved.item_id,
                 checked_at=checked_at,
                 success=True,
-                amount=(None if is_not_in_stock else result.amount),
+                amount=(result.amount if should_update_price_fields else None),
                 currency=(
                     (result.currency or saved.currency)
-                    if not is_not_in_stock
+                    if should_update_price_fields
                     else None
                 ),
-                raw_text=(None if is_not_in_stock else result.raw_text),
-                source=(None if is_not_in_stock else result.source),
+                raw_text=(result.raw_text if should_update_price_fields else None),
+                source=(result.source if should_update_price_fields else None),
                 error=None,
                 availability=saved.availability,
             )

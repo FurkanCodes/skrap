@@ -500,6 +500,8 @@ def test_bootstrap_uses_first_listing_for_saved_price_snapshot_and_notification(
     assert item.last_amount == "90.00"
     assert item.last_raw_text == "$90.00"
     assert item.last_source == "test:first"
+    assert item.tracked_listing_id == "itm_first"
+    assert item.tracked_listing_url == "https://merchant.example.com/first"
     assert repository.snapshots[-1].amount == "90.00"
     assert repository.snapshots[-1].raw_text == "$90.00"
     payload = json.loads(repository.notification_events[0].payload)
