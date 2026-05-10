@@ -11,13 +11,14 @@ from app.scraper.extractors.generic import extract_price_listings_from_selector
 from app.scraper.fetching import (
     auto_remaining_modes,
     detect_auto_escalation_signals,
+    effective_fetch_timeout_seconds,
     initial_auto_fetch_mode,
 )
 from app.scraper.inputs import parse_fetch_mode, parse_sites_blob, parse_urls_blob
 from app.scraper.metadata import extract_product_metadata
 from app.scraper.parsing import make_item_id, normalize_runtime_url
 from app.scraper.registry import ADAPTERS, detect_site_key, list_supported_sites
-from app.scraper.scrape_spider import MODE_TO_SESSION_ID, _balanced_spider_remaining_modes
+from app.scraper.scrape_spider import MODE_TO_SESSION_ID, _balanced_spider_remaining_modes, _session_id_for_mode
 from app.scraper.service import extract_price_from_page, fetch_price, is_result_qualified, missing_required_result_fields
 
 
@@ -753,7 +754,18 @@ def test_amazon_auto_mode_uses_proxy_browsers_before_direct_browser_fallback() -
         url="https://www.amazon.com.tr/example/dp/B000000000",
     )
 
-    assert modes == ["dynamic_proxy", "stealth_proxy", "dynamic_direct", "stealth_direct"]
+    assert modes == ["dynamic_proxy", "dynamic_direct", "stealth_direct"]
+
+
+def test_amazon_auto_mode_uses_fast_plan_after_plain_fetch_error() -> None:
+    modes = auto_remaining_modes(
+        "http_direct",
+        signals=set(),
+        proxy_enabled=True,
+        url="https://www.amazon.com.tr/example/dp/B000000000",
+    )
+
+    assert modes == ["dynamic_proxy", "dynamic_direct", "stealth_direct"]
 
 
 def test_amazon_auto_jumps_to_direct_browser_after_proxy_tunnel_failure(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -800,6 +812,21 @@ def test_amazon_auto_jumps_to_direct_browser_after_proxy_tunnel_failure(monkeypa
 def test_spider_mode_map_supports_direct_browser_fallbacks() -> None:
     assert MODE_TO_SESSION_ID["dynamic_direct"] == "dynamic_direct"
     assert MODE_TO_SESSION_ID["stealth_direct"] == "stealth_direct"
+
+
+def test_spider_uses_fast_amazon_sessions_for_amazon_urls() -> None:
+    assert _session_id_for_mode(
+        "http_direct",
+        "https://www.amazon.com.tr/example/dp/B000000000",
+    ) == "amazon_http_direct"
+    assert _session_id_for_mode(
+        "dynamic_direct",
+        "https://www.amazon.com.tr/example/dp/B000000000",
+    ) == "amazon_dynamic_direct"
+    assert _session_id_for_mode(
+        "dynamic_direct",
+        "https://example.com/product",
+    ) == "dynamic_direct"
 
 
 def test_spider_amazon_captcha_uses_one_proxy_then_direct_browser_fallbacks() -> None:
@@ -849,6 +876,60 @@ def test_http_fetch_does_not_use_configured_proxy_rotator(monkeypatch: pytest.Mo
     assert isinstance(page, Selector)
     assert captured["url"] == "https://example.com/product"
     assert "proxy_rotator" not in captured
+
+
+def test_amazon_http_fetch_uses_short_timeout_and_single_retry(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.scraper import fetching
+
+    captured: dict[str, object] = {}
+
+    def _fake_get(url: str, **kwargs: object) -> Selector:
+        captured["url"] = url
+        captured.update(kwargs)
+        return Selector("<html></html>")
+
+    monkeypatch.setattr(fetching.Fetcher, "get", _fake_get)
+
+    page = fetching.fetch_page_with_mode(
+        "https://www.amazon.com.tr/example/dp/B000000000",
+        timeout=30,
+        mode="http_direct",
+    )
+
+    assert isinstance(page, Selector)
+    assert captured["timeout"] == effective_fetch_timeout_seconds(
+        "https://www.amazon.com.tr/example/dp/B000000000",
+        30,
+        "http_direct",
+    )
+    assert captured["timeout"] == 8
+    assert captured["retries"] == 1
+
+
+def test_amazon_dynamic_proxy_fetch_caps_timeout_and_retries(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.scraper import fetching
+
+    proxy_rotator = object()
+    captured: dict[str, object] = {}
+
+    def _fake_fetch(url: str, **kwargs: object) -> Selector:
+        captured["url"] = url
+        captured.update(kwargs)
+        return Selector("<html></html>")
+
+    monkeypatch.setattr(fetching, "get_scrape_proxy_rotator", lambda: proxy_rotator)
+    monkeypatch.setattr(fetching, "get_proxy_retry_count", lambda: 8)
+    monkeypatch.setattr(fetching.DynamicFetcher, "fetch", _fake_fetch)
+
+    page = fetching.fetch_page_with_mode(
+        "https://www.amazon.com.tr/example/dp/B000000000",
+        timeout=30,
+        mode="dynamic_proxy",
+    )
+
+    assert isinstance(page, Selector)
+    assert captured["timeout"] == 14000
+    assert captured["retries"] == 1
 
 
 def test_regular_stealth_fetch_avoids_cloudflare_solver(monkeypatch: pytest.MonkeyPatch) -> None:

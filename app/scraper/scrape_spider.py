@@ -3,15 +3,17 @@ from __future__ import annotations
 """Spider-backed batch scraping for seed URLs without link discovery."""
 
 import logging
-from urllib.parse import urlparse
 
 from scrapling.fetchers import AsyncDynamicSession, AsyncStealthySession, FetcherSession
 from scrapling.spiders import Request, Response, SessionManager, Spider
 
 from .fetching import (
+    effective_fetch_timeout_seconds,
+    effective_proxy_retry_count,
     auto_remaining_modes,
     detect_auto_escalation_signals,
     initial_auto_fetch_mode,
+    is_amazon_url,
     normalize_internal_fetch_mode,
 )
 from .inputs import parse_fetch_mode
@@ -31,13 +33,23 @@ MODE_TO_SESSION_ID = {
     "stealth_proxy": "stealth_proxy",
     "stealth_cf_proxy": "stealth_cf",
 }
+AMAZON_MODE_TO_SESSION_ID = {
+    mode: f"amazon_{sid}"
+    for mode, sid in MODE_TO_SESSION_ID.items()
+}
+_AMAZON_SESSION_URL = "https://www.amazon.com.tr/"
 _logger = logging.getLogger("scraper_api.scraper")
 _PROXY_MODES = {"http_proxy", "dynamic_proxy", "stealth_proxy", "stealth_cf_proxy"}
 
 
 def _is_amazon_url(url: str) -> bool:
-    host = urlparse(url).netloc.lower().removeprefix("www.")
-    return host == "amazon.com.tr" or host.startswith("amazon.") or ".amazon." in host
+    return is_amazon_url(url)
+
+
+def _session_id_for_mode(mode: str, url: str) -> str:
+    if _is_amazon_url(url):
+        return AMAZON_MODE_TO_SESSION_ID[mode]
+    return MODE_TO_SESSION_ID[mode]
 
 
 def _dedupe_preserving_order(urls: list[str]) -> list[str]:
@@ -114,15 +126,48 @@ class PriceScrapeSpider(Spider):
         browser_proxy_kwargs = {"proxy_rotator": proxy_rotator} if proxy_rotator is not None else {}
         browser_blocking_kwargs = browser_resource_blocking_kwargs()
         browser_proxy_retries = get_proxy_retry_count() if proxy_rotator is not None else 1
+        amazon_proxy_retries = (
+            effective_proxy_retry_count(_AMAZON_SESSION_URL)
+            if proxy_rotator is not None
+            else 1
+        )
         browser_direct_retries = 1
         browser_timeout_ms = max(1000, self._timeout_seconds * 1000)
         stealth_timeout_ms = max(10000, browser_timeout_ms)
         cloudflare_timeout_ms = max(30000, browser_timeout_ms)
+        amazon_http_timeout_seconds = effective_fetch_timeout_seconds(
+            _AMAZON_SESSION_URL,
+            self._timeout_seconds,
+            "http_direct",
+        )
+        amazon_browser_timeout_ms = max(
+            1000,
+            effective_fetch_timeout_seconds(
+                _AMAZON_SESSION_URL,
+                self._timeout_seconds,
+                "dynamic_direct",
+            )
+            * 1000,
+        )
+        amazon_stealth_timeout_ms = max(
+            10000,
+            effective_fetch_timeout_seconds(
+                _AMAZON_SESSION_URL,
+                self._timeout_seconds,
+                "stealth_direct",
+            )
+            * 1000,
+        )
         _logger.info(
-            "scrape_spider_sessions_configured proxy_enabled=%s browser_retries=%s timeout_seconds=%s concurrency=%s",
+            "scrape_spider_sessions_configured proxy_enabled=%s browser_retries=%s "
+            "amazon_browser_retries=%s timeout_seconds=%s amazon_http_timeout_seconds=%s "
+            "amazon_browser_timeout_ms=%s concurrency=%s",
             proxy_rotator is not None,
             browser_proxy_retries,
+            amazon_proxy_retries,
             self._timeout_seconds,
+            amazon_http_timeout_seconds,
+            amazon_browser_timeout_ms,
             self.concurrent_requests,
         )
         manager.add(
@@ -231,6 +276,112 @@ class PriceScrapeSpider(Spider):
             ),
             lazy=True,
         )
+        manager.add(
+            "amazon_http_direct",
+            FetcherSession(
+                timeout=amazon_http_timeout_seconds,
+                retries=1,
+                retry_delay=1,
+                stealthy_headers=True,
+                follow_redirects="safe",
+            ),
+        )
+        if proxy_rotator is not None:
+            manager.add(
+                "amazon_http_proxy",
+                FetcherSession(
+                    timeout=amazon_http_timeout_seconds,
+                    retries=amazon_proxy_retries,
+                    retry_delay=1,
+                    stealthy_headers=True,
+                    follow_redirects="safe",
+                    proxy_rotator=proxy_rotator,
+                ),
+            )
+        manager.add(
+            "amazon_dynamic_direct",
+            AsyncDynamicSession(
+                headless=True,
+                disable_resources=True,
+                **browser_blocking_kwargs,
+                timeout=amazon_browser_timeout_ms,
+                retries=browser_direct_retries,
+                retry_delay=1,
+            ),
+            lazy=True,
+        )
+        manager.add(
+            "amazon_dynamic_proxy",
+            AsyncDynamicSession(
+                headless=True,
+                disable_resources=True,
+                **browser_blocking_kwargs,
+                timeout=amazon_browser_timeout_ms,
+                retries=amazon_proxy_retries,
+                retry_delay=1,
+                **browser_proxy_kwargs,
+            ),
+            lazy=True,
+        )
+        manager.add(
+            "amazon_stealth_direct",
+            AsyncStealthySession(
+                headless=True,
+                disable_resources=True,
+                network_idle=False,
+                wait=1000,
+                solve_cloudflare=False,
+                block_webrtc=True,
+                **browser_blocking_kwargs,
+                hide_canvas=True,
+                locale="tr-TR",
+                timezone_id="Europe/Istanbul",
+                timeout=amazon_stealth_timeout_ms,
+                retries=browser_direct_retries,
+                retry_delay=1,
+            ),
+            lazy=True,
+        )
+        manager.add(
+            "amazon_stealth_proxy",
+            AsyncStealthySession(
+                headless=True,
+                disable_resources=True,
+                network_idle=False,
+                wait=1000,
+                solve_cloudflare=False,
+                block_webrtc=True,
+                **browser_blocking_kwargs,
+                hide_canvas=True,
+                locale="tr-TR",
+                timezone_id="Europe/Istanbul",
+                timeout=amazon_stealth_timeout_ms,
+                retries=amazon_proxy_retries,
+                retry_delay=1,
+                **browser_proxy_kwargs,
+            ),
+            lazy=True,
+        )
+        manager.add(
+            "amazon_stealth_cf",
+            AsyncStealthySession(
+                headless=True,
+                disable_resources=False,
+                network_idle=True,
+                wait=1500,
+                solve_cloudflare=True,
+                block_webrtc=True,
+                **browser_blocking_kwargs,
+                hide_canvas=True,
+                locale="tr-TR",
+                timezone_id="Europe/Istanbul",
+                timeout=cloudflare_timeout_ms,
+                retries=amazon_proxy_retries,
+                retry_delay=1,
+                **browser_proxy_kwargs,
+            ),
+            lazy=True,
+        )
 
     async def start_requests(self):
         for url in self.start_urls:
@@ -239,7 +390,7 @@ class PriceScrapeSpider(Spider):
                 if self._fetch_mode == "auto"
                 else normalize_internal_fetch_mode(self._fetch_mode)
             )
-            initial_sid = MODE_TO_SESSION_ID[initial_mode]
+            initial_sid = _session_id_for_mode(initial_mode, url)
             _logger.info(
                 "scrape_spider_request_start url=%s fetch_mode=%s mode=%s sid=%s",
                 url,
@@ -270,11 +421,12 @@ class PriceScrapeSpider(Spider):
             )
             return request
         current_mode = str(request.meta.get("current_mode", "http"))
+        original_url = str(request.meta.get("original_url", response.url))
         signals = detect_auto_escalation_signals(response, url=str(response.url))
         remaining_modes = _balanced_spider_remaining_modes(
             current_mode,
             signals=signals,
-            url=str(response.url),
+            url=original_url,
         )
         _logger.info(
             "scrape_spider_attempt_plan url=%s current_mode=%s remaining_modes=%s status=%s signals=%s reason=blocked_response",
@@ -286,7 +438,7 @@ class PriceScrapeSpider(Spider):
         )
         if remaining_modes:
             next_mode = remaining_modes.pop(0)
-            next_sid = MODE_TO_SESSION_ID[next_mode]
+            next_sid = _session_id_for_mode(next_mode, original_url)
             _logger.info(
                 "scrape_spider_auto_escalate url=%s from_mode=%s to_mode=%s next_sid=%s remaining_modes=%s reason=blocked_response status=%s signals=%s",
                 response.url,
@@ -368,7 +520,7 @@ class PriceScrapeSpider(Spider):
             )
             if remaining_modes:
                 next_mode = remaining_modes.pop(0)
-                next_sid = MODE_TO_SESSION_ID[next_mode]
+                next_sid = _session_id_for_mode(next_mode, url)
                 if current_mode != next_mode:
                     _logger.info(
                         "scrape_spider_followup_request url=%s from_mode=%s to_mode=%s next_sid=%s remaining_modes=%s reason=extract_failed",

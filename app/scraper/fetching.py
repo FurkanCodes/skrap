@@ -24,13 +24,39 @@ AMAZON_CAPTCHA_HINTS = (
     "/errors/validatecaptcha",
     "validatecaptcha",
 )
+AMAZON_HTTP_TIMEOUT_SECONDS = 8
+AMAZON_BROWSER_TIMEOUT_SECONDS = 14
+AMAZON_STEALTH_TIMEOUT_SECONDS = 16
 
 
-def _is_amazon_url(url: str | None) -> bool:
+def is_amazon_url(url: str | None) -> bool:
     if not url:
         return False
     host = urlparse(url).netloc.lower().removeprefix("www.")
     return host == "amazon.com.tr" or host.startswith("amazon.") or ".amazon." in host
+
+
+def _is_amazon_url(url: str | None) -> bool:
+    return is_amazon_url(url)
+
+
+def effective_fetch_timeout_seconds(url: str, timeout: int, mode: str) -> int:
+    """Cap known slow protected flows without changing caller-facing timeout limits."""
+    internal_mode = normalize_internal_fetch_mode(mode)
+    if not is_amazon_url(url):
+        return timeout
+    if internal_mode in {"http_direct", "http_proxy"}:
+        return min(timeout, AMAZON_HTTP_TIMEOUT_SECONDS)
+    if internal_mode in {"stealth_direct", "stealth_proxy", "stealth_cf_proxy"}:
+        return min(timeout, AMAZON_STEALTH_TIMEOUT_SECONDS)
+    return min(timeout, AMAZON_BROWSER_TIMEOUT_SECONDS)
+
+
+def effective_proxy_retry_count(url: str) -> int:
+    """Return proxy browser retries for a URL."""
+    if is_amazon_url(url):
+        return 1
+    return get_proxy_retry_count()
 
 
 def initial_auto_fetch_mode(url: str) -> str:
@@ -56,8 +82,8 @@ def auto_remaining_modes(
     has_proxy = get_scrape_proxy_rotator() is not None if proxy_enabled is None else proxy_enabled
     observed = signals or set()
 
-    if _is_amazon_url(url) and ("protection" in observed or normalized_mode != "http_direct"):
-        ordered = ["dynamic_proxy", "stealth_proxy", "dynamic_direct", "stealth_direct"]
+    if _is_amazon_url(url):
+        ordered = ["dynamic_proxy", "dynamic_direct", "stealth_direct"]
     elif "cloudflare" in observed:
         ordered = ["http_proxy", "stealth_cf_proxy", "stealth_proxy", "dynamic_proxy"]
     elif "protection" in observed:
@@ -94,8 +120,15 @@ def fetch_page_with_mode(url: str, timeout: int, mode: str) -> Selector:
     - `dynamic`: Playwright-backed browser fetcher
     - `stealth`: hardened browser fetcher for protected targets
     """
-    _logger.info("scrape_fetch_start mode=%s url=%s timeout_seconds=%s", mode, url, timeout)
     internal_mode = normalize_internal_fetch_mode(mode)
+    effective_timeout = effective_fetch_timeout_seconds(url, timeout, internal_mode)
+    _logger.info(
+        "scrape_fetch_start mode=%s url=%s timeout_seconds=%s effective_timeout_seconds=%s",
+        mode,
+        url,
+        timeout,
+        effective_timeout,
+    )
     if internal_mode in {"http_direct", "http_proxy"}:
         proxy_rotator = get_scrape_proxy_rotator() if internal_mode == "http_proxy" else None
         proxy_kwargs = {"proxy": proxy_rotator.get_proxy()} if proxy_rotator is not None else {}
@@ -103,8 +136,8 @@ def fetch_page_with_mode(url: str, timeout: int, mode: str) -> Selector:
             _logger.info("scrape_fetch_http_proxy_config proxy_enabled=True url=%s", url)
         page = Fetcher.get(
             url,
-            timeout=timeout,
-            retries=2,
+            timeout=effective_timeout,
+            retries=1 if is_amazon_url(url) else 2,
             retry_delay=1,
             stealthy_headers=True,
             follow_redirects="safe",
@@ -113,7 +146,7 @@ def fetch_page_with_mode(url: str, timeout: int, mode: str) -> Selector:
         _logger.info("scrape_fetch_complete mode=%s status=%s url=%s", internal_mode, getattr(page, "status", None), url)
         return page
 
-    browser_timeout_ms = max(1000, timeout * 1000)
+    browser_timeout_ms = max(1000, effective_timeout * 1000)
     stealth_timeout_ms = max(10000, browser_timeout_ms)
     cloudflare_timeout_ms = max(30000, browser_timeout_ms)
     base_kwargs = {
@@ -128,7 +161,7 @@ def fetch_page_with_mode(url: str, timeout: int, mode: str) -> Selector:
     if internal_mode in {"dynamic_direct", "dynamic_proxy"}:
         proxy_rotator = get_scrape_proxy_rotator() if internal_mode == "dynamic_proxy" else None
         proxy_kwargs = {"proxy_rotator": proxy_rotator} if proxy_rotator is not None else {}
-        retries = get_proxy_retry_count() if proxy_rotator is not None else 1
+        retries = effective_proxy_retry_count(url) if proxy_rotator is not None else 1
         _logger.info(
             "scrape_fetch_dynamic_config mode=%s proxy_enabled=%s retries=%s url=%s",
             internal_mode,
@@ -148,7 +181,7 @@ def fetch_page_with_mode(url: str, timeout: int, mode: str) -> Selector:
         proxy_rotator = get_scrape_proxy_rotator() if internal_mode in {"stealth_proxy", "stealth_cf_proxy"} else None
         proxy_kwargs = {"proxy_rotator": proxy_rotator} if proxy_rotator is not None else {}
         solve_cloudflare = internal_mode == "stealth_cf_proxy"
-        retries = get_proxy_retry_count() if proxy_rotator is not None else 1
+        retries = effective_proxy_retry_count(url) if proxy_rotator is not None else 1
         _logger.info(
             "scrape_fetch_stealth_config mode=%s proxy_enabled=%s retries=%s solve_cloudflare=%s url=%s",
             internal_mode,
