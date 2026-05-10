@@ -836,6 +836,7 @@ def test_scheduler_run_once_failure_keeps_last_good_price() -> None:
     updated = repo.get_item(item.item_id)
     assert updated is not None
     assert updated.last_amount == "120.00"
+    assert updated.availability == "unknown"
     assert updated.last_checked_at == previous_checked_at
     assert updated.last_check_finished_at is not None
     assert updated.last_check_finished_at != previous_checked_at
@@ -847,6 +848,7 @@ def test_scheduler_run_once_failure_keeps_last_good_price() -> None:
     assert snapshots
     assert snapshots[0].success is False
     assert snapshots[0].error == "price_not_found"
+    assert snapshots[0].availability == "unknown"
 
     runs = repo.list_check_runs(item.item_id, limit=5)
     assert runs
@@ -1568,7 +1570,7 @@ def test_scheduler_falls_back_to_current_first_listing_when_stored_listing_disap
     assert payload["listing_url"] == "https://merchant.example.com/other"
 
 
-def test_scheduler_suppresses_price_change_when_primary_listing_has_no_price() -> None:
+def test_scheduler_marks_missing_primary_listing_price_as_unknown_failure() -> None:
     repo = _build_repo()
     now = datetime.now(tz=UTC)
     due_time = _iso(now - timedelta(minutes=1))
@@ -1615,11 +1617,17 @@ def test_scheduler_suppresses_price_change_when_primary_listing_has_no_price() -
     )
 
     outcome = scheduler.run_once()
-    assert outcome.success_count == 1
+    assert outcome.success_count == 0
+    assert outcome.failure_count == 1
 
     saved_item = repo.get_item(item.item_id)
     assert saved_item is not None
     assert saved_item.last_amount == "95.00"
+    assert saved_item.availability == "unknown"
+    snapshots = repo.list_snapshots(item.item_id, limit=5)
+    assert snapshots[0].success is False
+    assert snapshots[0].availability == "unknown"
+    assert snapshots[0].error == "price_not_found"
     assert repo.list_notification_events(item.item_id, limit=10) == []
 
 
@@ -1970,6 +1978,59 @@ def test_scheduler_emits_restocked_notification_with_price_after_out_of_stock() 
         raw_text="$99.00",
         source="test:restock",
         availability="in_stock",
+        product_name="Restocked Item",
+        image_url="https://example.com/image.jpg",
+        site_key="generic",
+        adapter_key="generic",
+    )
+    scheduler = TrackingSchedulerService(
+        repository=repo,
+        scrape_runner=_FakeScrapeRunner({item.source_url: scrape_result}),
+        timeout_seconds=30,
+        claim_batch_size=50,
+        max_inflight=4,
+        lease_seconds=180,
+        jitter_percent=0,
+        lease_owner="scheduler-test",
+    )
+
+    outcome = scheduler.run_once()
+    assert outcome.success_count == 1
+    updated = repo.get_item(item.item_id)
+    assert updated is not None
+    assert updated.availability == "in_stock"
+    assert updated.last_amount == "99.00"
+    notifications = repo.list_notification_events(item.item_id, limit=10)
+    assert len(notifications) == 1
+    payload = json.loads(notifications[0].payload)
+    assert payload["notification_type"] == "stock_restocked"
+    assert payload["current_availability"] == "in_stock"
+    assert payload["current_amount"] == "99.00"
+
+
+def test_scheduler_treats_confirmed_price_as_in_stock_when_stock_text_is_missing() -> None:
+    repo = _build_repo()
+    now = datetime.now(tz=UTC)
+    due_time = _iso(now - timedelta(minutes=1))
+    item = _item(
+        item_id="trk_price_implies_in_stock",
+        url="https://example.com/price-implies-stock",
+        now=now,
+        next_check_at=due_time,
+        last_amount="105.00",
+        target_amount=None,
+        notify_on_stock_change=True,
+    )
+    repo.save_item(replace(item, availability="out_of_stock"))
+
+    scrape_result = PriceResult(
+        url=item.source_url,
+        success=True,
+        amount="99.00",
+        currency="USD",
+        raw_text="$99.00",
+        source="test:price-without-stock-text",
+        availability=None,
         product_name="Restocked Item",
         image_url="https://example.com/image.jpg",
         site_key="generic",

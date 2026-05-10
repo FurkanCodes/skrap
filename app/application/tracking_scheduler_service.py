@@ -27,6 +27,7 @@ _TEST_INTERVAL_15_SECONDS_SENTINEL = 10_079
 _TEST_INTERVAL_15_SECONDS_VALUE = 15
 _NOT_IN_STOCK_AVAILABILITIES = {"out_of_stock", "preorder", "discontinued"}
 _TRACKING_ATTENTION_FAILURE_THRESHOLD = 3
+_UNKNOWN_AVAILABILITY = "unknown"
 
 
 class TrackingSchedulerError(RuntimeError):
@@ -413,11 +414,14 @@ class TrackingSchedulerService:
             align_checks_to_interval=self._align_checks_to_interval,
         )
         previous_availability = _normalize_availability(item.availability)
-        current_availability = _normalize_availability(scrape_result.availability)
+        scraped_availability = _normalize_availability(scrape_result.availability)
+        has_current_price = _parse_decimal(scrape_result.amount) is not None
+        current_availability = scraped_availability or (
+            "in_stock" if has_current_price else None
+        )
         was_not_in_stock = _is_not_in_stock(previous_availability)
         is_not_in_stock = _is_not_in_stock(current_availability)
         is_explicit_in_stock = current_availability == "in_stock"
-        has_current_price = _parse_decimal(scrape_result.amount) is not None
         stock_transition = (not was_not_in_stock and is_not_in_stock) or (
             was_not_in_stock and is_explicit_in_stock
         )
@@ -427,11 +431,14 @@ class TrackingSchedulerService:
             and is_explicit_in_stock
             and was_not_in_stock
         )
-        if scrape_result.success or stock_signal_without_price:
+        has_confident_success = scrape_result.success and (
+            has_current_price or current_availability is not None
+        )
+        if has_confident_success or stock_signal_without_price:
             should_update_price_fields = (
                 has_current_price
                 and (not is_not_in_stock)
-                and (scrape_result.success or stock_signal_without_price)
+                and (has_confident_success or stock_signal_without_price)
             )
             updated_item = replace(
                 item,
@@ -537,6 +544,7 @@ class TrackingSchedulerService:
         )
         updated_item = replace(
             item,
+            availability=current_availability or _UNKNOWN_AVAILABILITY,
             updated_at=finished_at,
             next_check_at=next_check_at,
             lease_owner=None,
@@ -554,7 +562,7 @@ class TrackingSchedulerService:
             raw_text=scrape_result.raw_text,
             source=scrape_result.source,
             error=error,
-            availability=current_availability or item.availability,
+            availability=current_availability or _UNKNOWN_AVAILABILITY,
             scheduled_for=context.scheduled_for,
         )
         self._repository.save_item_and_snapshot(updated_item, snapshot)
