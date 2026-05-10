@@ -328,6 +328,83 @@ def test_akakce_adapter_prefers_campaign_price_over_original_price() -> None:
     assert listings[0].listing_url == "#/p1?s=1"
 
 
+def test_akakce_adapter_uses_current_price_when_coupon_and_cargo_text_are_nearby() -> None:
+    page = Selector(
+        """
+        <html>
+          <body>
+            <ul id="PL">
+              <li>
+                <a href="#/8497867/?z=146&s=2">
+                  <span class="pb_v8">
+                    <span class="pt_v8 orig_pt_v8">34.605<i>,93 TL</i></span>
+                    <span class="pt_v8 cmpgn_pt_v8">33.605<i>,93 TL</i></span>
+                  </span>
+                  <span>Ücretsiz kargo</span>
+                  <span>Sepette 1.000 TL indirim PTTAVM1000</span>
+                  <span class="v_v8">Satıcı: Pttavm/Dfsbilgisayar</span>
+                </a>
+              </li>
+            </ul>
+          </body>
+        </html>
+        """
+    )
+
+    listings = AkakceAdapter().extract(page, "https://www.akakce.com/example,123.html")
+
+    assert len(listings) == 1
+    assert str(listings[0].amount) == "33605.93"
+    assert listings[0].raw_text == "33.605,93 TL"
+    assert listings[0].seller == "Pttavm/Dfsbilgisayar"
+
+
+def test_akakce_adapter_handles_changed_price_classes_and_missing_seller() -> None:
+    page = Selector(
+        """
+        <html>
+          <body>
+            <ul id="PL">
+              <li>
+                <a href="#/p1?s=1">
+                  <span class="offer-price-original">36.995 TL</span>
+                  <span class="offer-price-current">33.606 TL</span>
+                  <span>Yarın kargoda</span>
+                </a>
+              </li>
+            </ul>
+          </body>
+        </html>
+        """
+    )
+
+    listings = AkakceAdapter().extract(page, "https://www.akakce.com/example,123.html")
+
+    assert len(listings) == 1
+    assert str(listings[0].amount) == "33606"
+    assert listings[0].raw_text == "33.606 TL"
+    assert listings[0].seller is None
+
+
+def test_akakce_adapter_falls_back_when_offer_list_is_missing() -> None:
+    page = Selector(
+        """
+        <html>
+          <body>
+            <h1>AMD Ryzen 9 9950X3D</h1>
+            <div class="product-price">33.605,93 TL</div>
+          </body>
+        </html>
+        """
+    )
+
+    listings = AkakceAdapter().extract(page, "https://www.akakce.com/example,123.html")
+
+    assert len(listings) == 1
+    assert str(listings[0].amount) == "33605.93"
+    assert listings[0].currency == "TRY"
+
+
 def test_extract_price_from_page_keeps_akakce_dom_order_as_primary_listing() -> None:
     source_url = "https://www.akakce.com/example,123.html"
     page = Selector(

@@ -399,6 +399,15 @@ class AkakceAdapter(SiteAdapter):
     """Akakce-specific listing parser with seller cleanup rules."""
 
     key = "akakce"
+    _row_selectors = ("#PL > li", "#PL li")
+    _price_selectors = (
+        ".pt_v8",
+        "[class*='pt_v8']",
+        "[class*='campaign']",
+        "[class*='current']",
+        "[class*='price']",
+        "[data-price]",
+    )
 
     @staticmethod
     def _normalize_price_text(text: str) -> str:
@@ -414,6 +423,7 @@ class AkakceAdapter(SiteAdapter):
         seller_node = seller_nodes[0]
         seller_text = str(seller_node.get_all_text(separator=" ", strip=True))
         seller_text = seller_text.lstrip("/").strip()
+        seller_text = re.sub(r"^satıcı\s*:\s*", "", seller_text, flags=re.IGNORECASE).strip()
         seller_text = re.sub(r"\d+[,.]\d+\s+\d+\s+Yorum.*$", "", seller_text, flags=re.IGNORECASE).strip()
         seller_text = re.sub(r"\d+\s+Yorum.*$", "", seller_text, flags=re.IGNORECASE).strip()
         if seller_text:
@@ -430,20 +440,41 @@ class AkakceAdapter(SiteAdapter):
     def _select_price_node(price_nodes: list[Selector]) -> Selector:
         for price_node in price_nodes:
             class_name = str(getattr(price_node, "attrib", {}).get("class", ""))
-            if "cmpgn_pt_v8" in class_name:
+            normalized_class = class_name.lower()
+            if any(
+                marker in normalized_class
+                for marker in ("cmpgn_pt_v8", "campaign", "current", "discount", "sale")
+            ):
                 return price_node
 
         for price_node in price_nodes:
             class_name = str(getattr(price_node, "attrib", {}).get("class", ""))
-            if "orig_pt_v8" not in class_name:
+            normalized_class = class_name.lower()
+            if not any(marker in normalized_class for marker in ("orig_pt_v8", "original", "old", "was")):
                 return price_node
 
         return price_nodes[0]
 
+    def _listing_rows(self, page: Selector) -> list[Selector]:
+        rows: list[Selector] = []
+        for selector in self._row_selectors:
+            for row in page.css(selector):
+                if row not in rows:
+                    rows.append(row)
+        return rows
+
+    def _price_nodes(self, row: Selector) -> list[Selector]:
+        nodes: list[Selector] = []
+        for selector in self._price_selectors:
+            for node in row.css(selector):
+                if node not in nodes:
+                    nodes.append(node)
+        return nodes
+
     def extract(self, page: Selector, url: str) -> list[PriceCandidate]:
         candidates: list[PriceCandidate] = []
-        for li in page.css("#PL > li"):
-            price_nodes = li.css(".pt_v8")
+        for li in self._listing_rows(page):
+            price_nodes = self._price_nodes(li)
             if not price_nodes:
                 continue
 

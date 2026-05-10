@@ -1177,13 +1177,13 @@ def test_scheduler_monitor_mode_does_not_notify_when_price_unchanged() -> None:
     assert notifications == []
 
 
-def test_scheduler_monitor_mode_does_not_notify_when_price_increases_without_setting() -> None:
+def test_scheduler_monitor_mode_notifies_when_price_increases_by_default() -> None:
     repo = _build_repo()
     now = datetime.now(tz=UTC)
     due_time = _iso(now - timedelta(minutes=1))
     item = _item(
-        item_id="trk_monitor_no_increase_notify",
-        url="https://example.com/monitor-increase-disabled",
+        item_id="trk_monitor_increase_default",
+        url="https://example.com/monitor-increase-default",
         now=now,
         next_check_at=due_time,
         last_amount="95.00",
@@ -1198,7 +1198,7 @@ def test_scheduler_monitor_mode_does_not_notify_when_price_increases_without_set
         amount="99.00",
         currency="USD",
         raw_text="$99.00",
-        source="test:monitor-increase-disabled",
+        source="test:monitor-increase-default",
         site_key="generic",
         adapter_key="generic",
     )
@@ -1216,7 +1216,52 @@ def test_scheduler_monitor_mode_does_not_notify_when_price_increases_without_set
     outcome = scheduler.run_once()
     assert outcome.success_count == 1
     notifications = repo.list_notification_events(item.item_id, limit=10)
-    assert notifications == []
+    assert len(notifications) == 1
+    payload = json.loads(notifications[0].payload)
+    assert payload["notification_type"] == "price_increase"
+    assert payload["previous_amount"] == "95.00"
+    assert payload["current_amount"] == "99.00"
+
+
+def test_scheduler_alert_mode_does_not_notify_price_increase_without_setting() -> None:
+    repo = _build_repo()
+    now = datetime.now(tz=UTC)
+    due_time = _iso(now - timedelta(minutes=1))
+    item = _item(
+        item_id="trk_alert_no_increase_notify",
+        url="https://example.com/alert-increase-disabled",
+        now=now,
+        next_check_at=due_time,
+        last_amount="95.00",
+        target_amount="80.00",
+        notify_on_price_increase=False,
+    )
+    repo.save_item(item)
+
+    scrape_result = PriceResult(
+        url=item.source_url,
+        success=True,
+        amount="99.00",
+        currency="USD",
+        raw_text="$99.00",
+        source="test:alert-increase-disabled",
+        site_key="generic",
+        adapter_key="generic",
+    )
+    scheduler = TrackingSchedulerService(
+        repository=repo,
+        scrape_runner=_FakeScrapeRunner({item.source_url: scrape_result}),
+        timeout_seconds=30,
+        claim_batch_size=50,
+        max_inflight=4,
+        lease_seconds=180,
+        jitter_percent=0,
+        lease_owner="scheduler-test",
+    )
+
+    outcome = scheduler.run_once()
+    assert outcome.success_count == 1
+    assert repo.list_notification_events(item.item_id, limit=10) == []
 
 
 def test_scheduler_monitor_mode_notifies_when_price_increases_with_setting_enabled() -> None:
@@ -1578,6 +1623,122 @@ def test_scheduler_suppresses_price_change_when_primary_listing_has_no_price() -
     assert repo.list_notification_events(item.item_id, limit=10) == []
 
 
+def test_scheduler_emits_attention_notification_after_three_consecutive_failures() -> None:
+    repo = _build_repo()
+    now = datetime.now(tz=UTC)
+    due_time = _iso(now - timedelta(minutes=1))
+    item = _item(
+        item_id="trk_attention_failures",
+        url="https://example.com/attention-failures",
+        now=now,
+        next_check_at=due_time,
+        last_amount="95.00",
+        target_amount=None,
+    )
+    repo.save_item(item)
+    for index in range(2):
+        repo.add_snapshot(
+            PriceSnapshot(
+                snapshot_id=f"snp_attention_previous_{index}",
+                item_id=item.item_id,
+                checked_at=_iso(now - timedelta(minutes=3 - index)),
+                success=False,
+                amount=None,
+                currency="USD",
+                raw_text=None,
+                source=None,
+                error="price_not_found",
+            )
+        )
+
+    scrape_result = PriceResult(
+        url=item.source_url,
+        success=False,
+        error="blocked_by_protection",
+        product_name="Attention Item",
+        canonical_url=item.source_url,
+        site_key="generic",
+        adapter_key="generic",
+    )
+    scheduler = TrackingSchedulerService(
+        repository=repo,
+        scrape_runner=_FakeScrapeRunner({item.source_url: scrape_result}),
+        timeout_seconds=30,
+        claim_batch_size=50,
+        max_inflight=4,
+        lease_seconds=180,
+        jitter_percent=0,
+        lease_owner="scheduler-test",
+    )
+
+    outcome = scheduler.run_once()
+    assert outcome.failure_count == 1
+
+    saved_item = repo.get_item(item.item_id)
+    assert saved_item is not None
+    assert saved_item.last_amount == "95.00"
+    notifications = repo.list_notification_events(item.item_id, limit=10)
+    assert len(notifications) == 1
+    payload = json.loads(notifications[0].payload)
+    assert payload["notification_type"] == "tracking_attention"
+    assert payload["consecutive_failure_count"] == 3
+    assert payload["error"] == "blocked_by_protection"
+    assert payload["product_url"] == item.source_url
+
+
+def test_scheduler_does_not_repeat_attention_notification_after_threshold() -> None:
+    repo = _build_repo()
+    now = datetime.now(tz=UTC)
+    due_time = _iso(now - timedelta(minutes=1))
+    item = _item(
+        item_id="trk_attention_already_failed",
+        url="https://example.com/attention-already-failed",
+        now=now,
+        next_check_at=due_time,
+        last_amount="95.00",
+        target_amount=None,
+    )
+    repo.save_item(item)
+    for index in range(3):
+        repo.add_snapshot(
+            PriceSnapshot(
+                snapshot_id=f"snp_attention_existing_{index}",
+                item_id=item.item_id,
+                checked_at=_iso(now - timedelta(minutes=4 - index)),
+                success=False,
+                amount=None,
+                currency="USD",
+                raw_text=None,
+                source=None,
+                error="price_not_found",
+            )
+        )
+
+    scrape_result = PriceResult(
+        url=item.source_url,
+        success=False,
+        error="blocked_by_protection",
+        product_name="Attention Item",
+        canonical_url=item.source_url,
+        site_key="generic",
+        adapter_key="generic",
+    )
+    scheduler = TrackingSchedulerService(
+        repository=repo,
+        scrape_runner=_FakeScrapeRunner({item.source_url: scrape_result}),
+        timeout_seconds=30,
+        claim_batch_size=50,
+        max_inflight=4,
+        lease_seconds=180,
+        jitter_percent=0,
+        lease_owner="scheduler-test",
+    )
+
+    outcome = scheduler.run_once()
+    assert outcome.failure_count == 1
+    assert repo.list_notification_events(item.item_id, limit=10) == []
+
+
 def test_scheduler_out_of_stock_success_keeps_last_price_and_skips_price_notifications() -> None:
     repo = _build_repo()
     now = datetime.now(tz=UTC)
@@ -1680,6 +1841,59 @@ def test_scheduler_emits_stock_out_notification_when_enabled() -> None:
     assert "current_amount" not in payload
 
 
+def test_scheduler_treats_preorder_and_discontinued_as_stock_out_states() -> None:
+    for availability in ("preorder", "discontinued"):
+        repo = _build_repo()
+        now = datetime.now(tz=UTC)
+        due_time = _iso(now - timedelta(minutes=1))
+        item = _item(
+            item_id=f"trk_{availability}",
+            url=f"https://example.com/{availability}",
+            now=now,
+            next_check_at=due_time,
+            last_amount="105.00",
+            target_amount=None,
+            notify_on_stock_change=True,
+        )
+        repo.save_item(item)
+
+        scrape_result = PriceResult(
+            url=item.source_url,
+            success=True,
+            amount=None,
+            currency=None,
+            raw_text=None,
+            source=None,
+            availability=availability,
+            product_name="Unavailable Item",
+            image_url="https://example.com/image.jpg",
+            site_key="generic",
+            adapter_key="generic",
+        )
+        scheduler = TrackingSchedulerService(
+            repository=repo,
+            scrape_runner=_FakeScrapeRunner({item.source_url: scrape_result}),
+            timeout_seconds=30,
+            claim_batch_size=50,
+            max_inflight=4,
+            lease_seconds=180,
+            jitter_percent=0,
+            lease_owner="scheduler-test",
+        )
+
+        outcome = scheduler.run_once()
+        assert outcome.success_count == 1
+        updated = repo.get_item(item.item_id)
+        assert updated is not None
+        assert updated.last_amount == "105.00"
+        assert updated.availability == availability
+        notifications = repo.list_notification_events(item.item_id, limit=10)
+        assert len(notifications) == 1
+        payload = json.loads(notifications[0].payload)
+        assert payload["notification_type"] == "stock_out"
+        assert payload["current_availability"] == availability
+
+
 def test_scheduler_emits_restocked_notification_without_price_after_out_of_stock() -> None:
     repo = _build_repo()
     now = datetime.now(tz=UTC)
@@ -1731,6 +1945,59 @@ def test_scheduler_emits_restocked_notification_without_price_after_out_of_stock
     assert payload["notification_type"] == "stock_restocked"
     assert payload["current_availability"] == "in_stock"
     assert "current_amount" not in payload
+
+
+def test_scheduler_emits_restocked_notification_with_price_after_out_of_stock() -> None:
+    repo = _build_repo()
+    now = datetime.now(tz=UTC)
+    due_time = _iso(now - timedelta(minutes=1))
+    item = _item(
+        item_id="trk_restock_notify_with_price",
+        url="https://example.com/restock-with-price",
+        now=now,
+        next_check_at=due_time,
+        last_amount="105.00",
+        target_amount=None,
+        notify_on_stock_change=True,
+    )
+    repo.save_item(replace(item, availability="out_of_stock"))
+
+    scrape_result = PriceResult(
+        url=item.source_url,
+        success=True,
+        amount="99.00",
+        currency="USD",
+        raw_text="$99.00",
+        source="test:restock",
+        availability="in_stock",
+        product_name="Restocked Item",
+        image_url="https://example.com/image.jpg",
+        site_key="generic",
+        adapter_key="generic",
+    )
+    scheduler = TrackingSchedulerService(
+        repository=repo,
+        scrape_runner=_FakeScrapeRunner({item.source_url: scrape_result}),
+        timeout_seconds=30,
+        claim_batch_size=50,
+        max_inflight=4,
+        lease_seconds=180,
+        jitter_percent=0,
+        lease_owner="scheduler-test",
+    )
+
+    outcome = scheduler.run_once()
+    assert outcome.success_count == 1
+    updated = repo.get_item(item.item_id)
+    assert updated is not None
+    assert updated.availability == "in_stock"
+    assert updated.last_amount == "99.00"
+    notifications = repo.list_notification_events(item.item_id, limit=10)
+    assert len(notifications) == 1
+    payload = json.loads(notifications[0].payload)
+    assert payload["notification_type"] == "stock_restocked"
+    assert payload["current_availability"] == "in_stock"
+    assert payload["current_amount"] == "99.00"
 
 
 def test_scheduler_does_not_notify_when_item_is_paused_during_inflight_run() -> None:

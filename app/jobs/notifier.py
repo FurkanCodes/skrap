@@ -232,7 +232,7 @@ def _render_telegram_message(payload: dict) -> str:
         if target != "?":
             lines.append(f"Target price: {target}{currency_suffix}")
         if tracking_mode == "monitor":
-            lines.append("I will notify you when the price drops.")
+            lines.append("I will notify you when the price changes.")
         else:
             lines.append("I will notify you when your target price is reached.")
     elif notification_type == "tracking_stopped":
@@ -253,6 +253,15 @@ def _render_telegram_message(payload: dict) -> str:
             lines.append(f"Item: {item_label}")
         if current != "?":
             lines.append(f"Current price: {current}{currency_suffix}")
+    elif notification_type == "tracking_attention":
+        count = str(payload.get("consecutive_failure_count", "")).strip()
+        error = str(payload.get("error", "")).strip()
+        suffix = f" ({count} failed checks)" if count else ""
+        lines = [f"Tracking needs attention{suffix}"]
+        if item_label:
+            lines.append(f"Item: {item_label}")
+        if error:
+            lines.append(f"Last error: {error}")
     else:
         lines = [
             "Target reached",

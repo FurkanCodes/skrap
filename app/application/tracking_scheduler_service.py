@@ -26,6 +26,7 @@ from app.tracking import (
 _TEST_INTERVAL_15_SECONDS_SENTINEL = 10_079
 _TEST_INTERVAL_15_SECONDS_VALUE = 15
 _NOT_IN_STOCK_AVAILABILITIES = {"out_of_stock", "preorder", "discontinued"}
+_TRACKING_ATTENTION_FAILURE_THRESHOLD = 3
 
 
 class TrackingSchedulerError(RuntimeError):
@@ -529,6 +530,11 @@ class TrackingSchedulerService:
             return True
 
         error = scrape_result.error or "price_not_found"
+        should_emit_attention = (
+            item.status == "active"
+            and self._count_recent_consecutive_failures(item_id=item.item_id)
+            == _TRACKING_ATTENTION_FAILURE_THRESHOLD - 1
+        )
         updated_item = replace(
             item,
             updated_at=finished_at,
@@ -558,6 +564,14 @@ class TrackingSchedulerService:
             finished_at=finished_at,
             error=error,
         )
+        if should_emit_attention:
+            self._emit_tracking_attention_notification(
+                item_before=item,
+                snapshot=snapshot,
+                error=error,
+                consecutive_failure_count=_TRACKING_ATTENTION_FAILURE_THRESHOLD,
+                product_url=_resolve_product_url(item, scrape_result),
+            )
         return False
 
     def _emit_alert_if_crossed(
@@ -710,7 +724,7 @@ class TrackingSchedulerService:
         product_url: str | None,
         listing_url: str | None,
     ) -> None:
-        if not item_before.notify_on_price_increase:
+        if item_before.tracking_mode != "monitor" and not item_before.notify_on_price_increase:
             return
 
         previous = _parse_decimal(previous_amount)
@@ -760,6 +774,73 @@ class TrackingSchedulerService:
                     scheduled_for=snapshot.scheduled_for,
                     checked_at=snapshot.checked_at,
                     change_type="increase",
+                ),
+                channel=channel,
+            ),
+            alert_event_id=None,
+            item_id=item_before.item_id,
+            channel=channel,
+            payload=json.dumps(payload, separators=(",", ":"), sort_keys=True),
+            status="queued",
+            attempt_count=0,
+            max_attempts=self._notification_max_attempts,
+            next_attempt_at=now,
+            last_attempt_at=None,
+            sent_at=None,
+            provider_name=None,
+            provider_message_id=None,
+            last_error=None,
+            lease_owner=None,
+            lease_until=None,
+            created_at=now,
+            updated_at=now,
+        )
+        self._repository.enqueue_notification_event(notification)
+
+    def _emit_tracking_attention_notification(
+        self,
+        *,
+        item_before: TrackedItem,
+        snapshot: PriceSnapshot,
+        error: str,
+        consecutive_failure_count: int,
+        product_url: str | None,
+    ) -> None:
+        now = snapshot.checked_at
+        active_chat_id = self._get_active_telegram_chat(
+            user_id=getattr(item_before, "user_id", "legacy_owner")
+        )
+        channel = "telegram" if active_chat_id else "log"
+        outbound = self._affiliate_link_service.build_outbound_link(
+            item=item_before,
+            product_url=product_url,
+            surface="telegram",
+        )
+        payload = {
+            "notification_type": "tracking_attention",
+            "item_id": item_before.item_id,
+            "snapshot_id": snapshot.snapshot_id,
+            "consecutive_failure_count": consecutive_failure_count,
+            "error": error,
+            "triggered_at": snapshot.checked_at,
+        }
+        if item_before.product_name:
+            payload["product_name"] = item_before.product_name
+        if product_url:
+            payload["product_url"] = product_url
+        if outbound.outbound_url:
+            payload["outbound_url"] = outbound.outbound_url
+            payload["outbound_is_affiliate"] = outbound.outbound_is_affiliate
+        if active_chat_id is not None:
+            payload["chat_id"] = active_chat_id
+
+        notification = NotificationEvent(
+            notification_id=_new_notification_event_id(),
+            idempotency_key=_build_notification_idempotency_key(
+                event_key=_build_tracking_attention_notification_event_key(
+                    item_id=item_before.item_id,
+                    scheduled_for=snapshot.scheduled_for,
+                    checked_at=snapshot.checked_at,
                 ),
                 channel=channel,
             ),
@@ -965,6 +1046,22 @@ class TrackingSchedulerService:
             return method(user_id=user_id)
         except TypeError:
             return method()
+
+    def _count_recent_consecutive_failures(self, *, item_id: str) -> int:
+        try:
+            snapshots = self._repository.list_snapshots(
+                item_id=item_id,
+                limit=_TRACKING_ATTENTION_FAILURE_THRESHOLD,
+            )
+        except Exception:
+            return 0
+
+        count = 0
+        for snapshot in snapshots:
+            if snapshot.success:
+                break
+            count += 1
+        return count
 
     def _mark_context_failure(self, context: _ItemRunContext, error: str) -> None:
         finished_at = _to_iso(_utcnow())
@@ -1228,6 +1325,16 @@ def _build_stock_change_notification_event_key(
 ) -> str:
     marker = scheduled_for or checked_at
     return f"stock_{change_type}:{item_id}:{marker}"
+
+
+def _build_tracking_attention_notification_event_key(
+    *,
+    item_id: str,
+    scheduled_for: str | None,
+    checked_at: str,
+) -> str:
+    marker = scheduled_for or checked_at
+    return f"tracking_attention:{item_id}:{marker}"
 
 
 def _resolve_product_url(item: TrackedItem, scrape_result: PriceResult) -> str | None:

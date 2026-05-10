@@ -432,6 +432,8 @@ Supports two bootstrap sources:
 | `fetch_mode` | `"auto" \| "http" \| "dynamic" \| "stealth"` | no | default `auto` |
 | `check_interval_minutes` | `int` | no | default 60, allowed `max(5, user_plan_min)` .. 10080 |
 | `target_amount` | `str \| null` | no | null/blank => monitor mode |
+| `notify_on_price_increase` | `bool \| null` | no | alert-mode opt-in for extra increase notifications; monitor mode notifies on all price changes by default |
+| `notify_on_stock_change` | `bool \| null` | no | opt-in stock out/restock notifications |
 | `duplicate_policy` | `"upsert" \| "reject"` | no | default `upsert`; use `reject` to return `409` instead of refreshing an existing URL |
 
 ### Important behaviors
@@ -590,6 +592,8 @@ No scrape is triggered.
 
 ### Behavior notes
 - Changing `target_amount` to `null` disables alert mode.
+- Monitor mode notifies on confirmed price drops and increases.
+- Alert mode notifies when the target is reached; `notify_on_price_increase` can add increase notifications.
 - If interval changes, `next_check_at` is recalculated from now.
 
 ### Example request
@@ -846,6 +850,7 @@ Use simple process-level sharding for scale:
 ### Target amount UX
 - Use explicit monitor/alert control in UI.
 - Send `target_amount: null` for monitor mode.
+- In monitor mode, explain that the user will be notified whenever the confirmed product price changes.
 - Do not send placeholder string values like `"string"`.
 
 ### Status transitions

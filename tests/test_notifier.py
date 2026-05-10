@@ -168,8 +168,25 @@ def test_render_tracking_started_message_includes_onboarding_text() -> None:
     assert "Tracking started" in message
     assert "Item: Starter Item" in message
     assert "Current price: 90.00 USD" in message
-    assert "I will notify you when the price drops." in message
+    assert "I will notify you when the price changes." in message
     assert "Open product: https://example.com/p/1" in message
+
+
+def test_render_tracking_attention_message_includes_failure_context() -> None:
+    payload = {
+        "notification_type": "tracking_attention",
+        "product_name": "Fragile Item",
+        "consecutive_failure_count": 3,
+        "error": "blocked_by_protection",
+        "product_url": "https://example.com/p/fragile",
+    }
+
+    message = _render_telegram_message(payload)
+
+    assert "Tracking needs attention (3 failed checks)" in message
+    assert "Item: Fragile Item" in message
+    assert "Last error: blocked_by_protection" in message
+    assert "Open product: https://example.com/p/fragile" in message
 
 
 def test_render_tracking_stopped_message_includes_last_price() -> None:
