@@ -509,6 +509,84 @@ def test_bootstrap_uses_first_listing_for_saved_price_snapshot_and_notification(
     assert payload["listing_url"] == "https://merchant.example.com/first"
 
 
+def test_bootstrap_uses_selected_listing_for_saved_price_snapshot_and_notification() -> None:
+    first_listing = PriceListing(
+        item_id="itm_first",
+        amount="90.00",
+        currency="USD",
+        raw_text="$90.00",
+        source="test:first",
+        seller="First Seller",
+        listing_url="https://merchant.example.com/first",
+    )
+    selected_listing = PriceListing(
+        item_id="itm_selected",
+        amount="120.00",
+        currency="USD",
+        raw_text="$120.00",
+        source="test:selected",
+        seller="Selected Seller",
+        listing_url="https://merchant.example.com/selected",
+    )
+    result = PriceResult(
+        url="https://example.com/p/selected",
+        success=True,
+        product_id="prd_selected",
+        site_key="generic",
+        adapter_key="generic",
+        amount=first_listing.amount,
+        currency=first_listing.currency,
+        raw_text=first_listing.raw_text,
+        source=first_listing.source,
+        product_name="Selected Listing Product",
+        listing_count=2,
+        listings=[first_listing, selected_listing],
+    )
+    service, repository, _ = _build_service(result)
+
+    item = service.bootstrap(
+        TrackingBootstrapInput(
+            request_id="req_selected_listing",
+            url=result.url,
+            timeout_seconds=20,
+            selected_sites=None,
+            fetch_mode="auto",
+            check_interval_minutes=60,
+            target_amount=None,
+            selected_listing_id="itm_selected",
+        )
+    )
+
+    assert item.last_amount == "120.00"
+    assert item.last_raw_text == "$120.00"
+    assert item.last_source == "test:selected"
+    assert item.tracked_listing_id == "itm_selected"
+    assert item.tracked_listing_url == "https://merchant.example.com/selected"
+    assert repository.snapshots[-1].amount == "120.00"
+    payload = json.loads(repository.notification_events[0].payload)
+    assert payload["current_amount"] == "120.00"
+    assert payload["listing_url"] == "https://merchant.example.com/selected"
+
+
+def test_bootstrap_rejects_selected_listing_without_stable_url() -> None:
+    result = _success_result("https://example.com/p/unstable-selected")
+    service, _, _ = _build_service(result)
+
+    with pytest.raises(TrackingBootstrapError, match="selected_listing_not_trackable"):
+        service.bootstrap(
+            TrackingBootstrapInput(
+                request_id="req_unstable_selected_listing",
+                url=result.url,
+                timeout_seconds=20,
+                selected_sites=None,
+                fetch_mode="auto",
+                check_interval_minutes=60,
+                target_amount=None,
+                selected_listing_id="itm_test",
+            )
+        )
+
+
 def test_bootstrap_existing_item_does_not_enqueue_tracking_started_notification() -> None:
     service, repository, _ = _build_service(_success_result("https://example.com/p/existing"))
 

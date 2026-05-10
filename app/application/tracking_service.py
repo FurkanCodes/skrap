@@ -56,6 +56,7 @@ class TrackingBootstrapInput:
     duplicate_policy: str = "upsert"
     created_via: str | None = None
     scrape_result_ref: str | None = None
+    selected_listing_id: str | None = None
     pre_fetched_result: PriceResult | None = None
     user_id: str | None = None
 
@@ -193,9 +194,27 @@ class TrackingService:
         if existing is not None and payload.duplicate_policy == "reject":
             raise TrackingDuplicateError(existing)
 
+        explicit_listing_id = _normalize_optional(payload.selected_listing_id)
+        tracked_listing_id = explicit_listing_id or (
+            existing.tracked_listing_id if existing is not None else None
+        )
+        tracked_listing_url = existing.tracked_listing_url if existing is not None else None
+        if explicit_listing_id:
+            selected_listing = _find_listing_by_id(result, explicit_listing_id)
+            if selected_listing is None:
+                raise TrackingBootstrapError("selected_listing_not_found")
+            tracked_listing_url = _normalize_optional(selected_listing.listing_url)
+            if tracked_listing_url is None:
+                raise TrackingBootstrapError("selected_listing_not_trackable")
+
         result = normalize_tracking_price_result(
             result,
+            tracked_listing_id=tracked_listing_id,
+            tracked_listing_url=tracked_listing_url,
+            fallback_to_first=tracked_listing_id is None and tracked_listing_url is None,
         )
+        if not result.success and result.error == "selected_listing_not_found":
+            raise TrackingBootstrapError("selected_listing_not_found")
         normalized_availability = _normalize_availability(result.availability)
         is_not_in_stock = _is_not_in_stock(normalized_availability)
         if existing is None and not is_not_in_stock and not (result.amount or "").strip():
@@ -274,8 +293,8 @@ class TrackingService:
             lease_until=None,
             last_check_started_at=None,
             last_check_finished_at=checked_at,
-            tracked_listing_id=None,
-            tracked_listing_url=None,
+            tracked_listing_id=tracked_listing_id,
+            tracked_listing_url=tracked_listing_url,
         )
 
         saved = self._repository.save_item(item)
@@ -694,6 +713,7 @@ def _build_bootstrap_request_hash(payload: TrackingBootstrapInput) -> str:
     normalized = {
         "url": payload.url,
         "scrape_result_ref": payload.scrape_result_ref,
+        "selected_listing_id": _normalize_optional(payload.selected_listing_id),
         "timeout_seconds": payload.timeout_seconds,
         "selected_sites": selected_sites,
         "fetch_mode": payload.fetch_mode,
@@ -706,6 +726,18 @@ def _build_bootstrap_request_hash(payload: TrackingBootstrapInput) -> str:
     }
     serialized = json.dumps(normalized, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _normalize_optional(value: str | None) -> str | None:
+    normalized = (value or "").strip()
+    return normalized or None
+
+
+def _find_listing_by_id(result: PriceResult, listing_id: str):
+    for listing in result.listings:
+        if listing.item_id == listing_id:
+            return listing
+    return None
 
 
 def _build_notification_idempotency_key(*, event_key: str, channel: str) -> str:

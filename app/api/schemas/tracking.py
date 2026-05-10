@@ -8,6 +8,7 @@ from pydantic import AnyHttpUrl, BaseModel, Field, model_validator
 class TrackedItemBootstrapRequest(BaseModel):
     url: AnyHttpUrl | None = None
     scrape_result_ref: str | None = None
+    selected_listing_id: str | None = None
     sites: list[str] | None = None
     timeout_seconds: int | None = Field(default=None, ge=1)
     fetch_mode: Literal["auto", "http", "dynamic", "stealth"] = "auto"
@@ -28,6 +29,7 @@ class TrackedItemBootstrapRequest(BaseModel):
 class TrackedItemBulkBootstrapItemRequest(BaseModel):
     url: AnyHttpUrl | None = None
     scrape_result_ref: str | None = None
+    selected_listing_id: str | None = None
     check_interval_minutes: int | None = Field(default=None, ge=1, le=10080)
     target_amount: str | None = None
     notify_on_price_increase: bool | None = None
@@ -99,6 +101,8 @@ class TrackedItemResponse(BaseModel):
     last_amount: str | None
     last_raw_text: str | None
     last_source: str | None
+    tracked_listing_id: str | None = None
+    tracked_listing_url: str | None = None
     created_via: Literal["dashboard", "extension"] | None = None
     outbound_url: str | None = None
     outbound_is_affiliate: bool = False

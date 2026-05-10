@@ -405,7 +405,16 @@ class TrackingSchedulerService:
 
     def _finalize_result(self, context: _ItemRunContext, scrape_result: PriceResult) -> bool:
         item = self._get_latest_item_state(context.item)
-        scrape_result = normalize_tracking_price_result(scrape_result)
+        has_tracked_listing_identity = bool(
+            (item.tracked_listing_id or "").strip()
+            or (item.tracked_listing_url or "").strip()
+        )
+        scrape_result = normalize_tracking_price_result(
+            scrape_result,
+            tracked_listing_id=item.tracked_listing_id,
+            tracked_listing_url=item.tracked_listing_url,
+            fallback_to_first=not has_tracked_listing_identity,
+        )
         finished_at = _to_iso(_utcnow())
         next_check_at = compute_next_check_at(
             base_time=finished_at,
@@ -468,8 +477,8 @@ class TrackingSchedulerService:
                 lease_until=None,
                 last_check_started_at=context.started_at,
                 last_check_finished_at=finished_at,
-                tracked_listing_id=None,
-                tracked_listing_url=None,
+                tracked_listing_id=item.tracked_listing_id,
+                tracked_listing_url=item.tracked_listing_url,
             )
             snapshot = PriceSnapshot(
                 snapshot_id=_new_snapshot_id(),
@@ -537,6 +546,11 @@ class TrackingSchedulerService:
             return True
 
         error = scrape_result.error or "price_not_found"
+        should_emit_selected_offer_unavailable = (
+            error == "selected_listing_not_found"
+            and item.status == "active"
+            and self._should_emit_selected_offer_unavailable(item_id=item.item_id)
+        )
         should_emit_attention = (
             item.status == "active"
             and self._count_recent_consecutive_failures(item_id=item.item_id)
@@ -579,6 +593,13 @@ class TrackingSchedulerService:
                 error=error,
                 consecutive_failure_count=_TRACKING_ATTENTION_FAILURE_THRESHOLD,
                 product_url=_resolve_product_url(item, scrape_result),
+            )
+        if should_emit_selected_offer_unavailable:
+            self._emit_selected_offer_unavailable_notification(
+                item_before=item,
+                snapshot=snapshot,
+                product_url=_resolve_product_url(item, scrape_result),
+                listing_url=item.tracked_listing_url,
             )
         return False
 
@@ -872,6 +893,73 @@ class TrackingSchedulerService:
         )
         self._repository.enqueue_notification_event(notification)
 
+    def _emit_selected_offer_unavailable_notification(
+        self,
+        *,
+        item_before: TrackedItem,
+        snapshot: PriceSnapshot,
+        product_url: str | None,
+        listing_url: str | None,
+    ) -> None:
+        now = snapshot.checked_at
+        active_chat_id = self._get_active_telegram_chat(
+            user_id=getattr(item_before, "user_id", "legacy_owner")
+        )
+        channel = "telegram" if active_chat_id else "log"
+        outbound = self._affiliate_link_service.build_outbound_link(
+            item=item_before,
+            product_url=product_url,
+            surface="telegram",
+        )
+        payload = {
+            "notification_type": "selected_offer_unavailable",
+            "item_id": item_before.item_id,
+            "snapshot_id": snapshot.snapshot_id,
+            "error": snapshot.error or "selected_listing_not_found",
+            "triggered_at": snapshot.checked_at,
+        }
+        if item_before.product_name:
+            payload["product_name"] = item_before.product_name
+        if product_url:
+            payload["product_url"] = product_url
+        if listing_url:
+            payload["listing_url"] = listing_url
+        if outbound.outbound_url:
+            payload["outbound_url"] = outbound.outbound_url
+            payload["outbound_is_affiliate"] = outbound.outbound_is_affiliate
+        if active_chat_id is not None:
+            payload["chat_id"] = active_chat_id
+
+        notification = NotificationEvent(
+            notification_id=_new_notification_event_id(),
+            idempotency_key=_build_notification_idempotency_key(
+                event_key=_build_selected_offer_notification_event_key(
+                    item_id=item_before.item_id,
+                    scheduled_for=snapshot.scheduled_for,
+                    checked_at=snapshot.checked_at,
+                ),
+                channel=channel,
+            ),
+            alert_event_id=None,
+            item_id=item_before.item_id,
+            channel=channel,
+            payload=json.dumps(payload, separators=(",", ":"), sort_keys=True),
+            status="queued",
+            attempt_count=0,
+            max_attempts=self._notification_max_attempts,
+            next_attempt_at=now,
+            last_attempt_at=None,
+            sent_at=None,
+            provider_name=None,
+            provider_message_id=None,
+            last_error=None,
+            lease_owner=None,
+            lease_until=None,
+            created_at=now,
+            updated_at=now,
+        )
+        self._repository.enqueue_notification_event(notification)
+
     def _emit_stock_change_notification_if_enabled(
         self,
         *,
@@ -1070,6 +1158,16 @@ class TrackingSchedulerService:
                 break
             count += 1
         return count
+
+    def _should_emit_selected_offer_unavailable(self, *, item_id: str) -> bool:
+        try:
+            snapshots = self._repository.list_snapshots(item_id=item_id, limit=1)
+        except Exception:
+            return True
+        if not snapshots:
+            return True
+        latest = snapshots[0]
+        return latest.success or latest.error != "selected_listing_not_found"
 
     def _mark_context_failure(self, context: _ItemRunContext, error: str) -> None:
         finished_at = _to_iso(_utcnow())
@@ -1343,6 +1441,16 @@ def _build_tracking_attention_notification_event_key(
 ) -> str:
     marker = scheduled_for or checked_at
     return f"tracking_attention:{item_id}:{marker}"
+
+
+def _build_selected_offer_notification_event_key(
+    *,
+    item_id: str,
+    scheduled_for: str | None,
+    checked_at: str,
+) -> str:
+    marker = scheduled_for or checked_at
+    return f"selected_offer_unavailable:{item_id}:{marker}"
 
 
 def _resolve_product_url(item: TrackedItem, scrape_result: PriceResult) -> str | None:

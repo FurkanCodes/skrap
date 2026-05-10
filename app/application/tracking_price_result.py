@@ -16,6 +16,7 @@ def normalize_tracking_price_result(
     *,
     tracked_listing_id: str | None = None,
     tracked_listing_url: str | None = None,
+    fallback_to_first: bool = True,
 ) -> PriceResult:
     """Collapse multi-listing scrape output to the one price tracking follows."""
     if not result.listings:
@@ -27,6 +28,16 @@ def normalize_tracking_price_result(
         tracked_listing_url=tracked_listing_url,
     )
     if primary is None:
+        if not fallback_to_first:
+            return replace(
+                result,
+                success=False,
+                amount=None,
+                currency=None,
+                raw_text=None,
+                source=None,
+                error="selected_listing_not_found",
+            )
         primary = result.listings[0]
 
     if _parse_decimal(primary.amount) is None:

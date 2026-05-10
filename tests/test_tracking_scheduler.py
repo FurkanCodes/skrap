@@ -1429,7 +1429,7 @@ def test_scheduler_monitor_mode_uses_first_listing_for_price_drop_notification()
     assert payload["listing_url"] == "https://merchant.example.com/first"
 
 
-def test_scheduler_ignores_stored_listing_identity_and_tracks_current_first_listing() -> None:
+def test_scheduler_tracks_stored_listing_identity_instead_of_current_first_listing() -> None:
     repo = _build_repo()
     now = datetime.now(tz=UTC)
     due_time = _iso(now - timedelta(minutes=1))
@@ -1492,17 +1492,18 @@ def test_scheduler_ignores_stored_listing_identity_and_tracks_current_first_list
 
     saved_item = repo.get_item(item.item_id)
     assert saved_item is not None
-    assert saved_item.last_amount == "90.00"
-    assert saved_item.tracked_listing_id is None
-    assert saved_item.tracked_listing_url is None
+    assert saved_item.last_amount == "110.00"
+    assert saved_item.tracked_listing_id == "itm_selected"
+    assert saved_item.tracked_listing_url == "https://merchant.example.com/selected"
     notifications = repo.list_notification_events(item.item_id, limit=10)
     assert len(notifications) == 1
     payload = json.loads(notifications[0].payload)
-    assert payload["current_amount"] == "90.00"
-    assert payload["listing_url"] == "https://merchant.example.com/current-first"
+    assert payload["notification_type"] == "price_drop"
+    assert payload["current_amount"] == "110.00"
+    assert payload["listing_url"] == "https://merchant.example.com/selected"
 
 
-def test_scheduler_falls_back_to_current_first_listing_when_stored_listing_disappears() -> None:
+def test_scheduler_marks_selected_listing_unavailable_without_fallback() -> None:
     repo = _build_repo()
     now = datetime.now(tz=UTC)
     due_time = _iso(now - timedelta(minutes=1))
@@ -1553,21 +1554,23 @@ def test_scheduler_falls_back_to_current_first_listing_when_stored_listing_disap
     )
 
     outcome = scheduler.run_once()
-    assert outcome.success_count == 1
+    assert outcome.failure_count == 1
 
     saved_item = repo.get_item(item.item_id)
     assert saved_item is not None
-    assert saved_item.last_amount == "90.00"
-    assert saved_item.tracked_listing_id is None
-    assert saved_item.tracked_listing_url is None
+    assert saved_item.last_amount == "120.00"
+    assert saved_item.tracked_listing_id == "itm_selected"
+    assert saved_item.tracked_listing_url == "https://merchant.example.com/selected"
 
     notifications = repo.list_notification_events(item.item_id, limit=10)
     assert len(notifications) == 1
     payload = json.loads(notifications[0].payload)
-    assert payload["notification_type"] == "price_drop"
-    assert payload["previous_amount"] == "120.00"
-    assert payload["current_amount"] == "90.00"
-    assert payload["listing_url"] == "https://merchant.example.com/other"
+    assert payload["notification_type"] == "selected_offer_unavailable"
+    assert payload["error"] == "selected_listing_not_found"
+    assert payload["listing_url"] == "https://merchant.example.com/selected"
+    snapshots = repo.list_snapshots(item.item_id, limit=1)
+    assert snapshots[0].success is False
+    assert snapshots[0].error == "selected_listing_not_found"
 
 
 def test_scheduler_marks_missing_primary_listing_price_as_unknown_failure() -> None:

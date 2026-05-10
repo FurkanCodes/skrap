@@ -158,6 +158,7 @@ async def post_tracked_item_bootstrap(
         duplicate_policy=payload.duplicate_policy,
         created_via=payload.created_via,
         scrape_result_ref=scrape_result_ref,
+        selected_listing_id=payload.selected_listing_id,
         pre_fetched_result=pre_fetched_result,
         user_id=current_user.user_id,
     )
@@ -286,6 +287,7 @@ async def post_tracked_items_bulk_bootstrap(
             notify_on_price_increase=notify_on_price_increase,
             notify_on_stock_change=notify_on_stock_change,
             scrape_result_ref=scrape_result_ref,
+            selected_listing_id=item_payload.selected_listing_id,
             pre_fetched_result=pre_fetched_result,
             user_id=current_user.user_id,
         )
