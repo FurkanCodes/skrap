@@ -1382,7 +1382,7 @@ def test_scheduler_monitor_mode_uses_first_listing_for_price_drop_notification()
     assert payload["listing_url"] == "https://merchant.example.com/first"
 
 
-def test_scheduler_uses_selected_listing_identity_instead_of_current_first_listing() -> None:
+def test_scheduler_ignores_stored_listing_identity_and_tracks_current_first_listing() -> None:
     repo = _build_repo()
     now = datetime.now(tz=UTC)
     due_time = _iso(now - timedelta(minutes=1))
@@ -1445,15 +1445,17 @@ def test_scheduler_uses_selected_listing_identity_instead_of_current_first_listi
 
     saved_item = repo.get_item(item.item_id)
     assert saved_item is not None
-    assert saved_item.last_amount == "110.00"
+    assert saved_item.last_amount == "90.00"
+    assert saved_item.tracked_listing_id is None
+    assert saved_item.tracked_listing_url is None
     notifications = repo.list_notification_events(item.item_id, limit=10)
     assert len(notifications) == 1
     payload = json.loads(notifications[0].payload)
-    assert payload["current_amount"] == "110.00"
-    assert payload["listing_url"] == "https://merchant.example.com/selected"
+    assert payload["current_amount"] == "90.00"
+    assert payload["listing_url"] == "https://merchant.example.com/current-first"
 
 
-def test_scheduler_suppresses_price_change_when_selected_listing_disappears() -> None:
+def test_scheduler_falls_back_to_current_first_listing_when_stored_listing_disappears() -> None:
     repo = _build_repo()
     now = datetime.now(tz=UTC)
     due_time = _iso(now - timedelta(minutes=1))
@@ -1508,8 +1510,17 @@ def test_scheduler_suppresses_price_change_when_selected_listing_disappears() ->
 
     saved_item = repo.get_item(item.item_id)
     assert saved_item is not None
-    assert saved_item.last_amount == "120.00"
-    assert repo.list_notification_events(item.item_id, limit=10) == []
+    assert saved_item.last_amount == "90.00"
+    assert saved_item.tracked_listing_id is None
+    assert saved_item.tracked_listing_url is None
+
+    notifications = repo.list_notification_events(item.item_id, limit=10)
+    assert len(notifications) == 1
+    payload = json.loads(notifications[0].payload)
+    assert payload["notification_type"] == "price_drop"
+    assert payload["previous_amount"] == "120.00"
+    assert payload["current_amount"] == "90.00"
+    assert payload["listing_url"] == "https://merchant.example.com/other"
 
 
 def test_scheduler_suppresses_price_change_when_primary_listing_has_no_price() -> None:

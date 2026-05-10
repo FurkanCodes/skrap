@@ -27,14 +27,7 @@ def normalize_tracking_price_result(
         tracked_listing_url=tracked_listing_url,
     )
     if primary is None:
-        return replace(
-            result,
-            amount=None,
-            raw_text=None,
-            source=None,
-            listing_count=0,
-            listings=[],
-        )
+        primary = result.listings[0]
 
     if _parse_decimal(primary.amount) is None:
         return replace(

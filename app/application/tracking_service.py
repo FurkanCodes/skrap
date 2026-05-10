@@ -195,8 +195,6 @@ class TrackingService:
 
         result = normalize_tracking_price_result(
             result,
-            tracked_listing_id=(existing.tracked_listing_id if existing is not None else None),
-            tracked_listing_url=(existing.tracked_listing_url if existing is not None else None),
         )
         normalized_availability = _normalize_availability(result.availability)
         is_not_in_stock = _is_not_in_stock(normalized_availability)
@@ -227,7 +225,6 @@ class TrackingService:
             notify_on_stock_change = bool(payload.notify_on_stock_change)
         has_current_price = bool((result.amount or "").strip())
         should_update_price_fields = has_current_price and not is_not_in_stock
-        tracked_listing = result.listings[0] if result.listings else None
 
         status: TrackingStatus = existing.status if existing is not None else "active"
         created_via = existing.created_via if existing is not None else payload.created_via or "dashboard"
@@ -277,16 +274,8 @@ class TrackingService:
             lease_until=None,
             last_check_started_at=None,
             last_check_finished_at=checked_at,
-            tracked_listing_id=(
-                tracked_listing.item_id
-                if tracked_listing is not None
-                else (existing.tracked_listing_id if existing is not None else None)
-            ),
-            tracked_listing_url=(
-                tracked_listing.listing_url
-                if tracked_listing is not None
-                else (existing.tracked_listing_url if existing is not None else None)
-            ),
+            tracked_listing_id=None,
+            tracked_listing_url=None,
         )
 
         saved = self._repository.save_item(item)
