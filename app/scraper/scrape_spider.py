@@ -80,6 +80,12 @@ def _balanced_spider_remaining_modes(
     if not _is_amazon_url(url):
         return planned_modes
 
+    has_explicit_protection = "amazon_captcha" in signals or "protection" in signals
+    if not has_explicit_protection:
+        if current_mode == "http_proxy":
+            return auto_remaining_modes(current_mode, signals=signals, url=url)
+        return []
+
     if current_mode in _BROWSER_PROXY_MODES:
         direct_modes = [mode for mode in planned_modes if mode not in _PROXY_MODES]
         return direct_modes or planned_modes

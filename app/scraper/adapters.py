@@ -274,8 +274,7 @@ class AmazonAdapter(SiteAdapter):
             if normalize_availability(value) == "out_of_stock":
                 return True
 
-        page_text = " ".join(str(page.get_all_text(separator=" ", strip=True)).split())
-        return normalize_availability(page_text) == "out_of_stock"
+        return False
 
     @staticmethod
     def _normalize_text(value: str) -> str:

@@ -991,7 +991,29 @@ def test_spider_amazon_direct_captcha_uses_direct_browser_fallbacks() -> None:
     assert modes == ["dynamic_direct", "stealth_direct"]
 
 
-def test_spider_amazon_proxy_followup_skips_remaining_proxy_modes() -> None:
+def test_spider_amazon_proxy_followup_skips_remaining_proxy_modes_after_protection() -> None:
+    modes = _balanced_spider_remaining_modes(
+        "dynamic_proxy",
+        signals={"amazon_captcha", "protection"},
+        url="https://www.amazon.com.tr/example/dp/B000000000",
+        remaining_modes=["stealth_proxy", "dynamic_direct", "stealth_direct"],
+    )
+
+    assert modes == ["dynamic_direct", "stealth_direct"]
+
+
+def test_spider_amazon_clean_browser_parser_miss_drops_stale_fallbacks() -> None:
+    modes = _balanced_spider_remaining_modes(
+        "dynamic_direct",
+        signals=set(),
+        url="https://www.amazon.com.tr/example/dp/B000000000",
+        remaining_modes=["stealth_direct"],
+    )
+
+    assert modes == []
+
+
+def test_spider_amazon_clean_proxy_browser_parser_miss_stops_instead_of_retrying_direct() -> None:
     modes = _balanced_spider_remaining_modes(
         "dynamic_proxy",
         signals=set(),
@@ -999,7 +1021,7 @@ def test_spider_amazon_proxy_followup_skips_remaining_proxy_modes() -> None:
         remaining_modes=["stealth_proxy", "dynamic_direct", "stealth_direct"],
     )
 
-    assert modes == ["dynamic_direct", "stealth_direct"]
+    assert modes == []
 
 
 def test_auto_mode_starts_protected_sites_with_stealth() -> None:
@@ -1395,6 +1417,40 @@ def test_amazon_adapter_extracts_hidden_buybox_customer_visible_price() -> None:
     assert result.currency == "TRY"
     assert result.raw_text == "13.702,00 TL"
     assert result.source.startswith("amazon:hidden-buybox-display:")
+
+
+def test_amazon_adapter_ignores_unrelated_out_of_stock_text_when_buybox_is_in_stock() -> None:
+    page = Selector(
+        """
+        <html>
+          <head>
+            <meta property="og:title" content="Amazon Product">
+            <meta property="og:image" content="https://m.media-amazon.com/images/I/example.jpg">
+          </head>
+          <body>
+            <div id="availability"><span>Stokta sadece 5 adet kaldı.</span></div>
+            <div id="desktop_buybox">
+              <input type="hidden" name="items[0.base][customerVisiblePrice][amount]" value="13702.0">
+              <input type="hidden" name="items[0.base][customerVisiblePrice][currencyCode]" value="TRY">
+              <input type="hidden" name="items[0.base][customerVisiblePrice][displayString]" value="13.702,00 TL">
+            </div>
+            <div id="similar-products">
+              <span>Benzer ürün stokta yok.</span>
+            </div>
+          </body>
+        </html>
+        """
+    )
+
+    result = extract_price_from_page(
+        page,
+        "https://www.amazon.com.tr/dp/B0D6YXHYCX",
+    )
+
+    assert result.success is True
+    assert result.amount == "13702.00"
+    assert result.currency == "TRY"
+    assert result.availability == "stokta sadece 5 adet kaldı."
 
 
 def test_amazon_adapter_extracts_twister_buying_options_price_data() -> None:
