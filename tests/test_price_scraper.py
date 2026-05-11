@@ -1125,6 +1125,15 @@ def test_regular_stealth_fetch_avoids_cloudflare_solver(monkeypatch: pytest.Monk
     assert captured["timezone_id"] == "Europe/Istanbul"
 
 
+def test_browser_blocking_allows_amazon_asset_host_for_scripts() -> None:
+    from app.scraper.resource_blocking import BROWSER_BLOCKED_DOMAINS, browser_resource_blocking_kwargs
+
+    kwargs = browser_resource_blocking_kwargs()
+
+    assert "m.media-amazon.com" not in BROWSER_BLOCKED_DOMAINS
+    assert "m.media-amazon.com" not in kwargs["blocked_domains"]
+
+
 def test_cloudflare_stealth_fetch_uses_solver(monkeypatch: pytest.MonkeyPatch) -> None:
     from app.scraper import fetching
 

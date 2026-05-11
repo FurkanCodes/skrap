@@ -18,8 +18,8 @@ BROWSER_BLOCKED_DOMAINS: frozenset[str] = frozenset(
         "demdex.net",
         "doubleclick.net",
         "efilli.com",
-        "enliven.com", 
-        "gstatic.com",   
+        "enliven.com",
+        "gstatic.com",
         "reimg-teknosa-cloud-prod.mncdn.com",
         "eyeota.net",
         "facebook.com",
@@ -43,7 +43,6 @@ BROWSER_BLOCKED_DOMAINS: frozenset[str] = frozenset(
         "weborama.fr",
         "yandex.ru",
         "yieldmo.com",
-        "m.media-amazon.com"
     }
 )
 
