@@ -21,8 +21,11 @@ EXTERNAL_TO_INTERNAL_MODE = {
 }
 AMAZON_CAPTCHA_HINTS = (
     "opfcaptcha.amazon",
+    "captcha.amazon",
     "/errors/validatecaptcha",
     "validatecaptcha",
+    "enter the characters you see below",
+    "type the characters you see in this image",
 )
 AMAZON_HTTP_TIMEOUT_SECONDS = 8
 AMAZON_BROWSER_TIMEOUT_SECONDS = 14
@@ -243,9 +246,7 @@ def detect_auto_escalation_signals(page: Selector, *, url: str | None = None) ->
     page_url = url or str(getattr(page, "url", "") or "")
     page_text = str(page.get_all_text(separator=" ", strip=True)).lower()
     html_text = str(getattr(page, "html_content", "") or "").lower()
-    if any(token in html_text for token in AMAZON_CAPTCHA_HINTS) or (
-        _is_amazon_url(page_url) and "captcha" in html_text and "amazon" in html_text
-    ):
+    if _is_amazon_url(page_url) and any(token in html_text for token in AMAZON_CAPTCHA_HINTS):
         signals.add("amazon_captcha")
         signals.add("protection")
     if any(token in page_text for token in PROTECTION_HINTS):

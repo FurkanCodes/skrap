@@ -15,7 +15,7 @@ from scrapling.parser import Selector
 from .availability import normalize_availability
 from .domain import PriceCandidate
 from .extractors.generic import deduplicate_candidates, extract_price_listings_from_selector
-from .parsing import scan_price_in_text
+from .parsing import normalize_currency, parse_decimal, scan_price_in_text
 
 
 def _extract_json_object_after_marker(script_text: str, marker: str) -> dict[str, Any] | None:
@@ -245,6 +245,21 @@ class AmazonAdapter(SiteAdapter):
         "priceblock",
         "pricetopay",
     )
+    _hidden_display_price_selectors = (
+        'input[name*="customerVisiblePrice"][name$="[displayString]"]::attr(value)',
+        'input[id*="customerVisiblePrice"][id$="[displayString]"]::attr(value)',
+    )
+    _hidden_amount_price_selectors = (
+        'input[name*="customerVisiblePrice"][name$="[amount]"]::attr(value)',
+        'input[id*="customerVisiblePrice"][id$="[amount]"]::attr(value)',
+    )
+    _hidden_currency_selectors = (
+        'input[name*="customerVisiblePrice"][name$="[currencyCode]"]::attr(value)',
+        'input[id*="customerVisiblePrice"][id$="[currencyCode]"]::attr(value)',
+    )
+    _twister_json_selectors = (
+        ".twister-plus-buying-options-price-data::text",
+    )
 
     def _is_unavailable(self, page: Selector) -> bool:
         checks: list[str | None] = [
@@ -323,6 +338,152 @@ class AmazonAdapter(SiteAdapter):
             ),
         )
 
+    def _candidate_from_amount_currency(
+        self,
+        amount_text: str,
+        currency_text: str | None,
+        *,
+        raw_text: str | None,
+        source: str,
+        extra_signal: str,
+    ) -> PriceCandidate | None:
+        normalized_amount = self._normalize_text(amount_text)
+        amount = parse_decimal(normalized_amount)
+        if amount is None:
+            return None
+
+        normalized_currency = normalize_currency(currency_text)
+        normalized_raw = self._normalize_text(raw_text or "")
+        if not normalized_raw:
+            normalized_raw = self._normalize_text(
+                f"{normalized_amount} {currency_text or ''}"
+            )
+        if not normalized_raw or self._is_negative_text(normalized_raw):
+            return None
+
+        return PriceCandidate(
+            raw_text=normalized_raw,
+            amount=amount,
+            currency=normalized_currency,
+            source=source,
+            confidence="high",
+            signals=_candidate_signals(
+                "embedded_state",
+                extra_signal,
+                currency=normalized_currency,
+            ),
+        )
+
+    @staticmethod
+    def _first_clean(values: list[Any]) -> str | None:
+        for value in values:
+            cleaned = str(value).strip()
+            if cleaned:
+                return cleaned
+        return None
+
+    @classmethod
+    def _iter_json_price_nodes(cls, value: Any) -> list[dict[str, Any]]:
+        nodes: list[dict[str, Any]] = []
+        if isinstance(value, dict):
+            if any(
+                key in value
+                for key in ("displayPrice", "priceAmount", "currencySymbol", "currencyCode")
+            ):
+                nodes.append(value)
+            for child in value.values():
+                nodes.extend(cls._iter_json_price_nodes(child))
+        elif isinstance(value, list):
+            for item in value:
+                nodes.extend(cls._iter_json_price_nodes(item))
+        return nodes
+
+    def _extract_hidden_buybox_candidates(self, page: Selector) -> list[PriceCandidate]:
+        candidates: list[PriceCandidate] = []
+
+        for selector_index, selector in enumerate(self._hidden_display_price_selectors):
+            for raw_value in page.css(selector).getall():
+                candidate = self._candidate_from_text(
+                    str(raw_value),
+                    source=f"{self.key}:hidden-buybox-display:{selector_index}",
+                )
+                if candidate is not None:
+                    candidates.append(candidate)
+        if candidates:
+            return deduplicate_candidates(candidates)
+
+        currency = self._first_clean(
+            [
+                value
+                for selector in self._hidden_currency_selectors
+                for value in page.css(selector).getall()
+            ]
+        )
+        for selector_index, selector in enumerate(self._hidden_amount_price_selectors):
+            for raw_value in page.css(selector).getall():
+                candidate = self._candidate_from_amount_currency(
+                    str(raw_value),
+                    currency,
+                    raw_text=None,
+                    source=f"{self.key}:hidden-buybox-amount:{selector_index}",
+                    extra_signal="amazon_buybox",
+                )
+                if candidate is not None:
+                    candidates.append(candidate)
+
+        twister_amount = page.css("#twister-plus-price-data-price::attr(value)").get()
+        twister_currency = page.css("#twister-plus-price-data-price-unit::attr(value)").get()
+        if twister_amount:
+            candidate = self._candidate_from_amount_currency(
+                str(twister_amount),
+                str(twister_currency) if twister_currency else None,
+                raw_text=None,
+                source=f"{self.key}:twister-hidden",
+                extra_signal="amazon_twister",
+            )
+            if candidate is not None:
+                candidates.append(candidate)
+
+        return deduplicate_candidates(candidates)
+
+    def _extract_twister_json_candidates(self, page: Selector) -> list[PriceCandidate]:
+        candidates: list[PriceCandidate] = []
+        for selector_index, selector in enumerate(self._twister_json_selectors):
+            for raw_blob in page.css(selector).getall():
+                blob = str(raw_blob).strip()
+                if not blob:
+                    continue
+                try:
+                    payload = json.loads(blob)
+                except json.JSONDecodeError:
+                    continue
+
+                for node in self._iter_json_price_nodes(payload):
+                    display_price = node.get("displayPrice")
+                    if isinstance(display_price, str) and display_price.strip():
+                        candidate = self._candidate_from_text(
+                            display_price,
+                            source=f"{self.key}:twister-json:{selector_index}",
+                        )
+                        if candidate is not None:
+                            candidates.append(candidate)
+                            continue
+
+                    amount = node.get("priceAmount")
+                    currency = node.get("currencyCode") or node.get("currencySymbol") or node.get("currency")
+                    if isinstance(amount, (int, float, str)):
+                        candidate = self._candidate_from_amount_currency(
+                            str(amount),
+                            str(currency) if currency is not None else None,
+                            raw_text=None,
+                            source=f"{self.key}:twister-json:{selector_index}",
+                            extra_signal="amazon_twister",
+                        )
+                        if candidate is not None:
+                            candidates.append(candidate)
+
+        return deduplicate_candidates(candidates)
+
     def _extract_ranked_candidates_from_container(
         self,
         container: Selector,
@@ -360,6 +521,13 @@ class AmazonAdapter(SiteAdapter):
     def extract(self, page: Selector, url: str) -> list[PriceCandidate]:
         if self._is_unavailable(page):
             return []
+        hidden_candidates = self._extract_hidden_buybox_candidates(page)
+        if hidden_candidates:
+            return hidden_candidates
+        twister_candidates = self._extract_twister_json_candidates(page)
+        if twister_candidates:
+            return twister_candidates
+
         ranked_candidates: list[tuple[tuple[int, int, int], PriceCandidate]] = []
         for container_index, selector in enumerate(self._container_selectors):
             for container in page.css(selector):

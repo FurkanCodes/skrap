@@ -820,21 +820,33 @@ def test_auto_escalation_signals_and_followup_order() -> None:
         text="MediaMarkt privacy copy mentions captcha vendors while showing a normal product page",
         html_content="<html>captcha Amazon privacy vendor references</html>",
     )
-    amazon_generic_captcha_page = _FakePage(
+    amazon_validate_captcha_page = _FakePage(
         status=200,
         text="Amazon.com.tr",
-        html_content="<html>captcha Amazon</html>",
+        html_content='<html><form action="/errors/validateCaptcha">Enter the characters you see below</form></html>',
+    )
+    amazon_normal_captcha_reference_page = _FakePage(
+        status=200,
+        text="Amazon.com.tr normal product page mentions captcha vendor references",
+        html_content="<html>captcha Amazon privacy vendor references</html>",
     )
 
     protection_signals = detect_auto_escalation_signals(protection_page)
     js_signals = detect_auto_escalation_signals(js_page)
-    amazon_captcha_signals = detect_auto_escalation_signals(amazon_captcha_page)
+    amazon_captcha_signals = detect_auto_escalation_signals(
+        amazon_captcha_page,
+        url="https://www.amazon.com.tr/example/dp/B000000000",
+    )
     mediamarkt_signals = detect_auto_escalation_signals(
         mediamarkt_normal_page,
         url="https://www.mediamarkt.com.tr/tr/product/_sample-12345.html",
     )
-    amazon_generic_captcha_signals = detect_auto_escalation_signals(
-        amazon_generic_captcha_page,
+    amazon_validate_captcha_signals = detect_auto_escalation_signals(
+        amazon_validate_captcha_page,
+        url="https://www.amazon.com.tr/example/dp/B000000000",
+    )
+    amazon_normal_captcha_reference_signals = detect_auto_escalation_signals(
+        amazon_normal_captcha_reference_page,
         url="https://www.amazon.com.tr/example/dp/B000000000",
     )
 
@@ -842,7 +854,8 @@ def test_auto_escalation_signals_and_followup_order() -> None:
     assert js_signals == {"javascript"}
     assert amazon_captcha_signals == {"amazon_captcha", "protection"}
     assert mediamarkt_signals == set()
-    assert amazon_generic_captcha_signals == {"amazon_captcha", "protection"}
+    assert amazon_validate_captcha_signals == {"amazon_captcha", "protection"}
+    assert amazon_normal_captcha_reference_signals == set()
     assert auto_remaining_modes("http_direct", signals=protection_signals, proxy_enabled=True)[:2] == [
         "http_proxy",
         "stealth_proxy",
@@ -1338,6 +1351,78 @@ def test_amazon_adapter_extracts_core_price_from_rendered_product_page() -> None
     assert result.currency == "TRY"
     assert result.raw_text == "11.877,00TL"
     assert result.source.startswith("amazon:scoped-")
+
+
+def test_amazon_adapter_extracts_hidden_buybox_customer_visible_price() -> None:
+    page = Selector(
+        """
+        <html>
+          <head>
+            <meta property="og:title" content="Amazon Product">
+            <meta property="og:image" content="https://m.media-amazon.com/images/I/example.jpg">
+          </head>
+          <body>
+            <div id="desktop_buybox">
+              <input type="hidden" name="items[0.base][customerVisiblePrice][amount]" value="13702.0">
+              <input type="hidden" name="items[0.base][customerVisiblePrice][currencyCode]" value="TRY">
+              <input type="hidden" name="items[0.base][customerVisiblePrice][displayString]" value="13.702,00 TL">
+            </div>
+            <div id="installmentPaymentPrice_feature_div">
+              <span class="a-price"><span class="a-offscreen">1.142,00 TL</span></span>
+              <span>12 taksit</span>
+            </div>
+          </body>
+        </html>
+        """
+    )
+
+    result = extract_price_from_page(
+        page,
+        "https://www.amazon.com.tr/dp/B0D6YXHYCX",
+    )
+
+    assert result.success is True
+    assert result.amount == "13702.00"
+    assert result.currency == "TRY"
+    assert result.raw_text == "13.702,00 TL"
+    assert result.source.startswith("amazon:hidden-buybox-display:")
+
+
+def test_amazon_adapter_extracts_twister_buying_options_price_data() -> None:
+    page = Selector(
+        """
+        <html>
+          <head>
+            <meta property="og:title" content="Amazon Product">
+            <meta property="og:image" content="https://m.media-amazon.com/images/I/example.jpg">
+          </head>
+          <body>
+            <div class="a-section aok-hidden twister-plus-buying-options-price-data">
+              {
+                "desktop_buybox_group_1": [
+                  {
+                    "displayPrice": "13.702,00 TL",
+                    "priceAmount": 13702.00,
+                    "currencySymbol": "TL"
+                  }
+                ]
+              }
+            </div>
+          </body>
+        </html>
+        """
+    )
+
+    result = extract_price_from_page(
+        page,
+        "https://www.amazon.com.tr/dp/B0D6YXHYCX",
+    )
+
+    assert result.success is True
+    assert result.amount == "13702.00"
+    assert result.currency == "TRY"
+    assert result.raw_text == "13.702,00 TL"
+    assert result.source.startswith("amazon:twister-json:")
 
 
 def test_amazon_adapter_prefers_main_price_over_installments_and_list_price() -> None:
