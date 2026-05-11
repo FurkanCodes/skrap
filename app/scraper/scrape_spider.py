@@ -40,6 +40,7 @@ AMAZON_MODE_TO_SESSION_ID = {
 _AMAZON_SESSION_URL = "https://www.amazon.com.tr/"
 _logger = logging.getLogger("scraper_api.scraper")
 _PROXY_MODES = {"http_proxy", "dynamic_proxy", "stealth_proxy", "stealth_cf_proxy"}
+_BROWSER_PROXY_MODES = {"dynamic_proxy", "stealth_proxy", "stealth_cf_proxy"}
 
 
 def _is_amazon_url(url: str) -> bool:
@@ -79,18 +80,7 @@ def _balanced_spider_remaining_modes(
     if not _is_amazon_url(url):
         return planned_modes
 
-    if current_mode == "http_direct" and "amazon_captcha" in signals:
-        balanced_modes: list[str] = []
-        if "dynamic_proxy" in planned_modes:
-            balanced_modes.append("dynamic_proxy")
-        balanced_modes.extend(
-            mode
-            for mode in ("dynamic_direct", "stealth_direct")
-            if mode in planned_modes and mode not in balanced_modes
-        )
-        return balanced_modes or planned_modes
-
-    if current_mode in _PROXY_MODES:
+    if current_mode in _BROWSER_PROXY_MODES:
         direct_modes = [mode for mode in planned_modes if mode not in _PROXY_MODES]
         return direct_modes or planned_modes
 

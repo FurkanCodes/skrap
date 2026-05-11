@@ -179,6 +179,73 @@ class AmazonAdapter(SiteAdapter):
         "#priceblock_dealprice::text",
         "#kindle-price::text",
     )
+    _container_selectors = (
+        "#corePrice_feature_div",
+        "#corePriceDisplay_desktop_feature_div",
+        "#corePriceDisplay_mobile_feature_div",
+        "#apex_offerDisplay_desktop",
+        "#apex_offerDisplay_single_desktop",
+        "#apex_desktop",
+        "#tp_price_block_total_price_ww",
+        "#buyBoxAccordion",
+        "#desktop_buybox",
+    )
+    _exact_scoped_selectors = (
+        ".apex-pricetopay-value .a-offscreen::text",
+        ".reinventPricePriceToPayMargin .a-offscreen::text",
+        ".priceToPay .a-offscreen::text",
+        "#apex-pricetopay-accessibility-label::text",
+        "[data-pricetopay-label]::attr(data-pricetopay-label)",
+        "#tp_price_block_total_price_ww .a-offscreen::text",
+        "#priceblock_ourprice::text",
+        "#priceblock_dealprice::text",
+        "#kindle-price::text",
+    )
+    _scoped_element_selectors = (
+        ".apex-pricetopay-value",
+        ".reinventPricePriceToPayMargin",
+        ".priceToPay",
+        "#tp_price_block_total_price_ww",
+        ".a-price",
+        "[id*='priceblock']",
+        "[class*='priceToPay']",
+        "[class*='apexPrice']",
+    )
+    _negative_price_hints = (
+        "installment",
+        "installments",
+        "taksit",
+        "ayda",
+        "/ay",
+        "coupon",
+        "kupon",
+        "you save",
+        "save ",
+        "tasarruf",
+        "list price",
+        "liste fiyati",
+        "liste fiyat",
+    )
+    _negative_marker_hints = (
+        "basisprice",
+        "coupon",
+        "savings",
+        "installment",
+        "listprice",
+        "priceperunit",
+        "secondary",
+        "strike",
+        "text-price",
+        "legalmessage",
+    )
+    _generic_price_selectors = {".a-price"}
+    _positive_price_context_hints = (
+        "apex",
+        "coreprice",
+        "priceblock",
+        "pricetopay",
+    )
+
     def _is_unavailable(self, page: Selector) -> bool:
         checks: list[str | None] = [
             page.css("#availability span::text").get(),
@@ -195,9 +262,117 @@ class AmazonAdapter(SiteAdapter):
         page_text = " ".join(str(page.get_all_text(separator=" ", strip=True)).split())
         return normalize_availability(page_text) == "out_of_stock"
 
+    @staticmethod
+    def _normalize_text(value: str) -> str:
+        return " ".join(value.split()).strip()
+
+    def _is_negative_text(self, text: str) -> bool:
+        normalized = self._normalize_text(text).lower()
+        return any(hint in normalized for hint in self._negative_price_hints)
+
+    @staticmethod
+    def _marker_text(element: Selector) -> str:
+        markers = []
+        for key, value in element.attrib.items():
+            markers.append(str(key))
+            markers.append(str(value))
+        return " ".join(markers).lower()
+
+    def _is_negative_marker(self, element: Selector) -> bool:
+        markers = self._marker_text(element)
+        return any(hint in markers for hint in self._negative_marker_hints)
+
+    def _has_negative_context(self, element: Selector) -> bool:
+        current: Selector | None = element
+        while current is not None:
+            if self._is_negative_marker(current):
+                return True
+            current = current.parent
+        return False
+
+    def _has_positive_price_context(self, element: Selector) -> bool:
+        current: Selector | None = element
+        while current is not None:
+            markers = self._marker_text(current)
+            if any(hint in markers for hint in self._positive_price_context_hints):
+                return True
+            current = current.parent
+        return False
+
+    def _candidate_from_text(self, text: str, source: str) -> PriceCandidate | None:
+        normalized_text = self._normalize_text(text)
+        if not normalized_text or self._is_negative_text(normalized_text):
+            return None
+        parsed = scan_price_in_text(
+            normalized_text,
+            source=source,
+            require_currency=False,
+        )
+        if not parsed:
+            return None
+        return PriceCandidate(
+            raw_text=parsed.raw_text,
+            amount=parsed.amount,
+            currency=parsed.currency,
+            source=source,
+            confidence="high",
+            signals=_candidate_signals(
+                "site_selector",
+                "amazon_scoped",
+                currency=parsed.currency,
+            ),
+        )
+
+    def _extract_ranked_candidates_from_container(
+        self,
+        container: Selector,
+        *,
+        container_index: int,
+    ) -> list[tuple[tuple[int, int, int], PriceCandidate]]:
+        ranked: list[tuple[tuple[int, int, int], PriceCandidate]] = []
+
+        for selector_index, selector in enumerate(self._exact_scoped_selectors):
+            for text_index, raw_value in enumerate(container.css(selector).getall()):
+                candidate = self._candidate_from_text(
+                    str(raw_value),
+                    source=f"{self.key}:scoped-exact:{container_index}:{selector_index}",
+                )
+                if candidate is None:
+                    continue
+                ranked.append(((0, selector_index, text_index), candidate))
+
+        for selector_index, selector in enumerate(self._scoped_element_selectors):
+            for element_index, element in enumerate(container.css(selector)):
+                if self._has_negative_context(element):
+                    continue
+                if selector in self._generic_price_selectors and not self._has_positive_price_context(element):
+                    continue
+                candidate = self._candidate_from_text(
+                    str(element.get_all_text(separator=" ", strip=True)),
+                    source=f"{self.key}:scoped-fallback:{container_index}:{selector_index}",
+                )
+                if candidate is None:
+                    continue
+                ranked.append(((1, selector_index, element_index), candidate))
+
+        return ranked
+
     def extract(self, page: Selector, url: str) -> list[PriceCandidate]:
         if self._is_unavailable(page):
             return []
+        ranked_candidates: list[tuple[tuple[int, int, int], PriceCandidate]] = []
+        for container_index, selector in enumerate(self._container_selectors):
+            for container in page.css(selector):
+                ranked_candidates.extend(
+                    self._extract_ranked_candidates_from_container(
+                        container,
+                        container_index=container_index,
+                    )
+                )
+        if ranked_candidates:
+            ranked_candidates.sort(key=lambda item: item[0])
+            return deduplicate_candidates([candidate for _, candidate in ranked_candidates])
+
         return _extract_candidates_from_selectors(
             page,
             selectors=self._price_selectors,

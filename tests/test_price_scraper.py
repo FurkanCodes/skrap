@@ -855,7 +855,7 @@ def test_auto_escalation_signals_and_followup_order() -> None:
 
 def test_amazon_auto_mode_uses_proxy_browsers_before_direct_browser_fallback() -> None:
     modes = auto_remaining_modes(
-        "http_direct",
+        "http_proxy",
         signals={"amazon_captcha", "protection"},
         proxy_enabled=True,
         url="https://www.amazon.com.tr/example/dp/B000000000",
@@ -864,7 +864,18 @@ def test_amazon_auto_mode_uses_proxy_browsers_before_direct_browser_fallback() -
     assert modes == ["dynamic_proxy", "dynamic_direct", "stealth_direct"]
 
 
-def test_amazon_auto_mode_uses_fast_plan_after_plain_fetch_error() -> None:
+def test_amazon_auto_mode_uses_direct_browser_fallback_after_direct_captcha() -> None:
+    modes = auto_remaining_modes(
+        "http_direct",
+        signals={"amazon_captcha", "protection"},
+        proxy_enabled=True,
+        url="https://www.amazon.com.tr/example/dp/B000000000",
+    )
+
+    assert modes == ["dynamic_direct", "stealth_direct"]
+
+
+def test_amazon_auto_mode_stops_after_plain_direct_parser_miss() -> None:
     modes = auto_remaining_modes(
         "http_direct",
         signals=set(),
@@ -872,7 +883,18 @@ def test_amazon_auto_mode_uses_fast_plan_after_plain_fetch_error() -> None:
         url="https://www.amazon.com.tr/example/dp/B000000000",
     )
 
-    assert modes == ["dynamic_proxy", "dynamic_direct", "stealth_direct"]
+    assert modes == []
+
+
+def test_amazon_auto_mode_falls_back_to_http_direct_after_clean_proxy_attempt() -> None:
+    modes = auto_remaining_modes(
+        "http_proxy",
+        signals=set(),
+        proxy_enabled=True,
+        url="https://www.amazon.com.tr/example/dp/B000000000",
+    )
+
+    assert modes == ["http_direct"]
 
 
 def test_amazon_auto_jumps_to_direct_browser_after_proxy_tunnel_failure(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -883,10 +905,10 @@ def test_amazon_auto_jumps_to_direct_browser_after_proxy_tunnel_failure(monkeypa
 
     def _fake_fetch_page(url: str, timeout: int, mode: str) -> Selector:
         attempted_modes.append(mode)
+        if mode == "http_proxy":
+            raise RuntimeError("CONNECT tunnel failed, response 402")
         if mode == "http_direct":
             return Selector('<html><script>ue_sn = "opfcaptcha.amazon.com.tr";</script></html>')
-        if mode == "dynamic_proxy":
-            raise RuntimeError("CONNECT tunnel failed, response 402")
         if mode == "dynamic_direct":
             return Selector(
                 """
@@ -913,7 +935,7 @@ def test_amazon_auto_jumps_to_direct_browser_after_proxy_tunnel_failure(monkeypa
 
     assert result.success is True
     assert result.amount == "11877.00"
-    assert attempted_modes == ["http_direct", "dynamic_proxy", "dynamic_direct"]
+    assert attempted_modes == ["http_proxy", "http_direct", "dynamic_direct"]
 
 
 def test_spider_mode_map_supports_direct_browser_fallbacks() -> None:
@@ -938,12 +960,22 @@ def test_spider_uses_fast_amazon_sessions_for_amazon_urls() -> None:
 
 def test_spider_amazon_captcha_uses_one_proxy_then_direct_browser_fallbacks() -> None:
     modes = _balanced_spider_remaining_modes(
-        "http_direct",
+        "http_proxy",
         signals={"amazon_captcha", "protection"},
         url="https://www.amazon.com.tr/example/dp/B000000000",
     )
 
     assert modes == ["dynamic_proxy", "dynamic_direct", "stealth_direct"]
+
+
+def test_spider_amazon_direct_captcha_uses_direct_browser_fallbacks() -> None:
+    modes = _balanced_spider_remaining_modes(
+        "http_direct",
+        signals={"amazon_captcha", "protection"},
+        url="https://www.amazon.com.tr/example/dp/B000000000",
+    )
+
+    assert modes == ["dynamic_direct", "stealth_direct"]
 
 
 def test_spider_amazon_proxy_followup_skips_remaining_proxy_modes() -> None:
@@ -962,6 +994,14 @@ def test_auto_mode_starts_protected_sites_with_stealth() -> None:
     assert initial_auto_fetch_mode("https://www.mediamarkt.com.tr/tr/product/example.html") == "http_direct"
     assert initial_auto_fetch_mode("https://www.teknosa.com/example-p-123") == "http_direct"
     assert initial_auto_fetch_mode("https://example.com/product") == "http_direct"
+
+
+def test_amazon_auto_mode_starts_with_proxy_when_available(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.scraper import fetching
+
+    monkeypatch.setattr(fetching, "get_scrape_proxy_rotator", lambda: object())
+
+    assert initial_auto_fetch_mode("https://www.amazon.com.tr/example/dp/B000000000") == "http_proxy"
 
 
 def test_http_fetch_does_not_use_configured_proxy_rotator(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1297,7 +1337,144 @@ def test_amazon_adapter_extracts_core_price_from_rendered_product_page() -> None
     assert result.amount == "11877.00"
     assert result.currency == "TRY"
     assert result.raw_text == "11.877,00TL"
-    assert result.source.startswith("amazon:selector:")
+    assert result.source.startswith("amazon:scoped-")
+
+
+def test_amazon_adapter_prefers_main_price_over_installments_and_list_price() -> None:
+    page = Selector(
+        """
+        <html>
+          <head>
+            <meta property="og:title" content="Amazon Product">
+            <meta property="og:image" content="https://m.media-amazon.com/images/I/example.jpg">
+          </head>
+          <body>
+            <div id="corePriceDisplay_desktop_feature_div">
+              <span id="apex-pricetopay-accessibility-label" class="aok-offscreen">13.702,00 TL</span>
+              <span class="a-price a-text-price">
+                <span class="a-offscreen">15.999,00 TL</span>
+              </span>
+            </div>
+            <div id="installmentCalculator_feature_div">
+              <span class="a-price">
+                <span class="a-offscreen">1.142,00 TL</span>
+              </span>
+              <span>12 taksit</span>
+            </div>
+            <div id="coupon_feature_div">
+              <span>500,00 TL kupon</span>
+            </div>
+          </body>
+        </html>
+        """
+    )
+
+    result = extract_price_from_page(
+        page,
+        "https://www.amazon.com.tr/dp/B0D6YXHYCX",
+    )
+
+    assert result.success is True
+    assert result.amount == "13702.00"
+    assert result.currency == "TRY"
+    assert result.raw_text == "13.702,00 TL"
+    assert result.source.startswith("amazon:scoped-exact:")
+
+
+def test_amazon_adapter_rejects_installment_context_inside_buybox() -> None:
+    page = Selector(
+        """
+        <html>
+          <head>
+            <meta property="og:title" content="Amazon Product">
+            <meta property="og:image" content="https://m.media-amazon.com/images/I/example.jpg">
+          </head>
+          <body>
+            <div id="desktop_buybox">
+              <div id="installmentPaymentPrice_feature_div">
+                <span class="a-price">
+                  <span class="a-offscreen">1.142,00 TL</span>
+                </span>
+                <span>12 taksit</span>
+              </div>
+              <div class="apexPriceToPay">
+                <span class="a-price">
+                  <span class="a-offscreen">13.702,00 TL</span>
+                </span>
+              </div>
+            </div>
+          </body>
+        </html>
+        """
+    )
+
+    result = extract_price_from_page(
+        page,
+        "https://www.amazon.com.tr/dp/B0D6YXHYCX",
+    )
+
+    assert result.success is True
+    assert result.amount == "13702.00"
+    assert result.raw_text == "13.702,00 TL"
+
+
+def test_amazon_adapter_does_not_promote_lone_installment_price() -> None:
+    page = Selector(
+        """
+        <html>
+          <head>
+            <meta property="og:title" content="Amazon Product">
+            <meta property="og:image" content="https://m.media-amazon.com/images/I/example.jpg">
+          </head>
+          <body>
+            <div id="desktop_buybox">
+              <div id="installmentPaymentPrice_feature_div">
+                <span class="a-price">
+                  <span class="a-offscreen">1.142,00 TL</span>
+                </span>
+                <span>12 taksit</span>
+              </div>
+            </div>
+          </body>
+        </html>
+        """
+    )
+
+    result = extract_price_from_page(
+        page,
+        "https://www.amazon.com.tr/dp/B0D6YXHYCX",
+    )
+
+    assert result.success is False
+    assert result.error == "price_not_found"
+
+
+def test_amazon_adapter_extracts_total_price_block_when_price_to_pay_markup_varies() -> None:
+    page = Selector(
+        """
+        <html>
+          <head>
+            <meta property="og:title" content="Amazon Product">
+            <meta property="og:image" content="https://m.media-amazon.com/images/I/example.jpg">
+          </head>
+          <body>
+            <div id="tp_price_block_total_price_ww">
+              <span class="a-offscreen">13.702,00 TL</span>
+            </div>
+          </body>
+        </html>
+        """
+    )
+
+    result = extract_price_from_page(
+        page,
+        "https://www.amazon.com.tr/dp/B0D6YXHYCX",
+    )
+
+    assert result.success is True
+    assert result.amount == "13702.00"
+    assert result.currency == "TRY"
+    assert result.raw_text == "13.702,00 TL"
 
 
 def test_extract_price_from_page_returns_stock_only_when_amazon_is_unavailable() -> None:

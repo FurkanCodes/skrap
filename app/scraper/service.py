@@ -60,7 +60,9 @@ def _classify_extraction_signals(signals: set[str]) -> str | None:
     return None
 
 
-def _direct_followups_after_proxy_failure(mode: str) -> list[str]:
+def _direct_followups_after_proxy_failure(mode: str, *, url: str | None = None) -> list[str]:
+    if mode == "http_proxy" and detect_site_key(url or "") == "amazon":
+        return ["http_direct"]
     if mode == "dynamic_proxy":
         return ["dynamic_direct", "stealth_direct"]
     if mode == "stealth_proxy":
@@ -314,7 +316,7 @@ def fetch_price(
             )
             if normalized_fetch_mode == "auto":
                 if fetch_error_class == "proxy_failed":
-                    followup_modes = _direct_followups_after_proxy_failure(mode)
+                    followup_modes = _direct_followups_after_proxy_failure(mode, url=runtime_url)
                     reason = "proxy_failed_direct_fallback"
                 else:
                     followup_modes = auto_remaining_modes(mode, url=runtime_url)

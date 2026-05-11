@@ -61,6 +61,10 @@ def effective_proxy_retry_count(url: str) -> int:
 
 def initial_auto_fetch_mode(url: str) -> str:
     """Choose the first transport for auto mode."""
+    has_proxy = get_scrape_proxy_rotator() is not None
+    if _is_amazon_url(url) and has_proxy:
+        _logger.info("scrape_auto_initial_mode mode=http_proxy reason=amazon_proxy_first url=%s", url)
+        return "http_proxy"
     _logger.info("scrape_auto_initial_mode mode=http_direct reason=sequential_probe url=%s", url)
     return "http_direct"
 
@@ -83,7 +87,21 @@ def auto_remaining_modes(
     observed = signals or set()
 
     if _is_amazon_url(url):
-        ordered = ["dynamic_proxy", "dynamic_direct", "stealth_direct"]
+        has_explicit_protection = "amazon_captcha" in observed or "protection" in observed
+        if normalized_mode == "http_proxy":
+            ordered = (
+                ["dynamic_proxy", "dynamic_direct", "stealth_direct"]
+                if has_explicit_protection
+                else ["http_direct"]
+            )
+        elif normalized_mode == "http_direct":
+            ordered = ["dynamic_direct", "stealth_direct"] if has_explicit_protection else []
+        elif normalized_mode == "dynamic_proxy":
+            ordered = ["dynamic_direct", "stealth_direct"] if has_explicit_protection else []
+        elif normalized_mode == "dynamic_direct":
+            ordered = ["stealth_direct"] if has_explicit_protection else []
+        else:
+            ordered = []
     elif "cloudflare" in observed:
         ordered = ["http_proxy", "stealth_cf_proxy", "stealth_proxy", "dynamic_proxy"]
     elif "protection" in observed:
