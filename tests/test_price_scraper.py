@@ -16,7 +16,11 @@ from app.scraper.fetching import (
 )
 from app.scraper.inputs import parse_fetch_mode, parse_sites_blob, parse_urls_blob
 from app.scraper.metadata import extract_product_metadata
-from app.scraper.parsing import make_item_id, normalize_runtime_url
+from app.scraper.parsing import (
+    make_item_id,
+    normalize_akakce_listing_url,
+    normalize_runtime_url,
+)
 from app.scraper.registry import ADAPTERS, detect_site_key, list_supported_sites
 from app.scraper.scrape_spider import MODE_TO_SESSION_ID, _balanced_spider_remaining_modes, _session_id_for_mode
 from app.scraper.service import extract_price_from_page, fetch_price, is_result_qualified, missing_required_result_fields
@@ -257,6 +261,43 @@ def test_item_id_changes_for_different_fragment_listing_urls() -> None:
     second = make_item_id("https://www.akakce.com/example,123.html", second_candidate, 1)
 
     assert first != second
+
+
+def test_akakce_item_id_ignores_volatile_offer_fragment_prefix_and_rank() -> None:
+    first_candidate = PriceCandidate(
+        raw_text="20.750,00 TL",
+        amount=Decimal("20750.00"),
+        currency="TRY",
+        source="akakce:dom",
+        seller="Ucuzbudur.com",
+        listing_url=(
+            "#/8860528/?s=1&v=1538&p=983826204&c=15598&g=1472419210"
+            "&f=%2fr%2f%3fpr%3d983826204%26vd%3d1538%26pg%3d1472419210"
+        ),
+    )
+    second_candidate = PriceCandidate(
+        raw_text="20.750,00 TL",
+        amount=Decimal("20750.00"),
+        currency="TRY",
+        source="akakce:dom",
+        seller="Ucuzbudur.com",
+        listing_url=(
+            "#/753723/?s=4&v=1538&p=983826204&c=15598&g=1472419210"
+            "&f=%2fr%2f%3fpr%3d983826204%26vd%3d1538%26pg%3d1472419210"
+        ),
+    )
+    base_url = (
+        "https://www.akakce.com/ssd/en-ucuz-samsung-9100-pro-mz-vap2t0bw-"
+        "pci-express-5-0-2-tb-m-2-fiyati,983826204.html"
+    )
+
+    first = make_item_id(base_url, first_candidate, 1)
+    second = make_item_id(base_url, second_candidate, 99)
+
+    assert first == second
+    assert normalize_akakce_listing_url(base_url, first_candidate.listing_url) == (
+        f"{base_url}#/offer?p=983826204&v=1538&c=15598&g=1472419210"
+    )
 
 
 def test_akakce_adapter_parses_decimals_and_seller_fallbacks() -> None:

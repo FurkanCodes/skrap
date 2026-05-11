@@ -7,7 +7,10 @@ import hashlib
 import json
 
 from app.application.scrape_service import ScrapeBatchInput, ScrapeBatchService
-from app.application.tracking_price_result import normalize_tracking_price_result
+from app.application.tracking_price_result import (
+    normalize_tracking_price_result,
+    resolve_listing_url,
+)
 from app.scraper import PriceResult
 from app.tracking import (
     NotificationEvent,
@@ -203,7 +206,10 @@ class TrackingService:
             selected_listing = _find_listing_by_id(result, explicit_listing_id)
             if selected_listing is None:
                 raise TrackingBootstrapError("selected_listing_not_found")
-            tracked_listing_url = _normalize_optional(selected_listing.listing_url)
+            tracked_listing_url = resolve_listing_url(
+                selected_listing.listing_url,
+                base_url=result.url,
+            )
             if tracked_listing_url is None:
                 raise TrackingBootstrapError("selected_listing_not_trackable")
 
@@ -552,7 +558,10 @@ class TrackingService:
         if product_url:
             payload["product_url"] = product_url
         if result.listings:
-            listing_url = (result.listings[0].listing_url or "").strip()
+            listing_url = resolve_listing_url(
+                result.listings[0].listing_url,
+                base_url=result.url,
+            )
             if listing_url:
                 payload["listing_url"] = listing_url
 

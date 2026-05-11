@@ -509,6 +509,52 @@ def test_bootstrap_uses_first_listing_for_saved_price_snapshot_and_notification(
     assert payload["listing_url"] == "https://merchant.example.com/first"
 
 
+def test_bootstrap_absolutizes_fragment_listing_url_for_notification() -> None:
+    source_url = "https://www.akakce.com/example,123.html#/old-session/?s=1"
+    listing = PriceListing(
+        item_id="itm_akakce",
+        amount="20750.00",
+        currency="TRY",
+        raw_text="20.750,00 TL",
+        source="akakce:dom",
+        seller="Ucuzbudur.com",
+        listing_url="#/8860528/?s=1&v=1538&p=983826204&c=15598&g=1472419210",
+    )
+    result = PriceResult(
+        url=source_url,
+        success=True,
+        product_id="prd_akakce",
+        site_key="akakce",
+        adapter_key="akakce",
+        amount=listing.amount,
+        currency=listing.currency,
+        raw_text=listing.raw_text,
+        source=listing.source,
+        product_name="Akakce Product",
+        listing_count=1,
+        listings=[listing],
+    )
+    service, repository, _ = _build_service(result)
+
+    service.bootstrap(
+        TrackingBootstrapInput(
+            request_id="req_akakce_fragment_listing",
+            url=result.url,
+            timeout_seconds=20,
+            selected_sites=None,
+            fetch_mode="auto",
+            check_interval_minutes=60,
+            target_amount=None,
+        )
+    )
+
+    payload = json.loads(repository.notification_events[0].payload)
+    assert payload["listing_url"] == (
+        "https://www.akakce.com/example,123.html"
+        "#/8860528/?s=1&v=1538&p=983826204&c=15598&g=1472419210"
+    )
+
+
 def test_bootstrap_uses_selected_listing_for_saved_price_snapshot_and_notification() -> None:
     first_listing = PriceListing(
         item_id="itm_first",

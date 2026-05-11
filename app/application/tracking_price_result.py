@@ -8,7 +8,7 @@ from urllib.parse import urljoin
 
 from app.scraper import PriceResult
 from app.scraper.domain import PriceListing
-from app.scraper.parsing import normalize_url
+from app.scraper.parsing import normalize_akakce_listing_url, normalize_url
 
 
 def normalize_tracking_price_result(
@@ -73,7 +73,6 @@ def _select_tracked_listing(
         for listing in result.listings:
             if listing.item_id == listing_id:
                 return listing
-        return None
 
     normalized_tracked_url = _normalize_listing_url(
         tracked_listing_url,
@@ -89,6 +88,9 @@ def _select_tracked_listing(
                 return listing
         return None
 
+    if listing_id:
+        return None
+
     return result.listings[0]
 
 
@@ -96,9 +98,22 @@ def _normalize_listing_url(value: str | None, *, base_url: str) -> str | None:
     listing_url = (value or "").strip()
     if not listing_url:
         return None
+    akakce_listing_url = normalize_akakce_listing_url(base_url, listing_url)
+    if akakce_listing_url is not None:
+        return akakce_listing_url
     if listing_url.startswith("#"):
         return f"{normalize_url(base_url, keep_fragment=False)}{listing_url}"
     return normalize_url(urljoin(base_url, listing_url), keep_fragment=True)
+
+
+def resolve_listing_url(value: str | None, *, base_url: str) -> str | None:
+    """Resolve a listing URL for user-facing notifications."""
+    listing_url = (value or "").strip()
+    if not listing_url:
+        return None
+    if listing_url.startswith("#"):
+        return f"{normalize_url(base_url, keep_fragment=False)}{listing_url}"
+    return urljoin(base_url, listing_url)
 
 
 def _parse_decimal(value: str | None) -> Decimal | None:

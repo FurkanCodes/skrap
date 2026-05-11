@@ -189,6 +189,24 @@ def test_render_tracking_attention_message_includes_failure_context() -> None:
     assert "Open product: https://example.com/p/fragile" in message
 
 
+def test_render_selected_offer_unavailable_message_does_not_use_alert_template() -> None:
+    payload = {
+        "notification_type": "selected_offer_unavailable",
+        "product_name": "Samsung SSD",
+        "error": "selected_listing_not_found",
+        "listing_url": "https://www.akakce.com/example,123.html#/8860528/?s=1",
+    }
+
+    message = _render_telegram_message(payload)
+
+    assert "Selected offer unavailable" in message
+    assert "Item: Samsung SSD" in message
+    assert "Last error: selected_listing_not_found" in message
+    assert "Open product: https://www.akakce.com/example,123.html#/8860528/?s=1" in message
+    assert "Target reached" not in message
+    assert "Current: ?" not in message
+
+
 def test_render_tracking_stopped_message_includes_last_price() -> None:
     payload = {
         "notification_type": "tracking_stopped",

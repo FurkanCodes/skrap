@@ -16,6 +16,7 @@ _TRACKING_QUERY_PARAM_PATTERN = re.compile(
 )
 _ALIEXPRESS_ITEM_PATH_PATTERN = re.compile(r"/item/\d+\.html", re.IGNORECASE)
 _ALIEXPRESS_PRODUCT_ID_PATTERN = re.compile(r"\d{10,}")
+_AKAKCE_STABLE_LISTING_PARAMS = ("p", "v", "c", "g")
 
 
 def normalize_currency(token: str | None) -> str | None:
@@ -130,6 +131,35 @@ def normalize_url(url: str, *, keep_fragment: bool = False) -> str:
     )
 
 
+def normalize_akakce_listing_url(base_url: str, listing_url: str | None) -> str | None:
+    """Return a stable Akakce offer URL, ignoring volatile redirect fragments."""
+    raw_listing_url = (listing_url or "").strip()
+    if not raw_listing_url:
+        return None
+
+    base_without_fragment = normalize_url(base_url, keep_fragment=False)
+    absolute_url = (
+        f"{base_without_fragment}{raw_listing_url}"
+        if raw_listing_url.startswith("#")
+        else urljoin(base_url, raw_listing_url)
+    )
+    parsed = urlparse(absolute_url)
+    if not _is_akakce_host(parsed.netloc):
+        return None
+
+    fragment_query = parsed.fragment.partition("?")[2]
+    if not fragment_query:
+        return None
+
+    params = parse_qs(fragment_query, keep_blank_values=True)
+    stable_params = _akakce_stable_listing_params(params)
+    if stable_params is None:
+        return None
+
+    stable_query = urlencode(stable_params)
+    return f"{normalize_url(absolute_url, keep_fragment=False)}#/offer?{stable_query}"
+
+
 def normalize_runtime_url(url: str) -> str:
     """Normalize runtime fetch URL for known non-product deep links.
 
@@ -183,7 +213,10 @@ def make_item_id(base_url: str, candidate: PriceCandidate, index: int) -> str:
     normalized_base = strip_tracking_query_params(base_url)
     if candidate.listing_url:
         listing_ref = candidate.listing_url.strip()
-        if listing_ref.startswith("#"):
+        akakce_listing_ref = normalize_akakce_listing_url(base_url, listing_ref)
+        if akakce_listing_ref is not None:
+            seed = f"akakce-offer|{akakce_listing_ref}"
+        elif listing_ref.startswith("#"):
             seed = f"url-fragment|{normalized_base}|{listing_ref}"
         else:
             absolute_listing = urljoin(base_url, listing_ref)
@@ -205,3 +238,25 @@ def make_item_id(base_url: str, candidate: PriceCandidate, index: int) -> str:
 
     digest = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:20]
     return f"itm_{digest}"
+
+
+def _is_akakce_host(netloc: str) -> bool:
+    host = netloc.lower().split("@")[-1].split(":")[0].removeprefix("www.")
+    return host == "akakce.com" or host.endswith(".akakce.com")
+
+
+def _akakce_stable_listing_params(
+    params: dict[str, list[str]],
+) -> list[tuple[str, str]] | None:
+    has_offer_identity = bool(params.get("g")) or bool(params.get("p") and params.get("v"))
+    if not has_offer_identity:
+        return None
+
+    stable_params: list[tuple[str, str]] = []
+    for key in _AKAKCE_STABLE_LISTING_PARAMS:
+        values = params.get(key)
+        if values and values[0]:
+            stable_params.append((key, values[0]))
+    if len(stable_params) < 2:
+        return None
+    return stable_params

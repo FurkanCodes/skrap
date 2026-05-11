@@ -262,6 +262,13 @@ def _render_telegram_message(payload: dict) -> str:
             lines.append(f"Item: {item_label}")
         if error:
             lines.append(f"Last error: {error}")
+    elif notification_type == "selected_offer_unavailable":
+        error = str(payload.get("error", "")).strip()
+        lines = ["Selected offer unavailable"]
+        if item_label:
+            lines.append(f"Item: {item_label}")
+        if error:
+            lines.append(f"Last error: {error}")
     else:
         lines = [
             "Target reached",

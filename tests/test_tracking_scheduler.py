@@ -1503,6 +1503,91 @@ def test_scheduler_tracks_stored_listing_identity_instead_of_current_first_listi
     assert payload["listing_url"] == "https://merchant.example.com/selected"
 
 
+def test_scheduler_tracks_akakce_listing_when_fragment_prefix_changes() -> None:
+    repo = _build_repo()
+    now = datetime.now(tz=UTC)
+    due_time = _iso(now - timedelta(minutes=1))
+    source_url = (
+        "https://www.akakce.com/ssd/en-ucuz-samsung-9100-pro-mz-vap2t0bw-"
+        "pci-express-5-0-2-tb-m-2-fiyati,983826204.html"
+    )
+    item = replace(
+        _item(
+            item_id="trk_akakce_selected_listing",
+            url=source_url,
+            now=now,
+            next_check_at=due_time,
+            last_amount="21000.00",
+            target_amount=None,
+        ),
+        site_key="akakce",
+        adapter_key="akakce",
+        tracked_listing_id="itm_old_volatile",
+        tracked_listing_url=(
+            "#/8860528/?s=1&v=1538&p=983826204&c=15598&g=1472419210"
+            "&f=%2fr%2f%3fpr%3d983826204%26vd%3d1538%26pg%3d1472419210"
+        ),
+    )
+    repo.save_item(item)
+
+    scrape_result = PriceResult(
+        url=item.source_url,
+        success=True,
+        amount="20929.09",
+        currency="TRY",
+        raw_text="20.929,09 TL",
+        source="akakce:dom",
+        site_key="akakce",
+        adapter_key="akakce",
+        listings=[
+            PriceListing(
+                item_id="itm_other",
+                amount="20929.09",
+                currency="TRY",
+                raw_text="20.929,09 TL",
+                source="akakce:dom",
+                seller="nitrotechnology",
+                listing_url=(
+                    "#/753723/?s=3&v=11070&p=983826204&c=15663&g=1420412326"
+                ),
+            ),
+            PriceListing(
+                item_id="itm_new_stable",
+                amount="20750.00",
+                currency="TRY",
+                raw_text="20.750,00 TL",
+                source="akakce:dom",
+                seller="Ucuzbudur.com",
+                listing_url=(
+                    "#/753723/?s=1&v=1538&p=983826204&c=15598&g=1472419210"
+                    "&f=%2fr%2f%3fpr%3d983826204%26vd%3d1538%26pg%3d1472419210"
+                ),
+            ),
+        ],
+        listing_count=2,
+    )
+    scheduler = TrackingSchedulerService(
+        repository=repo,
+        scrape_runner=_FakeScrapeRunner({item.source_url: scrape_result}),
+        timeout_seconds=30,
+        claim_batch_size=50,
+        max_inflight=4,
+        lease_seconds=180,
+        jitter_percent=0,
+        lease_owner="scheduler-test",
+    )
+
+    outcome = scheduler.run_once()
+
+    assert outcome.success_count == 1
+    saved_item = repo.get_item(item.item_id)
+    assert saved_item is not None
+    assert saved_item.last_amount == "20750.00"
+    snapshots = repo.list_snapshots(item.item_id, limit=1)
+    assert snapshots[0].success is True
+    assert snapshots[0].error is None
+
+
 def test_scheduler_marks_selected_listing_unavailable_without_fallback() -> None:
     repo = _build_repo()
     now = datetime.now(tz=UTC)

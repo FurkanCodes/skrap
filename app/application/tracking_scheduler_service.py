@@ -12,7 +12,10 @@ from typing import Protocol
 
 from app.application.affiliate_link_service import AffiliateLinkService
 from app.application.scrape_service import ScrapeBatchInput, ScrapeBatchOutput
-from app.application.tracking_price_result import normalize_tracking_price_result
+from app.application.tracking_price_result import (
+    normalize_tracking_price_result,
+    resolve_listing_url,
+)
 from app.scraper import PriceResult
 from app.tracking import (
     AlertEvent,
@@ -599,7 +602,10 @@ class TrackingSchedulerService:
                 item_before=item,
                 snapshot=snapshot,
                 product_url=_resolve_product_url(item, scrape_result),
-                listing_url=item.tracked_listing_url,
+                listing_url=resolve_listing_url(
+                    item.tracked_listing_url,
+                    base_url=item.source_url,
+                ),
             )
         return False
 
@@ -1466,8 +1472,10 @@ def _resolve_product_url(item: TrackedItem, scrape_result: PriceResult) -> str |
 def _resolve_listing_url(scrape_result: PriceResult) -> str | None:
     if not scrape_result.listings:
         return None
-    listing_url = (scrape_result.listings[0].listing_url or "").strip()
-    return listing_url or None
+    return resolve_listing_url(
+        scrape_result.listings[0].listing_url,
+        base_url=scrape_result.url,
+    )
 
 
 def _parse_decimal(value: str | None) -> Decimal | None:
