@@ -37,6 +37,8 @@ class PriceListingResponse(BaseModel):
     source: str
     seller: str | None
     listing_url: str | None
+    confidence: Literal["high", "medium", "low"] = "high"
+    signals: tuple[str, ...] = ()
 
 
 class PriceResultResponse(BaseModel):
@@ -62,6 +64,8 @@ class PriceResultResponse(BaseModel):
     listing_count: int
     listings: list[PriceListingResponse]
     error: str | None
+    confidence: Literal["high", "medium", "low"] | None = None
+    signals: tuple[str, ...] = ()
 
 
 class ScrapeBatchRequest(BaseModel):

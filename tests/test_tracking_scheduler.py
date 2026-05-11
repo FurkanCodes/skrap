@@ -1719,6 +1719,66 @@ def test_scheduler_marks_missing_primary_listing_price_as_unknown_failure() -> N
     assert repo.list_notification_events(item.item_id, limit=10) == []
 
 
+def test_scheduler_does_not_update_tracker_from_low_confidence_price() -> None:
+    repo = _build_repo()
+    now = datetime.now(tz=UTC)
+    due_time = _iso(now - timedelta(minutes=1))
+    item = _item(
+        item_id="trk_low_confidence_price",
+        url="https://example.com/low-confidence-price",
+        now=now,
+        next_check_at=due_time,
+        last_amount="100.00",
+        target_amount="50.00",
+    )
+    repo.save_item(item)
+
+    listing = PriceListing(
+        item_id="itm_weak",
+        amount="10.00",
+        currency="USD",
+        raw_text="$10.00",
+        source="find:regex:first",
+        confidence="low",
+        signals=("find_regex",),
+    )
+    scrape_result = PriceResult(
+        url=item.source_url,
+        success=True,
+        amount=listing.amount,
+        currency=listing.currency,
+        raw_text=listing.raw_text,
+        source=listing.source,
+        product_name="Weak Product",
+        site_key="generic",
+        adapter_key="generic",
+        listings=[listing],
+        listing_count=1,
+    )
+    scheduler = TrackingSchedulerService(
+        repository=repo,
+        scrape_runner=_FakeScrapeRunner({item.source_url: scrape_result}),
+        timeout_seconds=30,
+        claim_batch_size=50,
+        max_inflight=4,
+        lease_seconds=180,
+        jitter_percent=0,
+        lease_owner="scheduler-test",
+    )
+
+    outcome = scheduler.run_once()
+    assert outcome.failure_count == 1
+
+    saved_item = repo.get_item(item.item_id)
+    assert saved_item is not None
+    assert saved_item.last_amount == "100.00"
+    assert repo.list_alert_events(item.item_id, limit=10) == []
+    snapshots = repo.list_snapshots(item.item_id, limit=1)
+    assert snapshots[0].success is False
+    assert snapshots[0].amount is None
+    assert snapshots[0].error == "low_confidence_price"
+
+
 def test_scheduler_emits_attention_notification_after_three_consecutive_failures() -> None:
     repo = _build_repo()
     now = datetime.now(tz=UTC)

@@ -13,6 +13,8 @@ from typing import Protocol
 from app.application.affiliate_link_service import AffiliateLinkService
 from app.application.scrape_service import ScrapeBatchInput, ScrapeBatchOutput
 from app.application.tracking_price_result import (
+    is_price_confident_for_tracking,
+    low_confidence_tracking_result,
     normalize_tracking_price_result,
     resolve_listing_url,
 )
@@ -418,6 +420,12 @@ class TrackingSchedulerService:
             tracked_listing_url=item.tracked_listing_url,
             fallback_to_first=not has_tracked_listing_identity,
         )
+        if not is_price_confident_for_tracking(
+            scrape_result,
+            require_high_confidence=False,
+            has_tracked_listing_identity=has_tracked_listing_identity,
+        ):
+            scrape_result = low_confidence_tracking_result(scrape_result)
         finished_at = _to_iso(_utcnow())
         next_check_at = compute_next_check_at(
             base_time=finished_at,

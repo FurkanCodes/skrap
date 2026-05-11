@@ -17,7 +17,7 @@ from typing import Any
 from urllib.parse import urljoin
 
 from .constants import SUPPORTED_FETCH_MODES
-from .domain import PriceListing, PriceResult
+from .domain import PriceCandidate, PriceConfidence, PriceListing, PriceResult
 from .fetching import auto_remaining_modes, detect_auto_escalation_signals, fetch_page_with_mode, initial_auto_fetch_mode
 from .inputs import parse_fetch_mode
 from .availability import normalize_availability
@@ -96,6 +96,67 @@ def missing_required_result_fields(result: PriceResult) -> list[str]:
 def is_result_qualified(result: PriceResult) -> bool:
     """Check if a result has required output fields for on-demand adapters."""
     return result.success and not missing_required_result_fields(result)
+
+
+def _has_metadata_identity(metadata: dict[str, str | None]) -> bool:
+    has_name = _is_present(metadata.get("product_name"))
+    has_specific_identity = any(
+        _is_present(metadata.get(key))
+        for key in ("image_url", "brand", "model", "sku", "gtin")
+    )
+    return has_name and has_specific_identity
+
+
+def _merge_signals(*signal_groups: tuple[str, ...] | list[str]) -> tuple[str, ...]:
+    merged: list[str] = []
+    for group in signal_groups:
+        for signal in group:
+            if signal and signal not in merged:
+                merged.append(signal)
+    return tuple(merged)
+
+
+def _resolve_candidate_confidence(
+    candidate: PriceCandidate,
+    *,
+    metadata: dict[str, str | None],
+) -> tuple[PriceConfidence, tuple[str, ...]]:
+    """Adjust raw extractor confidence using page-level product identity."""
+    signals = list(candidate.signals)
+    has_identity = _has_metadata_identity(metadata)
+    if has_identity:
+        signals.append("product_identity")
+
+    confidence = candidate.confidence
+    signal_set = set(signals)
+    if confidence == "medium" and has_identity and (
+        "meta_price" in signal_set or "semantic_price_attr" in signal_set
+    ):
+        confidence = "high"
+        signals.append("metadata_confirmed")
+    elif confidence == "medium" and not has_identity and "generic_dom" in signal_set:
+        confidence = "low"
+        signals.append("missing_product_identity")
+
+    return confidence, tuple(dict.fromkeys(signals))
+
+
+def _with_resolved_confidence(
+    candidate: PriceCandidate,
+    *,
+    metadata: dict[str, str | None],
+) -> PriceCandidate:
+    confidence, signals = _resolve_candidate_confidence(candidate, metadata=metadata)
+    return PriceCandidate(
+        raw_text=candidate.raw_text,
+        amount=candidate.amount,
+        currency=candidate.currency,
+        source=candidate.source,
+        seller=candidate.seller,
+        listing_url=candidate.listing_url,
+        confidence=confidence,
+        signals=signals,
+    )
 
 
 def _normalize_availability(value: str | None) -> str | None:
@@ -482,6 +543,10 @@ def extract_price_from_page(
             extracted_at=resolved_extracted_at,
         )
 
+    candidates = [
+        _with_resolved_confidence(candidate, metadata=metadata)
+        for candidate in candidates
+    ]
     listings = [
         PriceListing(
             item_id=make_item_id(url, candidate, index),
@@ -491,6 +556,8 @@ def extract_price_from_page(
             source=candidate.source,
             seller=candidate.seller,
             listing_url=candidate.listing_url,
+            confidence=candidate.confidence,
+            signals=candidate.signals,
         )
         for index, candidate in enumerate(candidates, 1)
     ]
@@ -522,6 +589,8 @@ def extract_price_from_page(
         extracted_at=resolved_extracted_at,
         listing_count=len(listings),
         listings=listings,
+        confidence=first.confidence,
+        signals=_merge_signals(first.signals),
     )
 
 

@@ -63,6 +63,22 @@ def _extract_json_object_after_marker(script_text: str, marker: str) -> dict[str
     return None
 
 
+def _candidate_signals(
+    *signals: str,
+    seller: str | None = None,
+    listing_url: str | None = None,
+    currency: str | None = None,
+) -> tuple[str, ...]:
+    values = [signal for signal in signals if signal]
+    if seller:
+        values.append("seller")
+    if listing_url:
+        values.append("listing_url")
+    if currency:
+        values.append("currency")
+    return tuple(dict.fromkeys(values))
+
+
 class SiteAdapter:
     """Base adapter contract used by the registry/service layers."""
 
@@ -107,6 +123,11 @@ def _extract_candidates_from_selectors(
                     amount=parsed.amount,
                     currency=parsed.currency or default_currency,
                     source=f"{source_prefix}:selector:{index}",
+                    confidence="high",
+                    signals=_candidate_signals(
+                        "site_selector",
+                        currency=parsed.currency or default_currency,
+                    ),
                 )
             )
     return deduplicate_candidates(candidates)
@@ -266,6 +287,12 @@ class HepsiburadaAdapter(SiteAdapter):
             amount=parsed.amount,
             currency=parsed.currency or "TRY",
             source="hepsiburada:cart-special",
+            confidence="high",
+            signals=_candidate_signals(
+                "site_text_pattern",
+                "cart_special",
+                currency=parsed.currency or "TRY",
+            ),
         )
 
     def extract(self, page: Selector, url: str) -> list[PriceCandidate]:
@@ -365,6 +392,14 @@ class TrendyolAdapter(SiteAdapter):
             source=parsed.source,
             seller=seller,
             listing_url=listing_url,
+            confidence="high",
+            signals=_candidate_signals(
+                "embedded_state",
+                "winner_variant",
+                seller=seller,
+                listing_url=listing_url,
+                currency=parsed.currency or currency or "TRY",
+            ),
         )
 
     def _extract_from_envoy_state(self, page: Selector, url: str) -> PriceCandidate | None:
@@ -496,6 +531,13 @@ class AkakceAdapter(SiteAdapter):
                     source="akakce:dom",
                     seller=seller_text,
                     listing_url=listing_url,
+                    confidence="high",
+                    signals=_candidate_signals(
+                        "site_listing_row",
+                        seller=seller_text,
+                        listing_url=listing_url,
+                        currency=candidate.currency or "TRY",
+                    ),
                 )
             )
 
@@ -534,6 +576,13 @@ class NeweggAdapter(SiteAdapter):
                         source="newegg:listing",
                         seller=seller,
                         listing_url=str(listing_url).strip() if listing_url else None,
+                        confidence="high",
+                        signals=_candidate_signals(
+                            "site_listing_row",
+                            seller=seller,
+                            listing_url=str(listing_url).strip() if listing_url else None,
+                            currency=candidate.currency,
+                        ),
                     )
                 )
 
@@ -555,6 +604,13 @@ class NeweggAdapter(SiteAdapter):
                         source="newegg:product",
                         seller=str(seller_text).strip() if seller_text else None,
                         listing_url=url,
+                        confidence="high",
+                        signals=_candidate_signals(
+                            "site_product_scope",
+                            seller=str(seller_text).strip() if seller_text else None,
+                            listing_url=url,
+                            currency=candidate.currency,
+                        ),
                     )
                 ]
 
@@ -648,6 +704,14 @@ class N11Adapter(SiteAdapter):
                     source="n11:initial-state",
                     seller=str(seller_name).strip() if isinstance(seller_name, str) else None,
                     listing_url=str(listing_url).strip() if isinstance(listing_url, str) else None,
+                    confidence="high",
+                    signals=_candidate_signals(
+                        "embedded_state",
+                        "site_listing_row",
+                        seller=str(seller_name).strip() if isinstance(seller_name, str) else None,
+                        listing_url=str(listing_url).strip() if isinstance(listing_url, str) else None,
+                        currency=parsed.currency or "TRY",
+                    ),
                 )
             )
 
@@ -679,6 +743,14 @@ class N11Adapter(SiteAdapter):
             source="n11:selected-meta",
             seller=str(seller_text).strip() if seller_text else None,
             listing_url=url,
+            confidence="high",
+            signals=_candidate_signals(
+                "embedded_state",
+                "selected_offer",
+                seller=str(seller_text).strip() if seller_text else None,
+                listing_url=url,
+                currency=parsed.currency or "TRY",
+            ),
         )
 
     def _extract_from_dom(self, page: Selector, url: str) -> list[PriceCandidate]:
@@ -702,6 +774,13 @@ class N11Adapter(SiteAdapter):
                     source="n11:dom",
                     seller=str(seller).strip() if seller else None,
                     listing_url=str(listing_url).strip() if listing_url else None,
+                    confidence="high",
+                    signals=_candidate_signals(
+                        "site_listing_row",
+                        seller=str(seller).strip() if seller else None,
+                        listing_url=str(listing_url).strip() if listing_url else None,
+                        currency=parsed.currency or "TRY",
+                    ),
                 )
             )
 

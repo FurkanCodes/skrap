@@ -8,6 +8,8 @@ import json
 
 from app.application.scrape_service import ScrapeBatchInput, ScrapeBatchService
 from app.application.tracking_price_result import (
+    is_price_confident_for_tracking,
+    low_confidence_tracking_result,
     normalize_tracking_price_result,
     resolve_listing_url,
 )
@@ -221,6 +223,13 @@ class TrackingService:
         )
         if not result.success and result.error == "selected_listing_not_found":
             raise TrackingBootstrapError("selected_listing_not_found")
+        if not is_price_confident_for_tracking(
+            result,
+            require_high_confidence=True,
+            has_tracked_listing_identity=bool(tracked_listing_id or tracked_listing_url),
+        ):
+            result = low_confidence_tracking_result(result)
+            raise TrackingBootstrapError(result.error or "low_confidence_price")
         normalized_availability = _normalize_availability(result.availability)
         is_not_in_stock = _is_not_in_stock(normalized_availability)
         if existing is None and not is_not_in_stock and not (result.amount or "").strip():

@@ -7,6 +7,7 @@ from decimal import Decimal
 from typing import Literal
 
 FetchMode = Literal["auto", "http", "dynamic", "stealth"]
+PriceConfidence = Literal["high", "medium", "low"]
 
 
 @dataclass(frozen=True)
@@ -19,6 +20,8 @@ class PriceCandidate:
     source: str
     seller: str | None = None
     listing_url: str | None = None
+    confidence: PriceConfidence = "low"
+    signals: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -32,6 +35,8 @@ class PriceListing:
     source: str
     seller: str | None = None
     listing_url: str | None = None
+    confidence: PriceConfidence = "high"
+    signals: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -59,3 +64,5 @@ class PriceResult:
     listing_count: int = 0
     listings: list[PriceListing] = field(default_factory=list)
     error: str | None = None
+    confidence: PriceConfidence | None = None
+    signals: tuple[str, ...] = ()

@@ -115,6 +115,72 @@ def test_extract_from_dom_text_fallback() -> None:
     assert results[0].source.startswith("dom:")
 
 
+def test_extract_price_from_page_marks_generic_price_without_identity_low_confidence() -> None:
+    result = extract_price_from_page(
+        Selector(
+            """
+            <html>
+              <body>
+                <span class='price'>Now only $49.90</span>
+              </body>
+            </html>
+            """
+        ),
+        "https://example.com/products/anonymous-price",
+    )
+
+    assert result.success is True
+    assert result.amount == "49.90"
+    assert result.confidence == "low"
+    assert "generic_dom" in result.signals
+    assert "missing_product_identity" in result.signals
+
+
+def test_extract_price_from_page_promotes_semantic_price_with_identity_to_high_confidence() -> None:
+    result = extract_price_from_page(
+        Selector(
+            """
+            <html>
+              <head>
+                <meta property='og:title' content='Known Product'>
+                <meta property='og:image' content='https://cdn.example.com/known.jpg'>
+                <meta itemprop='priceCurrency' content='USD'>
+              </head>
+              <body>
+                <span itemprop='price'>99.99</span>
+              </body>
+            </html>
+            """
+        ),
+        "https://example.com/products/known-product",
+    )
+
+    assert result.success is True
+    assert result.amount == "99.99"
+    assert result.confidence == "high"
+    assert "semantic_price_attr" in result.signals
+    assert "product_identity" in result.signals
+    assert "metadata_confirmed" in result.signals
+
+
+def test_extract_price_from_page_keeps_find_regex_fallback_low_confidence() -> None:
+    result = extract_price_from_page(
+        Selector(
+            """
+            <html>
+              <body>Special deal $12.34 today only</body>
+            </html>
+            """
+        ),
+        "https://example.com/products/text-only-price",
+    )
+
+    assert result.success is True
+    assert result.amount == "12.34"
+    assert result.confidence == "low"
+    assert "find_regex" in result.signals
+
+
 def test_extract_from_find_fallback_with_attribute_filters() -> None:
     page = Selector(
         """

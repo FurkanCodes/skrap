@@ -724,6 +724,49 @@ def test_bootstrap_rejects_failed_scrape() -> None:
         )
 
 
+def test_bootstrap_rejects_low_confidence_price() -> None:
+    listing = PriceListing(
+        item_id="itm_weak",
+        amount="10.00",
+        currency="USD",
+        raw_text="$10.00",
+        source="find:regex:first",
+        confidence="low",
+        signals=("find_regex",),
+    )
+    result = PriceResult(
+        url="https://example.com/p/weak",
+        success=True,
+        product_id="prd_weak",
+        site_key="generic",
+        adapter_key="generic",
+        amount=listing.amount,
+        currency=listing.currency,
+        raw_text=listing.raw_text,
+        source=listing.source,
+        product_name="Weak Product",
+        listing_count=1,
+        listings=[listing],
+    )
+    service, repository, _ = _build_service(result)
+
+    with pytest.raises(TrackingBootstrapError, match="low_confidence_price"):
+        service.bootstrap(
+            TrackingBootstrapInput(
+                request_id="req_low_confidence",
+                url=result.url,
+                timeout_seconds=20,
+                selected_sites=None,
+                fetch_mode="auto",
+                check_interval_minutes=60,
+                target_amount=None,
+            )
+        )
+
+    assert repository.snapshots == []
+    assert repository.items == {}
+
+
 def test_update_item_applies_patch_fields() -> None:
     service, _, _ = _build_service(_success_result())
     item = service.bootstrap(

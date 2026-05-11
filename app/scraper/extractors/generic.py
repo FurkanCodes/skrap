@@ -22,7 +22,7 @@ from ..constants import (
     META_PRICE_SELECTORS,
     SKIPPED_FIND_REGEX_TAGS,
 )
-from ..domain import PriceCandidate
+from ..domain import PriceCandidate, PriceConfidence
 from ..parsing import normalize_currency, parse_decimal, scan_price_in_text, scan_prices_in_text
 
 
@@ -66,6 +66,13 @@ def _candidate_from_price_data(data: dict[str, Any], source: str) -> PriceCandid
                 source=source,
                 seller=seller_name,
                 listing_url=listing_url,
+                confidence="high",
+                signals=_candidate_signals(
+                    "structured_data",
+                    seller=seller_name,
+                    listing_url=listing_url,
+                    currency=direct_currency,
+                ),
             )
 
     for key in ("lowPrice", "highPrice"):
@@ -80,6 +87,13 @@ def _candidate_from_price_data(data: dict[str, Any], source: str) -> PriceCandid
                     source=source,
                     seller=seller_name,
                     listing_url=listing_url,
+                    confidence="medium",
+                    signals=_candidate_signals(
+                        "structured_aggregate_price",
+                        seller=seller_name,
+                        listing_url=listing_url,
+                        currency=direct_currency,
+                    ),
                 )
 
     return None
@@ -125,6 +139,30 @@ def deduplicate_candidates(candidates: list[PriceCandidate]) -> list[PriceCandid
     return deduped
 
 
+def _candidate_signals(
+    *signals: str,
+    seller: str | None = None,
+    listing_url: str | None = None,
+    currency: object | None = None,
+) -> tuple[str, ...]:
+    values = [signal for signal in signals if signal]
+    if seller:
+        values.append("seller")
+    if listing_url:
+        values.append("listing_url")
+    if currency:
+        values.append("currency")
+    return tuple(dict.fromkeys(values))
+
+
+def _dom_selector_signals(selector: str) -> tuple[str, ...]:
+    signals = ["generic_dom"]
+    normalized = selector.lower()
+    if "itemprop" in normalized or "data-price" in normalized or "meta[" in normalized:
+        signals.append("semantic_price_attr")
+    return tuple(signals)
+
+
 def _element_text_candidates(element: Selector) -> tuple[str, str, str, str, str]:
     """Collect text/attribute values once so scanners can reuse them."""
     return (
@@ -141,6 +179,8 @@ def _candidate_from_element(
     source: str,
     meta_currency: str | None,
     require_currency: bool,
+    confidence: PriceConfidence,
+    signals: tuple[str, ...],
     text_candidates: tuple[str, str, str, str, str] | None = None,
 ) -> PriceCandidate | None:
     """Parse one candidate from a selected element using pre-collected text fields."""
@@ -159,6 +199,12 @@ def _candidate_from_element(
             currency=parsed.currency or meta_currency,
             source=source,
             listing_url=listing_url,
+            confidence=confidence,
+            signals=_candidate_signals(
+                *signals,
+                listing_url=listing_url,
+                currency=parsed.currency or meta_currency,
+            ),
         )
 
     return None
@@ -179,6 +225,8 @@ def _extract_find_based_candidates(page: Selector, meta_currency: str | None) ->
                 source=f"{source}:first",
                 meta_currency=meta_currency,
                 require_currency=False,
+                confidence="low",
+                signals=("find_attribute", "first_match"),
                 text_candidates=first_values,
             )
             if first_candidate:
@@ -191,6 +239,8 @@ def _extract_find_based_candidates(page: Selector, meta_currency: str | None) ->
                 source=source,
                 meta_currency=meta_currency,
                 require_currency=False,
+                confidence="low",
+                signals=("find_attribute",),
                 text_candidates=values,
             )
             if candidate:
@@ -204,6 +254,8 @@ def _extract_find_based_candidates(page: Selector, meta_currency: str | None) ->
             source="find:regex:first",
             meta_currency=meta_currency,
             require_currency=True,
+            confidence="low",
+            signals=("find_regex", "first_match"),
             text_candidates=first_values,
         )
         if first_candidate:
@@ -218,6 +270,8 @@ def _extract_find_based_candidates(page: Selector, meta_currency: str | None) ->
             source="find:regex",
             meta_currency=meta_currency,
             require_currency=True,
+            confidence="low",
+            signals=("find_regex",),
             text_candidates=values,
         )
         if candidate:
@@ -277,6 +331,12 @@ def extract_price_listings_from_selector(page: Selector) -> list[PriceCandidate]
                             currency=candidate.currency or meta_currency,
                             source=candidate.source,
                             listing_url=listing_url,
+                            confidence="medium",
+                            signals=_candidate_signals(
+                                *_dom_selector_signals(selector),
+                                listing_url=listing_url,
+                                currency=candidate.currency or meta_currency,
+                            ),
                         )
                     )
                     break
@@ -297,13 +357,31 @@ def extract_price_listings_from_selector(page: Selector) -> list[PriceCandidate]
         candidate = scan_price_in_text(str(value), source=source, require_currency=False)
         if candidate:
             if candidate.currency or not meta_currency:
-                return [candidate]
+                return [
+                    PriceCandidate(
+                        raw_text=candidate.raw_text,
+                        amount=candidate.amount,
+                        currency=candidate.currency,
+                        source=source,
+                        seller=candidate.seller,
+                        listing_url=candidate.listing_url,
+                        confidence="medium",
+                        signals=_candidate_signals(
+                            "meta_price",
+                            seller=candidate.seller,
+                            listing_url=candidate.listing_url,
+                            currency=candidate.currency,
+                        ),
+                    )
+                ]
             return [
                 PriceCandidate(
                     raw_text=candidate.raw_text,
                     amount=candidate.amount,
                     currency=meta_currency,
                     source=source,
+                    confidence="medium",
+                    signals=_candidate_signals("meta_price", currency=meta_currency),
                 )
             ]
 
@@ -320,6 +398,13 @@ def extract_price_listings_from_selector(page: Selector) -> list[PriceCandidate]
             source=candidate.source,
             seller=candidate.seller,
             listing_url=candidate.listing_url,
+            confidence="low",
+            signals=_candidate_signals(
+                "page_text",
+                seller=candidate.seller,
+                listing_url=candidate.listing_url,
+                currency=candidate.currency or meta_currency,
+            ),
         )
         for candidate in fallback_candidates
     ]
