@@ -75,16 +75,17 @@ Key implementation detail:
 
 ### 2. Configure environment
 
-Create `.env` in repo root (same folder as `README.md`):
+Use explicit env profiles instead of a mixed `.env`:
 
-```env
-TRACKING_DATABASE_URL=
-TRACKING_DB_POOL_MIN_SIZE=1
-TRACKING_DB_POOL_MAX_SIZE=10
+```bash
+cp .env.local.example .env.local
+cp .env.production.example .env.production
 ```
 
 Notes:
-- The app auto-loads `.env` from repository root.
+- Local runs load `.env.local` first, then fall back to `.env`.
+- Production runs should provide process env or use `.env.production`.
+- Docker compose uses `.env.production` by default. Override with `ENV_FILE=.env.local`.
 - Fallback env resolution order for DB URL:
   1. `TRACKING_DATABASE_URL`
   2. `SUPABASE_DB_URL`
@@ -92,6 +93,16 @@ Notes:
   4. default local postgres URL
 
 ### 3. Start API
+
+Start the full local backend stack in one terminal:
+
+```bash
+./.venv/bin/python scripts/dev_backend.py
+```
+
+This starts the API, scheduler dispatcher, scheduler worker, and notifier, and stops all of them when you press `Ctrl+C`.
+
+Or run each process manually:
 
 ```bash
 ./.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload

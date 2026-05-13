@@ -10,16 +10,24 @@ from dotenv import load_dotenv
 
 
 def _load_dotenv_file() -> None:
-    """Load repository .env once so local runs work without shell `source`."""
-    project_root = Path(__file__).resolve().parents[2]
-    dotenv_path = project_root / ".env"
-    if dotenv_path.exists():
-        load_dotenv(dotenv_path=dotenv_path, override=False)
+    """Load profile-specific env files, then fall back to legacy .env."""
+    if os.getenv("PYTEST_CURRENT_TEST"):
         return
+
+    project_root = Path(__file__).resolve().parents[2]
+    environment = os.getenv("ENVIRONMENT", "development").strip().lower()
+    profile_name = ".env.production" if environment == "production" else ".env.local"
+
+    loaded = False
+    for dotenv_path in (project_root / profile_name, project_root / ".env"):
+        if dotenv_path.exists():
+            load_dotenv(dotenv_path=dotenv_path, override=False)
+            loaded = True
+
+    if loaded:
+        return
+
     load_dotenv(override=False)
-
-
-_load_dotenv_file()
 
 
 def _parse_int_env(name: str, default: int) -> int:
@@ -157,6 +165,8 @@ class Settings:
 
 @lru_cache
 def get_settings() -> Settings:
+    _load_dotenv_file()
+
     environment = _parse_str_env("ENVIRONMENT", "development").lower()
     tracking_database_url = (
         _parse_str_env("TRACKING_DATABASE_URL", "")
