@@ -855,6 +855,57 @@ def test_scheduler_run_once_failure_keeps_last_good_price() -> None:
     assert runs[0].status == "failed"
 
 
+def test_scheduler_failure_preserves_known_out_of_stock_availability() -> None:
+    repo = _build_repo()
+    now = datetime.now(tz=UTC)
+    item = replace(
+        _item(
+            item_id="trk_failure_preserves_oos",
+            url="https://www.amazon.com.tr/dp/B0D6YXHYCX",
+            now=now,
+            next_check_at=_iso(now - timedelta(minutes=1)),
+            last_amount="13702.00",
+        ),
+        availability="out_of_stock",
+        site_key="amazon",
+        adapter_key="amazon",
+        last_source="amazon:hidden-buybox-display:0",
+    )
+    repo.save_item(item)
+
+    scrape_result = PriceResult(
+        url=item.source_url,
+        success=False,
+        error="price_not_found",
+    )
+
+    scheduler = TrackingSchedulerService(
+        repository=repo,
+        scrape_runner=_FakeScrapeRunner({item.source_url: scrape_result}),
+        timeout_seconds=30,
+        claim_batch_size=50,
+        max_inflight=4,
+        lease_seconds=180,
+        jitter_percent=0,
+        lease_owner="scheduler-test",
+    )
+
+    outcome = scheduler.run_once()
+
+    assert outcome.success_count == 0
+    assert outcome.failure_count == 1
+
+    updated = repo.get_item(item.item_id)
+    assert updated is not None
+    assert updated.last_amount == "13702.00"
+    assert updated.availability == "out_of_stock"
+
+    snapshots = repo.list_snapshots(item.item_id, limit=5)
+    assert snapshots[0].success is False
+    assert snapshots[0].availability == "out_of_stock"
+    assert snapshots[0].error == "price_not_found"
+
+
 def test_scheduler_defers_when_monthly_credits_are_exhausted() -> None:
     repo = _build_repo()
     now = datetime.now(tz=UTC)
@@ -2207,6 +2258,67 @@ def test_scheduler_treats_confirmed_price_as_in_stock_when_stock_text_is_missing
     assert payload["notification_type"] == "stock_restocked"
     assert payload["current_availability"] == "in_stock"
     assert payload["current_amount"] == "99.00"
+
+
+def test_scheduler_does_not_restock_from_ambiguous_amazon_hidden_buybox_price() -> None:
+    repo = _build_repo()
+    now = datetime.now(tz=UTC)
+    due_time = _iso(now - timedelta(minutes=1))
+    item = replace(
+        _item(
+            item_id="trk_amazon_hidden_price_oos",
+            url="https://www.amazon.com.tr/dp/B0D6YXHYCX",
+            now=now,
+            next_check_at=due_time,
+            last_amount="13702.00",
+            target_amount=None,
+            notify_on_stock_change=True,
+        ),
+        availability="out_of_stock",
+        site_key="amazon",
+        adapter_key="amazon",
+        currency="TRY",
+    )
+    repo.save_item(item)
+
+    scrape_result = PriceResult(
+        url=item.source_url,
+        success=True,
+        amount="13702.00",
+        currency="TRY",
+        raw_text="13.702,00 TL",
+        source="amazon:hidden-buybox-display:0",
+        availability=None,
+        product_name="Novation Launchkey",
+        image_url="https://m.media-amazon.com/images/I/example.jpg",
+        site_key="amazon",
+        adapter_key="amazon",
+        signals=("embedded_state", "amazon_buybox", "currency:TRY"),
+    )
+    scheduler = TrackingSchedulerService(
+        repository=repo,
+        scrape_runner=_FakeScrapeRunner({item.source_url: scrape_result}),
+        timeout_seconds=30,
+        claim_batch_size=50,
+        max_inflight=4,
+        lease_seconds=180,
+        jitter_percent=0,
+        lease_owner="scheduler-test",
+    )
+
+    outcome = scheduler.run_once()
+    assert outcome.success_count == 1
+
+    updated = repo.get_item(item.item_id)
+    assert updated is not None
+    assert updated.availability == "out_of_stock"
+    assert updated.last_amount == "13702.00"
+
+    snapshots = repo.list_snapshots(item.item_id, limit=5)
+    assert snapshots[0].success is True
+    assert snapshots[0].amount is None
+    assert snapshots[0].availability == "out_of_stock"
+    assert repo.list_notification_events(item.item_id, limit=10) == []
 
 
 def test_scheduler_does_not_notify_when_item_is_paused_during_inflight_run() -> None:

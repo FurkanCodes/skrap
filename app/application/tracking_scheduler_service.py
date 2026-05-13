@@ -433,13 +433,23 @@ class TrackingSchedulerService:
             jitter_percent=self._jitter_percent,
             align_checks_to_interval=self._align_checks_to_interval,
         )
+        has_current_price = _parse_decimal(scrape_result.amount) is not None
         previous_availability = _normalize_availability(item.availability)
         scraped_availability = _normalize_availability(scrape_result.availability)
-        has_current_price = _parse_decimal(scrape_result.amount) is not None
-        current_availability = scraped_availability or (
-            "in_stock" if has_current_price else None
-        )
         was_not_in_stock = _is_not_in_stock(previous_availability)
+        is_ambiguous_restock_price = (
+            was_not_in_stock
+            and has_current_price
+            and _is_ambiguous_restock_price_source(scrape_result)
+        )
+        if scraped_availability:
+            current_availability = scraped_availability
+        elif has_current_price and not is_ambiguous_restock_price:
+            current_availability = "in_stock"
+        elif was_not_in_stock:
+            current_availability = previous_availability
+        else:
+            current_availability = None
         is_not_in_stock = _is_not_in_stock(current_availability)
         is_explicit_in_stock = current_availability == "in_stock"
         stock_transition = (not was_not_in_stock and is_not_in_stock) or (
@@ -569,7 +579,7 @@ class TrackingSchedulerService:
         )
         updated_item = replace(
             item,
-            availability=current_availability or _UNKNOWN_AVAILABILITY,
+            availability=current_availability or item.availability or _UNKNOWN_AVAILABILITY,
             updated_at=finished_at,
             next_check_at=next_check_at,
             lease_owner=None,
@@ -587,7 +597,7 @@ class TrackingSchedulerService:
             raw_text=scrape_result.raw_text,
             source=scrape_result.source,
             error=error,
-            availability=current_availability or _UNKNOWN_AVAILABILITY,
+            availability=current_availability or item.availability or _UNKNOWN_AVAILABILITY,
             scheduled_for=context.scheduled_for,
         )
         self._repository.save_item_and_snapshot(updated_item, snapshot)
@@ -1510,3 +1520,15 @@ def _normalize_availability(value: str | None) -> str | None:
 
 def _is_not_in_stock(availability: str | None) -> bool:
     return _normalize_availability(availability) in _NOT_IN_STOCK_AVAILABILITIES
+
+
+def _is_ambiguous_restock_price_source(scrape_result: PriceResult) -> bool:
+    if _normalize_site_key(scrape_result.site_key) != "amazon":
+        return False
+    source = (scrape_result.source or "").strip().lower()
+    return (
+        source.startswith("amazon:hidden-buybox-")
+        or source.startswith("amazon:twister-")
+        or "amazon_twister" in scrape_result.signals
+        or "amazon_buybox" in scrape_result.signals
+    )
