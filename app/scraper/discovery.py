@@ -3,11 +3,13 @@ from __future__ import annotations
 """Spider-based URL discovery for product crawling."""
 
 from dataclasses import dataclass
+import logging
+import re
 from typing import Any
-from urllib.parse import parse_qsl, urlparse
+from urllib.parse import urlparse, urlunparse
 
 from scrapling.fetchers import AsyncStealthySession, FetcherSession
-from scrapling.spiders import Request, Response, SessionManager, Spider
+from scrapling.spiders import LinkExtractor, Request, Response, SessionManager, SitemapSpider, Spider
 
 from .parsing import strip_tracking_query_params
 from .proxies import get_proxy_retry_count, get_scrape_proxy_rotator
@@ -77,6 +79,21 @@ DENY_PATH_TOKENS = {
     "/news",
 }
 
+_DENY_LINK_PATTERN = "|".join(re.escape(token) for token in sorted(DENY_PATH_TOKENS))
+_PRODUCT_LINK_PATTERN = "|".join(
+    (
+        *(re.escape(token) for token in sorted(PRODUCT_PATH_TOKENS)),
+        rf"[?&](?:{'|'.join(re.escape(key) for key in sorted(PRODUCT_QUERY_KEYS))})=",
+    )
+)
+_PAGINATION_LINK_PATTERN = "|".join(
+    (
+        *(re.escape(token) for token in sorted(PAGINATION_PATH_TOKENS)),
+        r"[?&]page=",
+    )
+)
+_logger = logging.getLogger("scraper_api.discovery")
+
 
 @dataclass(frozen=True)
 class DiscoveryStats:
@@ -92,6 +109,149 @@ class DiscoveryStats:
 class DiscoveryRunResult:
     discovered_urls: list[str]
     stats: DiscoveryStats
+
+
+def _derive_allowed_domains(start_urls: list[str]) -> set[str]:
+    domains: set[str] = set()
+    for url in start_urls:
+        host = urlparse(url).netloc.lower()
+        if host.startswith("www."):
+            host = host[4:]
+        if host:
+            domains.add(host)
+    return domains
+
+
+def _is_http_url(url: str) -> bool:
+    scheme = urlparse(url).scheme.lower()
+    return scheme in {"http", "https"}
+
+
+def _is_same_domain(url: str, allowed_domains: set[str]) -> bool:
+    host = urlparse(url).netloc.lower()
+    if host.startswith("www."):
+        host = host[4:]
+    return any(host == domain or host.endswith(f".{domain}") for domain in allowed_domains)
+
+
+def _sitemap_seed_urls(start_urls: list[str]) -> list[str]:
+    seed_urls: list[str] = []
+    seen_origins: set[tuple[str, str]] = set()
+    for raw_url in start_urls:
+        parsed = urlparse(raw_url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            continue
+
+        normalized_path = parsed.path.lower()
+        if normalized_path.endswith("/robots.txt") or "sitemap" in normalized_path:
+            seed_urls.append(urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", parsed.query, "")))
+
+        origin = (parsed.scheme, parsed.netloc)
+        if origin in seen_origins:
+            continue
+        seen_origins.add(origin)
+        seed_urls.append(urlunparse((parsed.scheme, parsed.netloc, "/robots.txt", "", "", "")))
+        seed_urls.append(urlunparse((parsed.scheme, parsed.netloc, "/sitemap.xml", "", "", "")))
+
+    return _dedupe_preserving_order(seed_urls)
+
+
+class PriceSitemapDiscoverySpider(SitemapSpider):
+    """Sitemap/robots discovery that emits product-like URLs without fetching them."""
+
+    name = "price_sitemap_discovery"
+    concurrent_requests = 4
+    concurrent_requests_per_domain = 2
+    download_delay = 0.0
+
+    def __init__(
+        self,
+        *,
+        start_urls: list[str],
+        max_pages: int,
+        timeout_seconds: int,
+    ) -> None:
+        self.start_urls = list(dict.fromkeys(start_urls))
+        self.sitemap_urls = _sitemap_seed_urls(self.start_urls)
+        self.allowed_domains = _derive_allowed_domains(self.start_urls)
+        self._max_pages = max_pages
+        self._max_sitemap_requests = max(10, max_pages)
+        self._timeout_seconds = timeout_seconds
+        self._visited_sitemaps = 0
+        self._seen_discovered: set[str] = set()
+        self._product_links = LinkExtractor(
+            allow=_PRODUCT_LINK_PATTERN,
+            allow_domains=self.allowed_domains,
+            deny=_DENY_LINK_PATTERN,
+            process=self._canonicalize,
+        )
+        self.sitemap_follow = LinkExtractor(
+            allow_domains=self.allowed_domains,
+            process=self._canonicalize,
+        )
+        super().__init__()
+
+    def configure_sessions(self, manager: SessionManager) -> None:
+        manager.add(
+            "http",
+            FetcherSession(timeout=self._timeout_seconds, retries=1, retry_delay=1),
+        )
+
+    async def start_requests(self):
+        for url in self.sitemap_urls:
+            yield Request(
+                url,
+                sid="http",
+                callback=self._parse_sitemap,
+            )
+
+    def _canonicalize(self, url: str) -> str:
+        return strip_tracking_query_params(url)
+
+    def _should_follow_sitemap(self, url: str) -> bool:
+        canonical = self._canonicalize(url)
+        return (
+            self._visited_sitemaps < self._max_sitemap_requests
+            and _is_http_url(canonical)
+            and _is_same_domain(canonical, self.allowed_domains)
+            and (self.sitemap_follow is None or self.sitemap_follow.matches(canonical))
+        )
+
+    def _should_discover_url(self, url: str) -> bool:
+        canonical = self._canonicalize(url)
+        return (
+            len(self._seen_discovered) < self._max_pages
+            and _is_http_url(canonical)
+            and self._product_links.matches(canonical)
+            and canonical not in self._seen_discovered
+        )
+
+    async def _parse_sitemap(self, response: Response):
+        if self._visited_sitemaps >= self._max_sitemap_requests:
+            return
+        self._visited_sitemaps += 1
+
+        if urlparse(str(response.url)).path.endswith("/robots.txt"):
+            for sitemap_url in self._robots_body(response):
+                if self._should_follow_sitemap(sitemap_url):
+                    yield response.follow(sitemap_url, callback=self._parse_sitemap, sid="http")
+            return
+
+        content_type = response.headers.get("content-type") if response.headers else None
+        result = self._sm_body(response.body, content_type=content_type)
+
+        for child_url in result.sitemaps:
+            if len(self._seen_discovered) >= self._max_pages:
+                return
+            if self._should_follow_sitemap(child_url):
+                yield response.follow(child_url, callback=self._parse_sitemap, sid="http")
+
+        for url in result.urls:
+            if not self._should_discover_url(url):
+                continue
+            canonical = self._canonicalize(url)
+            self._seen_discovered.add(canonical)
+            yield {"url": canonical}
 
 
 class PriceDiscoverySpider(Spider):
@@ -120,18 +280,28 @@ class PriceDiscoverySpider(Spider):
         self._discovered_urls: list[str] = []
         self._seen_discovered: set[str] = set()
         self._seed_canonical_urls = {self._canonicalize(url) for url in self.start_urls}
+        self._same_domain_links = LinkExtractor(
+            allow_domains=self.allowed_domains,
+            deny=_DENY_LINK_PATTERN,
+            process=self._canonicalize,
+        )
+        self._product_links = LinkExtractor(
+            allow=_PRODUCT_LINK_PATTERN,
+            allow_domains=self.allowed_domains,
+            deny=_DENY_LINK_PATTERN,
+            process=self._canonicalize,
+        )
+        self._pagination_links = LinkExtractor(
+            allow=_PAGINATION_LINK_PATTERN,
+            allow_domains=self.allowed_domains,
+            deny=_DENY_LINK_PATTERN,
+            process=self._canonicalize,
+        )
         super().__init__()
 
     @staticmethod
     def _derive_allowed_domains(start_urls: list[str]) -> set[str]:
-        domains: set[str] = set()
-        for url in start_urls:
-            host = urlparse(url).netloc.lower()
-            if host.startswith("www."):
-                host = host[4:]
-            if host:
-                domains.add(host)
-        return domains
+        return _derive_allowed_domains(start_urls)
 
     def configure_sessions(self, manager: SessionManager) -> None:
         # Timeout units differ across fetchers, so set them per session type.
@@ -184,14 +354,10 @@ class PriceDiscoverySpider(Spider):
         return request
 
     def _is_http_url(self, url: str) -> bool:
-        scheme = urlparse(url).scheme.lower()
-        return scheme in {"http", "https"}
+        return _is_http_url(url)
 
     def _is_same_domain(self, url: str) -> bool:
-        host = urlparse(url).netloc.lower()
-        if host.startswith("www."):
-            host = host[4:]
-        return any(host == domain or host.endswith(f".{domain}") for domain in self.allowed_domains)
+        return _is_same_domain(url, self.allowed_domains)
 
     def _canonicalize(self, url: str) -> str:
         return strip_tracking_query_params(url)
@@ -201,31 +367,57 @@ class PriceDiscoverySpider(Spider):
         return any(token in path for token in DENY_PATH_TOKENS)
 
     def _looks_like_pagination_url(self, url: str, text: str, rel: str, class_id: str) -> bool:
-        parsed = urlparse(url)
-        path = parsed.path.lower()
-        query = dict(parse_qsl(parsed.query, keep_blank_values=True))
         if rel in {"next", "prev"}:
             return True
         if any(token in text for token in PAGINATION_TEXT_TOKENS):
             return True
         if any(token in class_id for token in PAGINATION_ATTR_TOKENS):
             return True
-        if any(token in path for token in PAGINATION_PATH_TOKENS):
-            return True
-        return "page" in query
+        return self._pagination_links.matches(url)
 
     def _looks_like_product_url(self, url: str) -> bool:
-        if self._is_deny_path(url):
-            return False
-        parsed = urlparse(url)
-        path = parsed.path.lower()
-        if any(token in path for token in PRODUCT_PATH_TOKENS):
-            return True
-        query = dict(parse_qsl(parsed.query, keep_blank_values=True))
-        return any(key in PRODUCT_QUERY_KEYS for key in query)
+        return self._product_links.matches(url)
 
     def _should_expand(self, depth: int) -> bool:
         return depth < self._max_depth and self._visited_pages < self._max_pages
+
+    def _candidate_links(self, response: Response) -> list[tuple[str, bool, bool]]:
+        """Return same-domain links with product/pagination classification."""
+        candidates: dict[str, dict[str, bool]] = {}
+        for canonical in self._same_domain_links.extract(response):
+            candidates[canonical] = {
+                "is_pagination": self._looks_like_pagination_url(canonical, text="", rel="", class_id=""),
+                "is_product": self._looks_like_product_url(canonical),
+            }
+
+        for element in response.css("a"):
+            href = str(element.attrib.get("href", "")).strip()
+            if not href:
+                continue
+            canonical = self._canonicalize(response.urljoin(href))
+            if not self._same_domain_links.matches(canonical):
+                continue
+
+            text = str(element.get_all_text(separator=" ", strip=True)).lower()
+            rel = str(element.attrib.get("rel", "")).lower()
+            class_id = f"{element.attrib.get('class', '')} {element.attrib.get('id', '')}".lower()
+            if not self._looks_like_pagination_url(canonical, text=text, rel=rel, class_id=class_id):
+                continue
+
+            flags = candidates.setdefault(
+                canonical,
+                {
+                    "is_pagination": False,
+                    "is_product": self._looks_like_product_url(canonical),
+                },
+            )
+            flags["is_pagination"] = True
+
+        return [
+            (url, flags["is_pagination"], flags["is_product"])
+            for url, flags in candidates.items()
+            if flags["is_pagination"] or flags["is_product"]
+        ]
 
     async def parse(self, response: Response):
         if self._visited_pages >= self._max_pages:
@@ -246,32 +438,8 @@ class PriceDiscoverySpider(Spider):
         if not self._should_expand(current_depth):
             return
 
-        seen_links_on_page: set[str] = set()
         next_depth = current_depth + 1
-        for element in response.css("a"):
-            href = str(element.attrib.get("href", "")).strip()
-            if not href:
-                continue
-            absolute = response.urljoin(href)
-            canonical = self._canonicalize(absolute)
-            if not canonical:
-                continue
-            if canonical in seen_links_on_page:
-                continue
-            seen_links_on_page.add(canonical)
-            if not self._is_http_url(canonical) or not self._is_same_domain(canonical):
-                continue
-            if self._is_deny_path(canonical):
-                continue
-
-            text = str(element.get_all_text(separator=" ", strip=True)).lower()
-            rel = str(element.attrib.get("rel", "")).lower()
-            class_id = f"{element.attrib.get('class', '')} {element.attrib.get('id', '')}".lower()
-            is_pagination = self._looks_like_pagination_url(canonical, text=text, rel=rel, class_id=class_id)
-            is_product = self._looks_like_product_url(canonical)
-            if not (is_pagination or is_product):
-                continue
-
+        for canonical, is_pagination, _is_product in self._candidate_links(response):
             yield response.follow(
                 canonical,
                 callback=self.parse,
@@ -325,6 +493,35 @@ def discover_urls(
     timeout_seconds: int,
 ) -> DiscoveryRunResult:
     """Run discovery spider synchronously and return discovered URLs + stats."""
+    sitemap_spider = PriceSitemapDiscoverySpider(
+        start_urls=start_urls,
+        max_pages=max_pages,
+        timeout_seconds=timeout_seconds,
+    )
+    try:
+        sitemap_result = sitemap_spider.start()
+    except Exception as exc:  # pragma: no cover - defensive guard around network spider runtime
+        _logger.info("sitemap_discovery_failed seed_count=%s error=%s", len(start_urls), exc)
+    else:
+        sitemap_discovered = [
+            str(item.get("url", "")).strip()
+            for item in sitemap_result.items
+            if isinstance(item, dict) and str(item.get("url", "")).strip()
+        ]
+        sitemap_urls = _dedupe_preserving_order(sitemap_discovered)[:max_pages]
+        if sitemap_urls:
+            _logger.info(
+                "sitemap_discovery_complete seed_count=%s discovered_url_count=%s",
+                len(start_urls),
+                len(sitemap_urls),
+            )
+            return DiscoveryRunResult(
+                discovered_urls=sitemap_urls,
+                stats=_to_discovery_stats(sitemap_result.stats),
+            )
+
+        _logger.info("sitemap_discovery_empty seed_count=%s fallback=html", len(start_urls))
+
     spider = PriceDiscoverySpider(
         start_urls=start_urls,
         max_pages=max_pages,
