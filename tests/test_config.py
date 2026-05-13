@@ -78,7 +78,7 @@ def test_scrape_proxy_urls_are_parsed(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_scrapling_dependency_pin_is_current() -> None:
     requirements = Path("requirements.txt").read_text(encoding="utf-8")
-    assert "scrapling[fetchers]==0.4.7" in requirements
+    assert "scrapling[fetchers]==0.4.8" in requirements
 
 
 def test_scrape_proxy_list_urls_are_parsed(monkeypatch: pytest.MonkeyPatch) -> None:
