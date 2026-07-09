@@ -27,10 +27,12 @@ from app.core.url_security import (
     validate_server_fetch_url,
 )
 from app.infrastructure.postgres_tracking_repository import PostgresTrackingRepository
+from app.infrastructure.redis_notification_dispatch_queue import RedisNotificationDispatchQueue
 from app.infrastructure.redis_rate_limiter import (
     RateLimitUnavailable,
     RedisFixedWindowRateLimiter,
 )
+from app.infrastructure.redis_tracking_due_index import RedisTrackingDueIndex
 from app.infrastructure.scraper_gateway import ScraplingGateway
 
 _http_bearer = HTTPBearer(auto_error=False)
@@ -218,6 +220,26 @@ def _get_tracking_repository_cached(
 
 
 @lru_cache
+def _get_notification_queue_cached(
+    redis_url: str,
+    stream_key: str,
+    consumer_group: str,
+    max_stream_length: int,
+) -> RedisNotificationDispatchQueue:
+    return RedisNotificationDispatchQueue(
+        redis_url=redis_url,
+        stream_key=stream_key,
+        consumer_group=consumer_group,
+        max_stream_length=max_stream_length,
+    )
+
+
+@lru_cache
+def _get_due_index_cached(redis_url: str, zset_key: str) -> RedisTrackingDueIndex:
+    return RedisTrackingDueIndex(redis_url=redis_url, zset_key=zset_key)
+
+
+@lru_cache
 def _get_tracking_service_cached(
     scrape_concurrency: int,
     database_url: str,
@@ -227,6 +249,12 @@ def _get_tracking_service_cached(
     min_interval_minutes: int,
     max_interval_minutes: int,
     snapshot_default_limit: int,
+    notification_queue_redis_url: str,
+    notification_queue_stream_key: str,
+    notification_queue_consumer_group: str,
+    notification_queue_max_stream_length: int,
+    due_index_redis_url: str,
+    due_index_zset_key: str,
 ) -> TrackingService:
     repository = _get_tracking_repository_cached(
         database_url=database_url,
@@ -235,6 +263,16 @@ def _get_tracking_service_cached(
     )
 
     scrape_service = _get_scrape_service_cached(scrape_concurrency)
+    notification_queue = _get_notification_queue_cached(
+        redis_url=notification_queue_redis_url,
+        stream_key=notification_queue_stream_key,
+        consumer_group=notification_queue_consumer_group,
+        max_stream_length=notification_queue_max_stream_length,
+    )
+    due_index = _get_due_index_cached(
+        redis_url=due_index_redis_url,
+        zset_key=due_index_zset_key,
+    )
     service = TrackingService(
         repository=repository,
         scrape_service=scrape_service,
@@ -242,6 +280,8 @@ def _get_tracking_service_cached(
         min_interval_minutes=min_interval_minutes,
         max_interval_minutes=max_interval_minutes,
         default_snapshot_limit=snapshot_default_limit,
+        notification_queue=notification_queue,
+        due_index=due_index,
     )
     return _maybe_profile(service, component="tracking_service")
 
@@ -281,6 +321,12 @@ def get_tracking_service(
         min_interval_minutes=settings.tracking_interval_min_minutes,
         max_interval_minutes=settings.tracking_interval_max_minutes,
         snapshot_default_limit=settings.tracking_snapshot_default_limit,
+        notification_queue_redis_url=settings.scheduler_queue_redis_url,
+        notification_queue_stream_key=settings.notifier_queue_stream_key,
+        notification_queue_consumer_group=settings.notifier_queue_consumer_group,
+        notification_queue_max_stream_length=settings.notifier_queue_max_stream_length,
+        due_index_redis_url=settings.scheduler_queue_redis_url,
+        due_index_zset_key=settings.scheduler_due_zset_key,
     )
 
 
@@ -485,6 +531,12 @@ def warm_application_dependencies(settings: Settings) -> None:
             min_interval_minutes=settings.tracking_interval_min_minutes,
             max_interval_minutes=settings.tracking_interval_max_minutes,
             snapshot_default_limit=settings.tracking_snapshot_default_limit,
+            notification_queue_redis_url=settings.scheduler_queue_redis_url,
+            notification_queue_stream_key=settings.notifier_queue_stream_key,
+            notification_queue_consumer_group=settings.notifier_queue_consumer_group,
+            notification_queue_max_stream_length=settings.notifier_queue_max_stream_length,
+            due_index_redis_url=settings.scheduler_queue_redis_url,
+            due_index_zset_key=settings.scheduler_due_zset_key,
         ),
     )
     _soft_warm(

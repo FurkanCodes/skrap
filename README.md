@@ -708,13 +708,19 @@ Execution semantics:
 ## Scheduler Dispatcher (`python -m app.jobs.scheduler_dispatcher`)
 
 Responsibilities:
-- claim due active items with lease,
+- wake on Redis ZSET `tracking:due` (score = `next_check_at` epoch),
+- claim matching due active items by id with lease (`SKIP LOCKED`),
 - enqueue dispatch jobs to Redis stream,
+- fall back to Postgres due-claim about every `SCHEDULER_RECONCILE_POLL_SECONDS` for orphans,
 - release claimed leases if queue write fails.
+
+Idle cycles do not INFO-log `claimed=0`; use DEBUG if you need empty-cycle visibility.
+
+Manual verification checklist: [docs/manual-test-redis-due-index.md](docs/manual-test-redis-due-index.md).
 
 Execution semantics:
 - at-least-once enqueue intent,
-- worker processing is decoupled from dispatcher polling cadence.
+- worker processing is decoupled from dispatcher wake cadence.
 
 ## Scheduler Worker (`python -m app.jobs.scheduler_worker`)
 
@@ -735,10 +741,16 @@ Recovery notes:
 ## Notifier (`python -m app.jobs.notifier`)
 
 Responsibilities:
-- claim due notification outbox rows,
+- wake on Redis stream `tracking:notifications` for ASAP first delivery,
+- claim matching `outbound_notifications` rows by id (lease + `SKIP LOCKED`),
+- fall back to Postgres due-claim about every `NOTIFIER_FALLBACK_POLL_SECONDS` for orphans/retries,
 - send through sender adapter with bounded parallelism,
-- finalize as `sent`, retry (`failed` + backoff), or `dead`.
+- finalize as `sent`, retry (`failed` + backoff), or `dead`,
 - apply Telegram send pacing and honor Telegram `retry_after` backpressure hints.
+
+Idle cycles do not INFO-log `claimed=0`; use DEBUG if you need empty-cycle visibility.
+
+Manual verification checklist: [docs/manual-test-redis-notifier.md](docs/manual-test-redis-notifier.md).
 
 Current senders:
 - `TelegramNotificationSender` for connected Telegram chats.
@@ -800,7 +812,7 @@ High-level relationships:
 
 | Variable | Default | Description |
 |---|---:|---|
-| `SCHEDULER_POLL_SECONDS` | `10` | scheduler loop period |
+| `SCHEDULER_POLL_SECONDS` | `10` | legacy/compat setting (due-index dispatcher no longer sleeps on this) |
 | `SCHEDULER_CLAIM_BATCH_SIZE` | `250` | due items claimed per cycle |
 | `SCHEDULER_MAX_INFLIGHT` | `64` | max concurrent scrape checks |
 | `SCHEDULER_LEASE_SECONDS` | `180` | claim lease TTL |
@@ -808,10 +820,13 @@ High-level relationships:
 | `SCHEDULER_ALIGN_CHECKS_TO_INTERVAL` | `false` | align same-interval checks to shared UTC boundaries |
 | `SCHEDULER_ALERT_COOLDOWN_MINUTES` | `60` | min gap between repeated alerts per rule |
 | `SCHEDULER_LEASE_OWNER` | auto-generated | optional explicit lease owner id |
-| `SCHEDULER_QUEUE_REDIS_URL` | `redis://127.0.0.1:6379/0` | Redis URL used by dispatcher/worker queue |
+| `SCHEDULER_QUEUE_REDIS_URL` | `redis://127.0.0.1:6379/0` | Redis URL used by dispatcher/worker queue + due index |
 | `SCHEDULER_QUEUE_STREAM_KEY` | `tracking:scheduler:jobs` | Redis stream key for scheduler dispatch jobs |
 | `SCHEDULER_QUEUE_CONSUMER_GROUP` | `tracking-scheduler-workers` | Redis consumer group name |
 | `SCHEDULER_QUEUE_MAX_STREAM_LENGTH` | `1000000` | approximate max stream length trimming target |
+| `SCHEDULER_DUE_ZSET_KEY` | `tracking:due` | Redis ZSET wake index for due items |
+| `SCHEDULER_DUE_BLOCK_SECONDS` | `5` | max sleep while waiting for next due score |
+| `SCHEDULER_RECONCILE_POLL_SECONDS` | `60` | Postgres orphan/retry claim interval |
 | `SCHEDULER_WORKER_CLAIM_BATCH_SIZE` | `64` | max dispatch jobs claimed per worker cycle |
 | `SCHEDULER_WORKER_BLOCK_SECONDS` | `5` | blocking wait for new stream messages |
 | `SCHEDULER_WORKER_PENDING_IDLE_SECONDS` | `60` | min idle seconds before auto-claiming pending jobs |
@@ -820,7 +835,7 @@ High-level relationships:
 
 | Variable | Default | Description |
 |---|---:|---|
-| `NOTIFIER_POLL_SECONDS` | `5` | notifier loop period |
+| `NOTIFIER_POLL_SECONDS` | `5` | legacy/compat setting (stream-first notifier no longer sleeps on this) |
 | `NOTIFIER_CLAIM_BATCH_SIZE` | `100` | notifications claimed per cycle |
 | `NOTIFIER_LEASE_SECONDS` | `120` | notification lease TTL |
 | `NOTIFIER_MAX_ATTEMPTS` | `5` | max delivery attempts |
@@ -828,6 +843,12 @@ High-level relationships:
 | `NOTIFIER_BACKOFF_MAX_SECONDS` | `3600` | max retry delay |
 | `NOTIFIER_RETRY_JITTER_PERCENT` | `10` | retry jitter |
 | `NOTIFIER_MAX_INFLIGHT` | `16` | max parallel sends per notifier cycle |
+| `NOTIFIER_QUEUE_STREAM_KEY` | `tracking:notifications` | Redis wake stream |
+| `NOTIFIER_QUEUE_CONSUMER_GROUP` | `tracking-notifier-workers` | Redis consumer group |
+| `NOTIFIER_QUEUE_MAX_STREAM_LENGTH` | `1000000` | approximate stream maxlen |
+| `NOTIFIER_WORKER_BLOCK_SECONDS` | `5` | XREADGROUP block when idle |
+| `NOTIFIER_WORKER_PENDING_IDLE_SECONDS` | `60` | XAUTOCLAIM min idle |
+| `NOTIFIER_FALLBACK_POLL_SECONDS` | `60` | Postgres orphan/retry claim interval |
 | `TELEGRAM_SENDER_MIN_INTERVAL_MS` | `50` | per-worker minimum delay between Telegram API sends |
 | `NOTIFIER_LEASE_OWNER` | auto-generated | optional explicit lease owner id |
 
@@ -835,8 +856,8 @@ High-level relationships:
 
 Use simple process-level sharding for scale:
 - Run multiple notifier processes (`python -m app.jobs.notifier`) on different hosts/containers.
-- Set a distinct `NOTIFIER_LEASE_OWNER` per process for clearer logs/forensics.
-- Keep one shared Postgres DB; `claim_due_notification_events` + `SKIP LOCKED` naturally distributes work.
+- Set a distinct `NOTIFIER_LEASE_OWNER` / `NOTIFIER_WORKER_CONSUMER_NAME` per process for clearer logs/forensics.
+- Keep one shared Redis stream consumer group + Postgres DB; leases + `SKIP LOCKED` distribute work.
 
 ## Operational Notes and Edge Cases
 

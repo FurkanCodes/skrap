@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 
@@ -83,6 +84,34 @@ class _RepositoryStub:
             claimed.append(updated)
         return claimed
 
+    def claim_due_items_by_ids(
+        self,
+        *,
+        item_ids: list[str],
+        now: str,
+        lease_owner: str,
+        lease_until: str,
+    ) -> list[TrackedItem]:
+        now_dt = datetime.fromisoformat(now.replace("Z", "+00:00"))
+        claimed: list[TrackedItem] = []
+        for item_id in item_ids:
+            item = self.items_by_id.get(item_id)
+            if item is None or item.status != "active" or item.next_check_at is None:
+                continue
+            scheduled_dt = datetime.fromisoformat(item.next_check_at.replace("Z", "+00:00"))
+            if scheduled_dt > now_dt:
+                continue
+            updated = replace(
+                item,
+                lease_owner=lease_owner,
+                lease_until=lease_until,
+                last_check_started_at=now,
+                updated_at=now,
+            )
+            self.items_by_id[item.item_id] = updated
+            claimed.append(updated)
+        return claimed
+
     def get_item(self, item_id: str) -> TrackedItem | None:
         return self.items_by_id.get(item_id)
 
@@ -101,6 +130,32 @@ class _QueueStub:
             raise RuntimeError("queue unavailable")
         self.jobs.extend(jobs)
         return len(jobs)
+
+
+@dataclass
+class _DueIndexStub:
+    due_ids: list[str] = field(default_factory=list)
+    removed: list[str] = field(default_factory=list)
+    next_due: float | None = None
+
+    def upsert(self, *, item_id: str, due_at_epoch: float) -> None:
+        del due_at_epoch
+        if item_id not in self.due_ids:
+            self.due_ids.append(item_id)
+
+    def remove(self, item_ids: list[str]) -> int:
+        self.removed.extend(item_ids)
+        before = len(self.due_ids)
+        self.due_ids = [item_id for item_id in self.due_ids if item_id not in set(item_ids)]
+        return before - len(self.due_ids)
+
+    def peek_due(self, *, now_epoch: float, limit: int) -> list[str]:
+        del now_epoch
+        return self.due_ids[:limit]
+
+    def next_due_epoch(self, *, after_epoch: float) -> float | None:
+        del after_epoch
+        return self.next_due
 
 
 def test_dispatcher_enqueues_claimed_items() -> None:
@@ -160,3 +215,94 @@ def test_dispatcher_releases_claims_when_queue_enqueue_fails() -> None:
     assert result.failure_count >= 1
     assert repository.items_by_id["trk_due_1"].lease_owner is None
     assert repository.items_by_id["trk_due_1"].lease_until is None
+
+
+def test_dispatcher_uses_due_index_path_and_removes_claimed_ids() -> None:
+    now = datetime.now(tz=UTC)
+    due = _iso(now - timedelta(minutes=1))
+    repository = _RepositoryStub(
+        items_by_id={
+            "trk_due_1": _item(item_id="trk_due_1", now=now, next_check_at=due),
+        }
+    )
+    queue = _QueueStub()
+    due_index = _DueIndexStub(due_ids=["trk_due_1"])
+    service = TrackingSchedulerDispatcherService(
+        repository=repository,
+        queue=queue,
+        claim_batch_size=10,
+        lease_seconds=120,
+        lease_owner="scheduler-dispatcher-test",
+        due_index=due_index,
+        reconcile_poll_seconds=60,
+    )
+
+    result = service.run_once()
+
+    assert result.source == "due_index"
+    assert result.claimed_count == 1
+    assert result.enqueued_count == 1
+    assert "trk_due_1" in due_index.removed
+    assert queue.jobs[0].item_id == "trk_due_1"
+
+
+def test_dispatcher_falls_back_when_due_index_empty() -> None:
+    now = datetime.now(tz=UTC)
+    due = _iso(now - timedelta(minutes=1))
+    repository = _RepositoryStub(
+        items_by_id={
+            "trk_due_1": _item(item_id="trk_due_1", now=now, next_check_at=due),
+        }
+    )
+    queue = _QueueStub()
+    due_index = _DueIndexStub(due_ids=[])
+    service = TrackingSchedulerDispatcherService(
+        repository=repository,
+        queue=queue,
+        claim_batch_size=10,
+        lease_seconds=120,
+        lease_owner="scheduler-dispatcher-test",
+        due_index=due_index,
+        reconcile_poll_seconds=1,
+    )
+    service._last_reconcile_at = 0.0
+
+    result = service.run_once()
+
+    assert result.source == "fallback"
+    assert result.claimed_count == 1
+    assert result.enqueued_count == 1
+
+
+def test_dispatcher_idles_without_fallback_when_recently_reconciled(
+    monkeypatch,
+) -> None:
+    now = datetime.now(tz=UTC)
+    due = _iso(now - timedelta(minutes=1))
+    repository = _RepositoryStub(
+        items_by_id={
+            "trk_due_1": _item(item_id="trk_due_1", now=now, next_check_at=due),
+        }
+    )
+    queue = _QueueStub()
+    due_index = _DueIndexStub(due_ids=[], next_due=None)
+    service = TrackingSchedulerDispatcherService(
+        repository=repository,
+        queue=queue,
+        claim_batch_size=10,
+        lease_seconds=120,
+        lease_owner="scheduler-dispatcher-test",
+        due_index=due_index,
+        due_block_seconds=1,
+        reconcile_poll_seconds=60,
+    )
+    service._last_reconcile_at = time.monotonic()
+    slept: list[float] = []
+    monkeypatch.setattr(time, "sleep", lambda seconds: slept.append(seconds))
+
+    result = service.run_once()
+
+    assert result.source == "idle"
+    assert result.claimed_count == 0
+    assert queue.jobs == []
+    assert slept == [1]

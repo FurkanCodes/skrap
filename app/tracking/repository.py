@@ -98,6 +98,17 @@ class TrackingRepository(Protocol):
     ) -> list[NotificationEvent]:
         ...
 
+    def claim_notification_events_by_ids(
+        self,
+        *,
+        notification_ids: list[str],
+        now: str,
+        lease_owner: str,
+        lease_until: str,
+    ) -> list[NotificationEvent]:
+        """Lease specific outbox rows by id when woken by the notification queue."""
+        ...
+
     def finalize_notification_event(
         self,
         *,
@@ -127,6 +138,17 @@ class TrackingRepository(Protocol):
         lease_until: str,
         limit: int,
     ) -> list[TrackedItem]:
+        ...
+
+    def claim_due_items_by_ids(
+        self,
+        *,
+        item_ids: list[str],
+        now: str,
+        lease_owner: str,
+        lease_until: str,
+    ) -> list[TrackedItem]:
+        """Lease specific due active items woken by the due index."""
         ...
 
     def start_check_run(

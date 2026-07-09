@@ -134,6 +134,9 @@ class Settings:
     scheduler_worker_claim_batch_size: int
     scheduler_worker_block_seconds: int
     scheduler_worker_pending_idle_seconds: int
+    scheduler_due_zset_key: str
+    scheduler_due_block_seconds: int
+    scheduler_reconcile_poll_seconds: int
     notifier_poll_seconds: int
     notifier_claim_batch_size: int
     notifier_lease_seconds: int
@@ -142,6 +145,12 @@ class Settings:
     notifier_backoff_max_seconds: int
     notifier_retry_jitter_percent: int
     notifier_max_inflight: int
+    notifier_queue_stream_key: str
+    notifier_queue_consumer_group: str
+    notifier_queue_max_stream_length: int
+    notifier_worker_block_seconds: int
+    notifier_worker_pending_idle_seconds: int
+    notifier_fallback_poll_seconds: int
     telegram_sender_min_interval_ms: int
     telegram_bot_token: str
     telegram_bot_username: str
@@ -275,6 +284,16 @@ def get_settings() -> Settings:
         scheduler_worker_pending_idle_seconds=_parse_int_env(
             "SCHEDULER_WORKER_PENDING_IDLE_SECONDS", 60
         ),
+        scheduler_due_zset_key=_parse_str_env(
+            "SCHEDULER_DUE_ZSET_KEY",
+            "tracking:due",
+        ),
+        scheduler_due_block_seconds=_parse_int_env(
+            "SCHEDULER_DUE_BLOCK_SECONDS", 5
+        ),
+        scheduler_reconcile_poll_seconds=_parse_int_env(
+            "SCHEDULER_RECONCILE_POLL_SECONDS", 60
+        ),
         notifier_poll_seconds=_parse_int_env("NOTIFIER_POLL_SECONDS", 5),
         notifier_claim_batch_size=_parse_int_env("NOTIFIER_CLAIM_BATCH_SIZE", 100),
         notifier_lease_seconds=_parse_int_env("NOTIFIER_LEASE_SECONDS", 120),
@@ -283,6 +302,26 @@ def get_settings() -> Settings:
         notifier_backoff_max_seconds=_parse_int_env("NOTIFIER_BACKOFF_MAX_SECONDS", 3600),
         notifier_retry_jitter_percent=_parse_int_env("NOTIFIER_RETRY_JITTER_PERCENT", 10),
         notifier_max_inflight=_parse_int_env("NOTIFIER_MAX_INFLIGHT", 16),
+        notifier_queue_stream_key=_parse_str_env(
+            "NOTIFIER_QUEUE_STREAM_KEY",
+            "tracking:notifications",
+        ),
+        notifier_queue_consumer_group=_parse_str_env(
+            "NOTIFIER_QUEUE_CONSUMER_GROUP",
+            "tracking-notifier-workers",
+        ),
+        notifier_queue_max_stream_length=_parse_int_env(
+            "NOTIFIER_QUEUE_MAX_STREAM_LENGTH", 1_000_000
+        ),
+        notifier_worker_block_seconds=_parse_int_env(
+            "NOTIFIER_WORKER_BLOCK_SECONDS", 5
+        ),
+        notifier_worker_pending_idle_seconds=_parse_int_env(
+            "NOTIFIER_WORKER_PENDING_IDLE_SECONDS", 60
+        ),
+        notifier_fallback_poll_seconds=_parse_int_env(
+            "NOTIFIER_FALLBACK_POLL_SECONDS", 60
+        ),
         telegram_sender_min_interval_ms=_parse_int_env(
             "TELEGRAM_SENDER_MIN_INTERVAL_MS", 50
         ),
@@ -405,6 +444,12 @@ def get_settings() -> Settings:
         raise RuntimeError("SCHEDULER_WORKER_BLOCK_SECONDS must be >= 1")
     if settings.scheduler_worker_pending_idle_seconds < 1:
         raise RuntimeError("SCHEDULER_WORKER_PENDING_IDLE_SECONDS must be >= 1")
+    if not settings.scheduler_due_zset_key:
+        raise RuntimeError("SCHEDULER_DUE_ZSET_KEY must not be empty")
+    if settings.scheduler_due_block_seconds < 1:
+        raise RuntimeError("SCHEDULER_DUE_BLOCK_SECONDS must be >= 1")
+    if settings.scheduler_reconcile_poll_seconds < 1:
+        raise RuntimeError("SCHEDULER_RECONCILE_POLL_SECONDS must be >= 1")
     if settings.notifier_poll_seconds < 1:
         raise RuntimeError("NOTIFIER_POLL_SECONDS must be >= 1")
     if settings.notifier_claim_batch_size < 1:
@@ -423,6 +468,18 @@ def get_settings() -> Settings:
         raise RuntimeError("NOTIFIER_RETRY_JITTER_PERCENT must be between 0 and 50")
     if settings.notifier_max_inflight < 1:
         raise RuntimeError("NOTIFIER_MAX_INFLIGHT must be >= 1")
+    if not settings.notifier_queue_stream_key:
+        raise RuntimeError("NOTIFIER_QUEUE_STREAM_KEY must not be empty")
+    if not settings.notifier_queue_consumer_group:
+        raise RuntimeError("NOTIFIER_QUEUE_CONSUMER_GROUP must not be empty")
+    if settings.notifier_queue_max_stream_length < 1:
+        raise RuntimeError("NOTIFIER_QUEUE_MAX_STREAM_LENGTH must be >= 1")
+    if settings.notifier_worker_block_seconds < 1:
+        raise RuntimeError("NOTIFIER_WORKER_BLOCK_SECONDS must be >= 1")
+    if settings.notifier_worker_pending_idle_seconds < 1:
+        raise RuntimeError("NOTIFIER_WORKER_PENDING_IDLE_SECONDS must be >= 1")
+    if settings.notifier_fallback_poll_seconds < 1:
+        raise RuntimeError("NOTIFIER_FALLBACK_POLL_SECONDS must be >= 1")
     if settings.telegram_sender_min_interval_ms < 0:
         raise RuntimeError("TELEGRAM_SENDER_MIN_INTERVAL_MS must be >= 0")
     if settings.telegram_connect_ttl_minutes < 1 or settings.telegram_connect_ttl_minutes > 120:

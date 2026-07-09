@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import random
 import time
 import uuid
@@ -11,13 +12,19 @@ import json
 from typing import Protocol
 
 from app.application.affiliate_link_service import AffiliateLinkService
+from app.application.notification_dispatch_queue import (
+    NotificationDispatchJob,
+    NotificationDispatchQueue,
+)
 from app.application.scrape_service import ScrapeBatchInput, ScrapeBatchOutput
+from app.application.tracking_due_index import TrackingDueIndex
 from app.application.tracking_price_result import (
     is_price_confident_for_tracking,
     low_confidence_tracking_result,
     normalize_tracking_price_result,
     resolve_listing_url,
 )
+from app.infrastructure.redis_tracking_due_index import sync_tracked_item_due_index
 from app.scraper import PriceResult
 from app.tracking import (
     AlertEvent,
@@ -27,6 +34,8 @@ from app.tracking import (
     TrackingRepository,
     UserEntitlement,
 )
+
+_logger = logging.getLogger("scraper_api.scheduler.service")
 
 _TEST_INTERVAL_15_SECONDS_SENTINEL = 10_079
 _TEST_INTERVAL_15_SECONDS_VALUE = 15
@@ -104,6 +113,8 @@ class TrackingSchedulerService:
         affiliate_signing_secret: str = "",
         affiliate_link_rules_json: str = "",
         affiliate_link_template: str = "",
+        notification_queue: NotificationDispatchQueue | None = None,
+        due_index: TrackingDueIndex | None = None,
     ) -> None:
         self._repository = repository
         self._scrape_runner = scrape_runner
@@ -117,6 +128,8 @@ class TrackingSchedulerService:
         self._fetch_mode = fetch_mode
         self._alert_cooldown_minutes = max(0, alert_cooldown_minutes)
         self._notification_max_attempts = max(1, notification_max_attempts)
+        self._notification_queue = notification_queue
+        self._due_index = due_index
         self._affiliate_link_service = AffiliateLinkService(
             repository=repository,
             redirect_base_url=affiliate_redirect_base_url,
@@ -295,7 +308,7 @@ class TrackingSchedulerService:
         try:
             # No scrape ran, so keep last_checked_at unchanged. We only release
             # the lease and park next_check_at until the next billing cycle.
-            self._repository.save_item(
+            self._save_item(
                 replace(
                     current_item,
                     lease_owner=None,
@@ -514,7 +527,7 @@ class TrackingSchedulerService:
                 availability=current_availability or item.availability,
                 scheduled_for=context.scheduled_for,
             )
-            self._repository.save_item_and_snapshot(updated_item, snapshot)
+            self._save_item_and_snapshot(updated_item, snapshot)
             product_url = _resolve_product_url(item, scrape_result)
             listing_url = _resolve_listing_url(scrape_result)
             if item.status != "active":
@@ -600,7 +613,7 @@ class TrackingSchedulerService:
             availability=current_availability or item.availability or _UNKNOWN_AVAILABILITY,
             scheduled_for=context.scheduled_for,
         )
-        self._repository.save_item_and_snapshot(updated_item, snapshot)
+        self._save_item_and_snapshot(updated_item, snapshot)
         self._repository.finish_check_run(
             run_id=context.run_id,
             status="failed",
@@ -765,7 +778,7 @@ class TrackingSchedulerService:
             created_at=now,
             updated_at=now,
         )
-        self._repository.enqueue_notification_event(notification)
+        self._persist_and_wake_notification(notification)
 
     def _emit_price_increase_notification_if_enabled(
         self,
@@ -848,7 +861,7 @@ class TrackingSchedulerService:
             created_at=now,
             updated_at=now,
         )
-        self._repository.enqueue_notification_event(notification)
+        self._persist_and_wake_notification(notification)
 
     def _emit_tracking_attention_notification(
         self,
@@ -915,7 +928,7 @@ class TrackingSchedulerService:
             created_at=now,
             updated_at=now,
         )
-        self._repository.enqueue_notification_event(notification)
+        self._persist_and_wake_notification(notification)
 
     def _emit_selected_offer_unavailable_notification(
         self,
@@ -982,7 +995,7 @@ class TrackingSchedulerService:
             created_at=now,
             updated_at=now,
         )
-        self._repository.enqueue_notification_event(notification)
+        self._persist_and_wake_notification(notification)
 
     def _emit_stock_change_notification_if_enabled(
         self,
@@ -1076,7 +1089,7 @@ class TrackingSchedulerService:
             created_at=now,
             updated_at=now,
         )
-        self._repository.enqueue_notification_event(notification)
+        self._persist_and_wake_notification(notification)
 
     def _is_in_cooldown(self, *, item_id: str, rule_type: str, now: str) -> bool:
         if self._alert_cooldown_minutes <= 0:
@@ -1156,7 +1169,26 @@ class TrackingSchedulerService:
             created_at=now,
             updated_at=now,
         )
-        self._repository.enqueue_notification_event(notification)
+        self._persist_and_wake_notification(notification)
+
+    def _persist_and_wake_notification(self, notification: NotificationEvent) -> None:
+        inserted = self._repository.enqueue_notification_event(notification)
+        if not inserted or self._notification_queue is None:
+            return
+        try:
+            self._notification_queue.enqueue_many(
+                [
+                    NotificationDispatchJob(
+                        notification_id=notification.notification_id,
+                        enqueued_at=notification.created_at,
+                    )
+                ]
+            )
+        except Exception:
+            _logger.exception(
+                "notification_queue_enqueue_failed notification_id=%s",
+                notification.notification_id,
+            )
 
     def _get_active_telegram_chat(self, *, user_id: str) -> str | None:
         method = getattr(self._repository, "get_active_telegram_chat", None)
@@ -1226,7 +1258,7 @@ class TrackingSchedulerService:
             align_checks_to_interval=self._align_checks_to_interval,
         )
         try:
-            self._repository.save_item(
+            self._save_item(
                 replace(
                     current_item,
                     last_checked_at=final_time,
@@ -1251,7 +1283,7 @@ class TrackingSchedulerService:
         current_item = self._get_latest_item_state(item)
         now = _to_iso(_utcnow())
         try:
-            self._repository.save_item(
+            self._save_item(
                 replace(
                     current_item,
                     lease_owner=None,
@@ -1281,7 +1313,7 @@ class TrackingSchedulerService:
         try:
             # Keep `last_checked_at` intact here because no fresh scrape actually
             # ran. We only want to unstick the schedule from a duplicate job key.
-            self._repository.save_item(
+            self._save_item(
                 replace(
                     current_item,
                     lease_owner=None,
@@ -1294,6 +1326,28 @@ class TrackingSchedulerService:
             )
         except Exception:
             pass
+
+    def _save_item(self, item: TrackedItem) -> TrackedItem:
+        saved = self._repository.save_item(item)
+        sync_tracked_item_due_index(
+            self._due_index,
+            item_id=saved.item_id,
+            status=saved.status,
+            next_check_at=saved.next_check_at,
+        )
+        return saved
+
+    def _save_item_and_snapshot(
+        self, item: TrackedItem, snapshot: PriceSnapshot
+    ) -> TrackedItem:
+        saved = self._repository.save_item_and_snapshot(item, snapshot)
+        sync_tracked_item_due_index(
+            self._due_index,
+            item_id=saved.item_id,
+            status=saved.status,
+            next_check_at=saved.next_check_at,
+        )
+        return saved
 
     def _get_latest_item_state(self, item: TrackedItem) -> TrackedItem:
         try:

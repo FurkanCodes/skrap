@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 
+from app.application.notification_dispatch_queue import (
+    ClaimedNotificationDispatchJob,
+    NotificationDispatchJob,
+)
 from app.application.notification_worker_service import (
     NotificationSendResult,
     NotificationWorkerService,
@@ -104,6 +109,37 @@ class _InMemoryNotificationRepository:
             self.events_by_id[event.notification_id] = next_event
             updated.append(next_event)
         return updated
+
+    def claim_notification_events_by_ids(
+        self,
+        *,
+        notification_ids: list[str],
+        now: str,
+        lease_owner: str,
+        lease_until: str,
+    ) -> list[NotificationEvent]:
+        claimed: list[NotificationEvent] = []
+        for notification_id in notification_ids:
+            event = self.events_by_id.get(notification_id)
+            if event is None:
+                continue
+            if event.status not in {"queued", "failed", "sending"}:
+                continue
+            if event.next_attempt_at > now:
+                continue
+            if event.lease_until is not None and event.lease_until > now:
+                continue
+            next_event = replace(
+                event,
+                status="sending",
+                lease_owner=lease_owner,
+                lease_until=lease_until,
+                last_attempt_at=now,
+                updated_at=now,
+            )
+            self.events_by_id[notification_id] = next_event
+            claimed.append(next_event)
+        return claimed
 
     def finalize_notification_event(
         self,
@@ -435,3 +471,187 @@ def test_notification_worker_parallel_send_exception_becomes_retryable_failure()
     assert saved_failure.status == "failed"
     assert saved_failure.last_error is not None
     assert "internal_send_error" in saved_failure.last_error
+
+
+@dataclass
+class _FakeNotificationQueue:
+    claim_batches: list[list[ClaimedNotificationDispatchJob]]
+    enqueued: list[NotificationDispatchJob] = field(default_factory=list)
+    acked: list[str] = field(default_factory=list)
+
+    def enqueue_many(self, jobs: list[NotificationDispatchJob]) -> int:
+        self.enqueued.extend(jobs)
+        return len(jobs)
+
+    def claim(
+        self,
+        *,
+        consumer_name: str,
+        max_items: int,
+        block_seconds: int,
+        pending_idle_seconds: int,
+    ) -> list[ClaimedNotificationDispatchJob]:
+        del consumer_name, max_items, block_seconds, pending_idle_seconds
+        if not self.claim_batches:
+            return []
+        return self.claim_batches.pop(0)
+
+    def ack_many(self, ack_ids: list[str]) -> int:
+        self.acked.extend(ack_ids)
+        return len(ack_ids)
+
+
+def test_notification_worker_stream_path_sends_and_acks() -> None:
+    now = datetime.now(tz=UTC)
+    event = _event(notification_id="nev_stream", now=now)
+    repository = _InMemoryNotificationRepository(events_by_id={event.notification_id: event})
+    sender = _FakeSender(
+        result_by_notification_id={
+            event.notification_id: NotificationSendResult(
+                success=True,
+                provider_name="log",
+                provider_message_id="msg-stream",
+                retryable=False,
+            )
+        }
+    )
+    queue = _FakeNotificationQueue(
+        claim_batches=[
+            [
+                ClaimedNotificationDispatchJob(
+                    ack_id="1-0",
+                    job=NotificationDispatchJob(notification_id=event.notification_id),
+                )
+            ]
+        ]
+    )
+    service = NotificationWorkerService(
+        repository=repository,
+        sender=sender,
+        claim_batch_size=10,
+        lease_seconds=30,
+        lease_owner="notifier-test",
+        max_attempts=5,
+        base_backoff_seconds=5,
+        backoff_max_seconds=60,
+        retry_jitter_percent=0,
+        notification_queue=queue,
+        fallback_poll_seconds=60,
+    )
+
+    result = service.run_once()
+    saved = repository.events_by_id[event.notification_id]
+
+    assert result.source == "stream"
+    assert result.claimed_count == 1
+    assert result.sent_count == 1
+    assert result.acked_count == 1
+    assert result.stale_count == 0
+    assert queue.acked == ["1-0"]
+    assert saved.status == "sent"
+
+
+def test_notification_worker_acks_stale_stream_entries_missing_in_postgres() -> None:
+    now = datetime.now(tz=UTC)
+    repository = _InMemoryNotificationRepository(events_by_id={})
+    sender = _FakeSender(result_by_notification_id={})
+    queue = _FakeNotificationQueue(
+        claim_batches=[
+            [
+                ClaimedNotificationDispatchJob(
+                    ack_id="9-0",
+                    job=NotificationDispatchJob(notification_id="nev_missing"),
+                )
+            ]
+        ]
+    )
+    service = NotificationWorkerService(
+        repository=repository,
+        sender=sender,
+        claim_batch_size=10,
+        lease_seconds=30,
+        lease_owner="notifier-test",
+        max_attempts=5,
+        base_backoff_seconds=5,
+        backoff_max_seconds=60,
+        retry_jitter_percent=0,
+        notification_queue=queue,
+        fallback_poll_seconds=60,
+    )
+
+    result = service.run_once()
+
+    assert result.source == "stream"
+    assert result.claimed_count == 0
+    assert result.stale_count == 1
+    assert result.acked_count == 1
+    assert queue.acked == ["9-0"]
+    assert sender.sent_notification_ids == []
+
+
+def test_notification_worker_uses_fallback_when_stream_empty() -> None:
+    now = datetime.now(tz=UTC)
+    event = _event(notification_id="nev_fallback", now=now)
+    repository = _InMemoryNotificationRepository(events_by_id={event.notification_id: event})
+    sender = _FakeSender(
+        result_by_notification_id={
+            event.notification_id: NotificationSendResult(
+                success=True,
+                provider_name="log",
+                provider_message_id="msg-fallback",
+                retryable=False,
+            )
+        }
+    )
+    queue = _FakeNotificationQueue(claim_batches=[[]])
+    service = NotificationWorkerService(
+        repository=repository,
+        sender=sender,
+        claim_batch_size=10,
+        lease_seconds=30,
+        lease_owner="notifier-test",
+        max_attempts=5,
+        base_backoff_seconds=5,
+        backoff_max_seconds=60,
+        retry_jitter_percent=0,
+        notification_queue=queue,
+        fallback_poll_seconds=1,
+    )
+    service._last_fallback_at = 0.0
+
+    result = service.run_once()
+    saved = repository.events_by_id[event.notification_id]
+
+    assert result.source == "fallback"
+    assert result.claimed_count == 1
+    assert result.sent_count == 1
+    assert saved.status == "sent"
+
+
+def test_notification_worker_skips_fallback_when_recently_run() -> None:
+    now = datetime.now(tz=UTC)
+    event = _event(notification_id="nev_idle", now=now)
+    repository = _InMemoryNotificationRepository(events_by_id={event.notification_id: event})
+    sender = _FakeSender(result_by_notification_id={})
+    queue = _FakeNotificationQueue(claim_batches=[[]])
+    service = NotificationWorkerService(
+        repository=repository,
+        sender=sender,
+        claim_batch_size=10,
+        lease_seconds=30,
+        lease_owner="notifier-test",
+        max_attempts=5,
+        base_backoff_seconds=5,
+        backoff_max_seconds=60,
+        retry_jitter_percent=0,
+        notification_queue=queue,
+        fallback_poll_seconds=60,
+    )
+    service._last_fallback_at = time.monotonic()
+
+    result = service.run_once()
+
+    assert result.source == "idle"
+    assert result.claimed_count == 0
+    assert sender.sent_notification_ids == []
+    assert repository.events_by_id[event.notification_id].status == "queued"

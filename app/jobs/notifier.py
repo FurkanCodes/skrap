@@ -18,6 +18,7 @@ from app.application.notification_worker_service import (
 )
 from app.core.config import get_settings
 from app.infrastructure.postgres_tracking_repository import PostgresTrackingRepository
+from app.infrastructure.redis_notification_dispatch_queue import RedisNotificationDispatchQueue
 from app.tracking import NotificationEvent
 
 
@@ -406,7 +407,15 @@ def _resolve_lease_owner() -> str:
     return f"{host}-{os.getpid()}"
 
 
-def _build_worker_service() -> tuple[NotificationWorkerService, int, int]:
+def _resolve_consumer_name() -> str:
+    configured = os.getenv("NOTIFIER_WORKER_CONSUMER_NAME", "").strip()
+    if configured:
+        return configured
+    host = socket.gethostname()
+    return f"{host}-{os.getpid()}"
+
+
+def _build_worker_service() -> tuple[NotificationWorkerService, int]:
     settings = get_settings()
     repository = PostgresTrackingRepository(
         database_url=settings.tracking_database_url,
@@ -414,6 +423,12 @@ def _build_worker_service() -> tuple[NotificationWorkerService, int, int]:
         max_pool_size=settings.tracking_db_pool_max_size,
     )
     repository.initialize()
+    notification_queue = RedisNotificationDispatchQueue(
+        redis_url=settings.scheduler_queue_redis_url,
+        stream_key=settings.notifier_queue_stream_key,
+        consumer_group=settings.notifier_queue_consumer_group,
+        max_stream_length=settings.notifier_queue_max_stream_length,
+    )
     worker_service = NotificationWorkerService(
         repository=repository,
         sender=MultiplexNotificationSender(
@@ -431,42 +446,55 @@ def _build_worker_service() -> tuple[NotificationWorkerService, int, int]:
         backoff_max_seconds=settings.notifier_backoff_max_seconds,
         retry_jitter_percent=settings.notifier_retry_jitter_percent,
         max_inflight=settings.notifier_max_inflight,
+        notification_queue=notification_queue,
+        consumer_name=_resolve_consumer_name(),
+        block_seconds=settings.notifier_worker_block_seconds,
+        pending_idle_seconds=settings.notifier_worker_pending_idle_seconds,
+        fallback_poll_seconds=settings.notifier_fallback_poll_seconds,
     )
-    return worker_service, settings.notifier_poll_seconds, settings.notifier_max_inflight
+    return worker_service, settings.notifier_max_inflight
 
 
 def main() -> None:
     _configure_logging()
     logger = logging.getLogger("scraper_api.notifier")
-    worker_service, poll_seconds, max_inflight = _build_worker_service()
+    worker_service, max_inflight = _build_worker_service()
 
     logger.info(
-        "notifier_started poll_seconds=%s max_inflight=%s",
-        poll_seconds,
+        "notifier_started max_inflight=%s mode=redis_wake",
         max_inflight,
     )
     while True:
-        started = time.perf_counter()
         try:
             result = worker_service.run_once()
-            logger.info(
+            should_log_info = (
+                result.claimed_count > 0
+                or result.sent_count > 0
+                or result.retry_count > 0
+                or result.dead_count > 0
+                or result.failure_count > 0
+                or result.stale_count > 0
+            )
+            log_fn = logger.info if should_log_info else logger.debug
+            log_fn(
                 (
-                    "notifier_cycle claimed=%s sent=%s retried=%s dead=%s failures=%s max_attempt_depth=%s duration_ms=%.2f"
+                    "notifier_cycle source=%s claimed=%s sent=%s retried=%s dead=%s "
+                    "failures=%s stale=%s acked=%s max_attempt_depth=%s duration_ms=%.2f"
                 ),
+                result.source,
                 result.claimed_count,
                 result.sent_count,
                 result.retry_count,
                 result.dead_count,
                 result.failure_count,
+                result.stale_count,
+                result.acked_count,
                 result.max_attempt_depth,
                 result.duration_seconds * 1000,
             )
         except Exception:
             logger.exception("notifier_cycle_failed")
-
-        elapsed = time.perf_counter() - started
-        sleep_seconds = max(0.0, float(poll_seconds) - elapsed)
-        time.sleep(sleep_seconds)
+            time.sleep(1)
 
 
 if __name__ == "__main__":

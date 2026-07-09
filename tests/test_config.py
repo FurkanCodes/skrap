@@ -169,3 +169,54 @@ def test_production_requires_telegram_webhook_secret_when_bot_token_configured(
 
     with pytest.raises(RuntimeError, match="TELEGRAM_WEBHOOK_SECRET is required"):
         get_settings()
+
+
+def test_notifier_queue_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ENVIRONMENT", "development")
+    monkeypatch.setenv("AUTH_REQUIRED", "false")
+    monkeypatch.delenv("NOTIFIER_QUEUE_STREAM_KEY", raising=False)
+    monkeypatch.delenv("NOTIFIER_FALLBACK_POLL_SECONDS", raising=False)
+
+    settings = get_settings()
+
+    assert settings.notifier_queue_stream_key == "tracking:notifications"
+    assert settings.notifier_queue_consumer_group == "tracking-notifier-workers"
+    assert settings.notifier_queue_max_stream_length == 1_000_000
+    assert settings.notifier_worker_block_seconds == 5
+    assert settings.notifier_worker_pending_idle_seconds == 60
+    assert settings.notifier_fallback_poll_seconds == 60
+
+
+def test_notifier_fallback_poll_seconds_must_be_positive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ENVIRONMENT", "development")
+    monkeypatch.setenv("AUTH_REQUIRED", "false")
+    monkeypatch.setenv("NOTIFIER_FALLBACK_POLL_SECONDS", "0")
+
+    with pytest.raises(RuntimeError, match="NOTIFIER_FALLBACK_POLL_SECONDS must be >= 1"):
+        get_settings()
+
+
+def test_scheduler_due_index_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ENVIRONMENT", "development")
+    monkeypatch.setenv("AUTH_REQUIRED", "false")
+    monkeypatch.delenv("SCHEDULER_DUE_ZSET_KEY", raising=False)
+    monkeypatch.delenv("SCHEDULER_RECONCILE_POLL_SECONDS", raising=False)
+
+    settings = get_settings()
+
+    assert settings.scheduler_due_zset_key == "tracking:due"
+    assert settings.scheduler_due_block_seconds == 5
+    assert settings.scheduler_reconcile_poll_seconds == 60
+
+
+def test_scheduler_reconcile_poll_seconds_must_be_positive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ENVIRONMENT", "development")
+    monkeypatch.setenv("AUTH_REQUIRED", "false")
+    monkeypatch.setenv("SCHEDULER_RECONCILE_POLL_SECONDS", "0")
+
+    with pytest.raises(RuntimeError, match="SCHEDULER_RECONCILE_POLL_SECONDS must be >= 1"):
+        get_settings()

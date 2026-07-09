@@ -1,18 +1,25 @@
 from __future__ import annotations
 
+import logging
 import uuid
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 import hashlib
 import json
 
+from app.application.notification_dispatch_queue import (
+    NotificationDispatchJob,
+    NotificationDispatchQueue,
+)
 from app.application.scrape_service import ScrapeBatchInput, ScrapeBatchService
+from app.application.tracking_due_index import TrackingDueIndex
 from app.application.tracking_price_result import (
     is_price_confident_for_tracking,
     low_confidence_tracking_result,
     normalize_tracking_price_result,
     resolve_listing_url,
 )
+from app.infrastructure.redis_tracking_due_index import sync_tracked_item_due_index
 from app.scraper import PriceResult
 from app.tracking import (
     NotificationEvent,
@@ -21,6 +28,8 @@ from app.tracking import (
     TrackingRepository,
     TrackingStatus,
 )
+
+_logger = logging.getLogger("scraper_api.tracking.service")
 
 _LEGACY_USER_ID = "legacy_owner"
 _TEST_INTERVAL_15_SECONDS_SENTINEL = 10_079
@@ -107,6 +116,8 @@ class TrackingService:
         min_interval_minutes: int,
         max_interval_minutes: int,
         default_snapshot_limit: int,
+        notification_queue: NotificationDispatchQueue | None = None,
+        due_index: TrackingDueIndex | None = None,
     ) -> None:
         self._repository = repository
         self._scrape_service = scrape_service
@@ -114,6 +125,8 @@ class TrackingService:
         self._min_interval_minutes = min_interval_minutes
         self._max_interval_minutes = max_interval_minutes
         self._default_snapshot_limit = default_snapshot_limit
+        self._notification_queue = notification_queue
+        self._due_index = due_index
 
     def list_sites(self) -> dict[str, str]:
         """Expose supported site keys via the existing scrape service."""
@@ -313,6 +326,12 @@ class TrackingService:
         )
 
         saved = self._repository.save_item(item)
+        sync_tracked_item_due_index(
+            self._due_index,
+            item_id=saved.item_id,
+            status=saved.status,
+            next_check_at=saved.next_check_at,
+        )
         # Phase 3: append immutable history row for charts/audits.
         self._repository.add_snapshot(
             PriceSnapshot(
@@ -417,6 +436,12 @@ class TrackingService:
             ),
         )
         saved = self._repository.save_item(updated)
+        sync_tracked_item_due_index(
+            self._due_index,
+            item_id=saved.item_id,
+            status=saved.status,
+            next_check_at=saved.next_check_at,
+        )
         if current.status == "active" and saved.status == "paused":
             self._enqueue_tracking_stopped_notification(
                 item=saved,
@@ -429,7 +454,15 @@ class TrackingService:
         item = self._get_item_for_user(item_id=item_id, user_id=_resolve_user_id(user_id))
         if item is None:
             return False
-        return self._repository.delete_item(item_id)
+        deleted = self._repository.delete_item(item_id)
+        if deleted:
+            sync_tracked_item_due_index(
+                self._due_index,
+                item_id=item_id,
+                status="deleted",
+                next_check_at=None,
+            )
+        return deleted
 
     def _normalize_interval(self, value: int | None, *, user_min_interval: int) -> int:
         """Apply default interval and enforce configured bounds."""
@@ -598,7 +631,7 @@ class TrackingService:
             created_at=triggered_at,
             updated_at=triggered_at,
         )
-        enqueue_method(notification)
+        self._persist_and_wake_notification(notification, enqueue_method=enqueue_method)
 
     def _enqueue_tracking_stopped_notification(
         self,
@@ -654,7 +687,31 @@ class TrackingService:
             created_at=triggered_at,
             updated_at=triggered_at,
         )
-        enqueue_method(notification)
+        self._persist_and_wake_notification(notification, enqueue_method=enqueue_method)
+
+    def _persist_and_wake_notification(
+        self,
+        notification: NotificationEvent,
+        *,
+        enqueue_method,
+    ) -> None:
+        inserted = enqueue_method(notification)
+        if inserted is False or self._notification_queue is None:
+            return
+        try:
+            self._notification_queue.enqueue_many(
+                [
+                    NotificationDispatchJob(
+                        notification_id=notification.notification_id,
+                        enqueued_at=notification.created_at,
+                    )
+                ]
+            )
+        except Exception:
+            _logger.exception(
+                "notification_queue_enqueue_failed notification_id=%s",
+                notification.notification_id,
+            )
 
     def _get_active_telegram_chat(self, *, user_id: str) -> str | None:
         method = getattr(self._repository, "get_active_telegram_chat", None)

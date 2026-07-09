@@ -12,6 +12,8 @@ from app.application.scrape_service import ScrapeBatchService
 from app.application.tracking_scheduler_service import SchedulerCycleResult, TrackingSchedulerService
 from app.core.config import get_settings
 from app.infrastructure.postgres_tracking_repository import PostgresTrackingRepository
+from app.infrastructure.redis_notification_dispatch_queue import RedisNotificationDispatchQueue
+from app.infrastructure.redis_tracking_due_index import RedisTrackingDueIndex
 from app.infrastructure.scraper_gateway import ScraplingGateway
 
 
@@ -121,6 +123,16 @@ def _build_scheduler_service() -> tuple[TrackingSchedulerService, int]:
         max_workers=settings.scheduler_max_inflight,
         use_spider_runtime=True,
     )
+    notification_queue = RedisNotificationDispatchQueue(
+        redis_url=settings.scheduler_queue_redis_url,
+        stream_key=settings.notifier_queue_stream_key,
+        consumer_group=settings.notifier_queue_consumer_group,
+        max_stream_length=settings.notifier_queue_max_stream_length,
+    )
+    due_index = RedisTrackingDueIndex(
+        redis_url=settings.scheduler_queue_redis_url,
+        zset_key=settings.scheduler_due_zset_key,
+    )
     scheduler_service = TrackingSchedulerService(
         repository=repository,
         scrape_runner=scrape_service,
@@ -138,6 +150,8 @@ def _build_scheduler_service() -> tuple[TrackingSchedulerService, int]:
         affiliate_signing_secret=settings.affiliate_signing_secret,
         affiliate_link_rules_json=settings.affiliate_link_rules_json,
         affiliate_link_template=settings.affiliate_link_template,
+        notification_queue=notification_queue,
+        due_index=due_index,
     )
     return scheduler_service, settings.scheduler_poll_seconds
 

@@ -7,6 +7,10 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
+from app.application.notification_dispatch_queue import (
+    ClaimedNotificationDispatchJob,
+    NotificationDispatchQueue,
+)
 from app.tracking import NotificationEvent, TrackingRepository
 
 
@@ -39,10 +43,13 @@ class NotificationWorkerCycleResult:
     failure_count: int
     max_attempt_depth: int
     duration_seconds: float
+    source: str = "fallback"
+    acked_count: int = 0
+    stale_count: int = 0
 
 
 class NotificationWorkerService:
-    """Claims due outbox rows and delivers them with retry/backoff policy."""
+    """Delivers outbox rows via Redis wake path with Postgres fallback."""
 
     def __init__(
         self,
@@ -57,6 +64,11 @@ class NotificationWorkerService:
         backoff_max_seconds: int,
         retry_jitter_percent: int,
         max_inflight: int = 1,
+        notification_queue: NotificationDispatchQueue | None = None,
+        consumer_name: str = "notifier",
+        block_seconds: int = 5,
+        pending_idle_seconds: int = 60,
+        fallback_poll_seconds: int = 60,
     ) -> None:
         self._repository = repository
         self._sender = sender
@@ -68,17 +80,31 @@ class NotificationWorkerService:
         self._backoff_max_seconds = max(self._base_backoff_seconds, backoff_max_seconds)
         self._retry_jitter_percent = max(0, retry_jitter_percent)
         self._max_inflight = max(1, max_inflight)
+        self._notification_queue = notification_queue
+        self._consumer_name = consumer_name
+        self._block_seconds = max(1, block_seconds)
+        self._pending_idle_seconds = max(1, pending_idle_seconds)
+        self._fallback_poll_seconds = max(1, fallback_poll_seconds)
+        self._last_fallback_at = 0.0
 
     def run_once(self) -> NotificationWorkerCycleResult:
         started = time.perf_counter()
         now = _utcnow()
-        claimed = self._repository.claim_due_notification_events(
-            now=_to_iso(now),
-            lease_owner=self._lease_owner,
-            lease_until=_to_iso(now + timedelta(seconds=self._lease_seconds)),
-            limit=self._claim_batch_size,
-        )
-        if not claimed:
+        if self._notification_queue is not None:
+            claimed_jobs = self._notification_queue.claim(
+                consumer_name=self._consumer_name,
+                max_items=self._claim_batch_size,
+                block_seconds=self._block_seconds,
+                pending_idle_seconds=self._pending_idle_seconds,
+            )
+            if claimed_jobs:
+                return self._process_stream_jobs(
+                    claimed_jobs,
+                    now=now,
+                    cycle_started=started,
+                )
+            if self._should_run_fallback():
+                return self._process_fallback_claim(now=now, cycle_started=started)
             return NotificationWorkerCycleResult(
                 claimed_count=0,
                 sent_count=0,
@@ -87,6 +113,103 @@ class NotificationWorkerService:
                 failure_count=0,
                 max_attempt_depth=0,
                 duration_seconds=max(0.0, time.perf_counter() - started),
+                source="idle",
+            )
+
+        return self._process_fallback_claim(now=now, cycle_started=started)
+
+    def _should_run_fallback(self) -> bool:
+        return (time.monotonic() - self._last_fallback_at) >= float(
+            self._fallback_poll_seconds
+        )
+
+    def _process_stream_jobs(
+        self,
+        claimed_jobs: list[ClaimedNotificationDispatchJob],
+        *,
+        now: datetime,
+        cycle_started: float,
+    ) -> NotificationWorkerCycleResult:
+        notification_ids = [job.job.notification_id for job in claimed_jobs]
+        ack_by_notification_id = {
+            job.job.notification_id: job.ack_id for job in claimed_jobs
+        }
+        claimed = self._repository.claim_notification_events_by_ids(
+            notification_ids=notification_ids,
+            now=_to_iso(now),
+            lease_owner=self._lease_owner,
+            lease_until=_to_iso(now + timedelta(seconds=self._lease_seconds)),
+        )
+        claimed_ids = {event.notification_id for event in claimed}
+        stale_ack_ids = [
+            ack_by_notification_id[notification_id]
+            for notification_id in notification_ids
+            if notification_id not in claimed_ids
+            and notification_id in ack_by_notification_id
+        ]
+        result = self._deliver_claimed(
+            claimed,
+            cycle_started=cycle_started,
+            source="stream",
+        )
+        processed_ack_ids = [
+            ack_by_notification_id[event.notification_id]
+            for event in claimed
+            if event.notification_id in ack_by_notification_id
+        ]
+        ack_ids = list(dict.fromkeys([*processed_ack_ids, *stale_ack_ids]))
+        acked_count = 0
+        if ack_ids and self._notification_queue is not None:
+            acked_count = self._notification_queue.ack_many(ack_ids)
+        return NotificationWorkerCycleResult(
+            claimed_count=result.claimed_count,
+            sent_count=result.sent_count,
+            retry_count=result.retry_count,
+            dead_count=result.dead_count,
+            failure_count=result.failure_count,
+            max_attempt_depth=result.max_attempt_depth,
+            duration_seconds=result.duration_seconds,
+            source="stream",
+            acked_count=acked_count,
+            stale_count=len(stale_ack_ids),
+        )
+
+    def _process_fallback_claim(
+        self,
+        *,
+        now: datetime,
+        cycle_started: float,
+    ) -> NotificationWorkerCycleResult:
+        self._last_fallback_at = time.monotonic()
+        claimed = self._repository.claim_due_notification_events(
+            now=_to_iso(now),
+            lease_owner=self._lease_owner,
+            lease_until=_to_iso(now + timedelta(seconds=self._lease_seconds)),
+            limit=self._claim_batch_size,
+        )
+        return self._deliver_claimed(
+            claimed,
+            cycle_started=cycle_started,
+            source="fallback",
+        )
+
+    def _deliver_claimed(
+        self,
+        claimed: list[NotificationEvent],
+        *,
+        cycle_started: float,
+        source: str,
+    ) -> NotificationWorkerCycleResult:
+        if not claimed:
+            return NotificationWorkerCycleResult(
+                claimed_count=0,
+                sent_count=0,
+                retry_count=0,
+                dead_count=0,
+                failure_count=0,
+                max_attempt_depth=0,
+                duration_seconds=max(0.0, time.perf_counter() - cycle_started),
+                source=source,
             )
 
         sent_count = 0
@@ -186,7 +309,8 @@ class NotificationWorkerService:
             dead_count=dead_count,
             failure_count=failure_count,
             max_attempt_depth=max_attempt_depth,
-            duration_seconds=max(0.0, time.perf_counter() - started),
+            duration_seconds=max(0.0, time.perf_counter() - cycle_started),
+            source=source,
         )
 
     def _send_events(self, events: list[NotificationEvent]) -> dict[str, NotificationSendResult]:

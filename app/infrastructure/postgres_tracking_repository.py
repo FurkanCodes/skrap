@@ -1785,6 +1785,86 @@ class PostgresTrackingRepository:
             if notification_id in by_id
         ]
 
+    def claim_notification_events_by_ids(
+        self,
+        *,
+        notification_ids: list[str],
+        now: str,
+        lease_owner: str,
+        lease_until: str,
+    ) -> list[NotificationEvent]:
+        cleaned_ids = [
+            notification_id.strip()
+            for notification_id in notification_ids
+            if notification_id and notification_id.strip()
+        ]
+        if not cleaned_ids:
+            return []
+
+        now_dt = _parse_timestamp(now)
+        lease_until_dt = _parse_timestamp(lease_until)
+        with self._pool.connection() as conn:
+            with conn.transaction():
+                rows = conn.execute(
+                    """
+                    SELECT notification_id
+                    FROM outbound_notifications
+                    WHERE notification_id = ANY(%s)
+                      AND status IN ('queued', 'failed', 'sending')
+                      AND next_attempt_at <= %s
+                      AND (lease_until IS NULL OR lease_until <= %s)
+                    ORDER BY next_attempt_at ASC, notification_id ASC
+                    FOR UPDATE SKIP LOCKED
+                    """,
+                    (cleaned_ids, now_dt, now_dt),
+                ).fetchall()
+                claimed_ids = [str(row["notification_id"]) for row in rows]
+                if not claimed_ids:
+                    return []
+
+                conn.execute(
+                    """
+                    UPDATE outbound_notifications
+                    SET status = 'sending',
+                        lease_owner = %s,
+                        lease_until = %s,
+                        last_attempt_at = %s,
+                        updated_at = %s
+                    WHERE notification_id = ANY(%s)
+                    """,
+                    (lease_owner, lease_until_dt, now_dt, now_dt, claimed_ids),
+                )
+
+                claimed_rows = conn.execute(
+                    """
+                    SELECT *
+                    FROM outbound_notifications
+                    WHERE notification_id = ANY(%s)
+                    """,
+                    (claimed_ids,),
+                ).fetchall()
+
+        by_id = {
+            str(row["notification_id"]): self._row_to_notification_event(row)
+            for row in claimed_rows
+        }
+        # Preserve wake-queue order when possible, then append any extras.
+        ordered: list[NotificationEvent] = []
+        seen: set[str] = set()
+        for notification_id in cleaned_ids:
+            event = by_id.get(notification_id)
+            if event is None or notification_id in seen:
+                continue
+            ordered.append(event)
+            seen.add(notification_id)
+        for notification_id in claimed_ids:
+            if notification_id in seen:
+                continue
+            event = by_id.get(notification_id)
+            if event is not None:
+                ordered.append(event)
+        return ordered
+
     def finalize_notification_event(
         self,
         *,
@@ -1925,6 +2005,80 @@ class PostgresTrackingRepository:
 
         by_id = {str(row["item_id"]): self._row_to_item(row) for row in claimed_rows}
         return [by_id[item_id] for item_id in item_ids if item_id in by_id]
+
+    def claim_due_items_by_ids(
+        self,
+        *,
+        item_ids: list[str],
+        now: str,
+        lease_owner: str,
+        lease_until: str,
+    ) -> list[TrackedItem]:
+        cleaned_ids = [
+            item_id.strip() for item_id in item_ids if item_id and item_id.strip()
+        ]
+        if not cleaned_ids:
+            return []
+
+        now_dt = _parse_timestamp(now)
+        lease_until_dt = _parse_timestamp(lease_until)
+
+        with self._pool.connection() as conn:
+            with conn.transaction():
+                rows = conn.execute(
+                    """
+                    SELECT item_id
+                    FROM tracked_items
+                    WHERE item_id = ANY(%s)
+                      AND status = 'active'
+                      AND (next_check_at IS NULL OR next_check_at <= %s)
+                      AND (lease_until IS NULL OR lease_until <= %s)
+                    ORDER BY COALESCE(next_check_at, updated_at, created_at) ASC, item_id ASC
+                    FOR UPDATE SKIP LOCKED
+                    """,
+                    (cleaned_ids, now_dt, now_dt),
+                ).fetchall()
+                claimed_ids = [str(row["item_id"]) for row in rows]
+                if not claimed_ids:
+                    return []
+
+                conn.execute(
+                    """
+                    UPDATE tracked_items
+                    SET lease_owner = %s,
+                        lease_until = %s,
+                        last_check_started_at = %s,
+                        updated_at = %s
+                    WHERE item_id = ANY(%s)
+                    """,
+                    (lease_owner, lease_until_dt, now_dt, now_dt, claimed_ids),
+                )
+
+                claimed_rows = conn.execute(
+                    """
+                    SELECT *
+                    FROM tracked_items
+                    WHERE item_id = ANY(%s)
+                    """,
+                    (claimed_ids,),
+                ).fetchall()
+
+        by_id = {str(row["item_id"]): self._row_to_item(row) for row in claimed_rows}
+        ordered: list[TrackedItem] = []
+        seen: set[str] = set()
+        for item_id in cleaned_ids:
+            item = by_id.get(item_id)
+            if item is None or item_id in seen:
+                continue
+            ordered.append(item)
+            seen.add(item_id)
+        for item_id in claimed_ids:
+            if item_id in seen:
+                continue
+            item = by_id.get(item_id)
+            if item is not None:
+                ordered.append(item)
+        return ordered
 
     def start_check_run(
         self,
