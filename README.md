@@ -10,7 +10,8 @@ Production deployment runbook: [Dealvinci Coolify Production Setup](docs/deploy-
 ## Live demo
 
 Try it at **https://skrap-ui.vercel.app** with `demo@tilvg.app` / `TilvgDemo-2026!` (shared account, please don't change the password).
-The demo runs on free tiers ([setup](docs/deploy-free-demo.md)): payments, automatic re-checks/alerts, and social sign-in are disabled,
+The demo runs on free tiers ([setup](docs/deploy-free-demo.md)): payments, automatic re-checks/price-drop alerts, and social sign-in are disabled
+(Telegram linking and tracking started/stopped messages work),
 and the API sleeps when idle, so the first request can take about a minute.
 
 ## Table of Contents
