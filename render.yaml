@@ -13,8 +13,14 @@ services:
     envVars:
       - key: PORT
         value: "8000"
+      # Not "production": that profile requires Paddle billing config, which the demo skips.
+      # The production-only safety defaults are set explicitly below instead.
       - key: ENVIRONMENT
-        value: production
+        value: demo
+      - key: SERVER_FETCH_RESOLVE_DNS
+        value: "true"
+      - key: RATE_LIMIT_ENABLED
+        value: "true"
       - key: TRACKING_DATABASE_URL
         sync: false
       - key: TRACKING_DB_POOL_MAX_SIZE
@@ -43,12 +49,6 @@ services:
       # Allow a slow JWKS fetch while the frontend function cold-starts.
       - key: BETTER_AUTH_JWKS_TIMEOUT_SECONDS
         value: "10"
-      - key: BILLING_BACKEND_SECRET
-        sync: false
-      - key: PADDLE_PLUS_PRICE_ID
-        sync: false
-      - key: PADDLE_PRO_PRICE_ID
-        sync: false
 
   - type: keyvalue
     name: skrap-redis

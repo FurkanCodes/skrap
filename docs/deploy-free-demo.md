@@ -33,24 +33,26 @@ Supabase (Free)         skrap        Postgres for both apps
    (the import screen accepts a pasted `.env` block).
 4. Deploy and note the domain (for example `https://skrap-ui.vercel.app`).
 
-Required variables:
+Required variables (billing/Paddle are not needed; checkout buttons just fail if clicked):
 
 | Variable | Value |
 | --- | --- |
 | `BACKEND_BASE_URL` | Render API URL |
-| `BETTER_AUTH_URL`, `NEXT_PUBLIC_BETTER_AUTH_URL`, `BETTER_AUTH_TRUSTED_ORIGINS`, `BETTER_AUTH_JWT_ISSUER` | Vercel URL |
+| `BETTER_AUTH_URL`, `NEXT_PUBLIC_BETTER_AUTH_URL` | Vercel URL (also used as the JWT issuer) |
 | `BETTER_AUTH_JWT_AUDIENCE` | Render API URL |
 | `BETTER_AUTH_SECRET` | 32+ char secret |
-| `BETTER_AUTH_RATE_LIMIT_STORAGE` | `database` (serverless instances do not share memory) |
 | `DATABASE_URL` | Supabase transaction pooler URL (port 6543) |
 | `AUTH_DEMO_MODE` | `true` |
-| `BILLING_BACKEND_SECRET` | same value as on Render |
 
 ## 2. Backend on Render
 
 1. render.com → **New → Blueprint** → connect `FurkanCodes/skrap`.
    Render reads `render.yaml` and creates `skrap-api` and `skrap-redis`.
-2. Fill in the variables marked `sync: false` from `render.env`.
+2. Fill in the five variables marked `sync: false` from `render.env`:
+   `TRACKING_DATABASE_URL`, `CORS_ALLOW_ORIGINS`, `BETTER_AUTH_JWKS_URL`,
+   `BETTER_AUTH_JWT_ISSUER`, `BETTER_AUTH_JWT_AUDIENCE`. Everything else,
+   including the Redis URL, is set by the blueprint. `ENVIRONMENT=demo` (not
+   `production`) so the backend does not require Paddle billing config.
 3. Apply. The first build takes several minutes (Playwright base image).
 4. Check `https://<api>/health` and `https://<api>/ready`.
 
@@ -59,7 +61,7 @@ Required variables:
 If either platform gave a different domain than the one used in the env files,
 update these and redeploy the affected service:
 
-- Vercel: `BACKEND_BASE_URL`, `BETTER_AUTH_JWT_AUDIENCE`, and the four Vercel URL variables.
+- Vercel: `BACKEND_BASE_URL`, `BETTER_AUTH_JWT_AUDIENCE`, `BETTER_AUTH_URL`, `NEXT_PUBLIC_BETTER_AUTH_URL`.
 - Render: `CORS_ALLOW_ORIGINS`, `BETTER_AUTH_JWKS_URL`, `BETTER_AUTH_JWT_ISSUER`, `BETTER_AUTH_JWT_AUDIENCE`.
 
 The backend verifies frontend-issued JWTs by fetching
