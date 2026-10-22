@@ -1,0 +1,58 @@
+# Free-tier demo deployment on Render (Blueprint).
+# Runs only the API. The scheduler/notifier workers need paid background workers,
+# so tracked items are not re-checked automatically in this setup.
+services:
+  - type: web
+    name: skrap-api
+    runtime: docker
+    plan: free
+    region: frankfurt
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: PORT
+        value: "8000"
+      - key: ENVIRONMENT
+        value: production
+      - key: TRACKING_DATABASE_URL
+        sync: false
+      - key: TRACKING_DB_POOL_MAX_SIZE
+        value: "5"
+      - key: SCHEDULER_QUEUE_REDIS_URL
+        fromService:
+          type: keyvalue
+          name: skrap-redis
+          property: connectionString
+      # Frontend origin, e.g. https://skrap-ui.vercel.app
+      - key: CORS_ALLOW_ORIGINS
+        sync: false
+      - key: AUTH_REQUIRED
+        value: "true"
+      # e.g. https://skrap-ui.vercel.app/api/auth/jwks
+      - key: BETTER_AUTH_JWKS_URL
+        sync: false
+      # e.g. https://skrap-ui.vercel.app
+      - key: BETTER_AUTH_JWT_ISSUER
+        sync: false
+      # This service's own URL, e.g. https://skrap-api.onrender.com
+      - key: BETTER_AUTH_JWT_AUDIENCE
+        sync: false
+      - key: BETTER_AUTH_JWT_ALGORITHMS
+        value: EdDSA
+      # Allow a slow JWKS fetch while the frontend function cold-starts.
+      - key: BETTER_AUTH_JWKS_TIMEOUT_SECONDS
+        value: "10"
+      - key: BILLING_BACKEND_SECRET
+        sync: false
+      - key: PADDLE_PLUS_PRICE_ID
+        sync: false
+      - key: PADDLE_PRO_PRICE_ID
+        sync: false
+
+  - type: keyvalue
+    name: skrap-redis
+    plan: free
+    region: frankfurt
+    maxmemoryPolicy: noeviction
+    ipAllowList: []
