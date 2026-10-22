@@ -12,6 +12,7 @@ RUN python -m pip install --upgrade pip \
     && scrapling install
 
 COPY app ./app
+COPY scripts/render-demo-start.sh ./scripts/render-demo-start.sh
 
 EXPOSE 8000
 

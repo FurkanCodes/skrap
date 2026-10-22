@@ -9,10 +9,8 @@ services:
     plan: free
     region: frankfurt
     dockerfilePath: ./Dockerfile
-    # Restart the notifier if it exits; uvicorn stays the main process Render monitors.
-    dockerCommand: >-
-      sh -c "(while true; do python -m app.jobs.notifier; sleep 5; done) &
-      exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --proxy-headers --forwarded-allow-ips '*'"
+    # Render runs dockerCommand without a shell, so the API + notifier startup lives in a script.
+    dockerCommand: sh scripts/render-demo-start.sh
     healthCheckPath: /health
     autoDeploy: true
     envVars:
