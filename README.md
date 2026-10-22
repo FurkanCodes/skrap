@@ -7,6 +7,12 @@ It documents every public endpoint, payload shape, validation rule, and the expe
 
 Production deployment runbook: [Dealvinci Coolify Production Setup](docs/deploy-coolify-dealvinci.md).
 
+## Live demo
+
+Try it at **https://skrap-ui.vercel.app** with `demo@tilvg.app` / `TilvgDemo-2026!` (shared account, please don't change the password).
+The demo runs on free tiers ([setup](docs/deploy-free-demo.md)): payments, automatic re-checks/alerts, and social sign-in are disabled,
+and the API sleeps when idle, so the first request can take about a minute.
+
 ## Table of Contents
 1. [What This API Does](#what-this-api-does)
 2. [Architecture at a Glance](#architecture-at-a-glance)
