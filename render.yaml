@@ -1,6 +1,7 @@
 # Free-tier demo deployment on Render (Blueprint).
-# Runs only the API. The scheduler/notifier workers need paid background workers,
-# so tracked items are not re-checked automatically in this setup.
+# Runs the API with the notifier inside the same container (free plans have no
+# background workers). The scheduler is not run, so tracked items are not
+# re-checked automatically and no price-drop alerts are sent.
 services:
   - type: web
     name: skrap-api
@@ -8,6 +9,10 @@ services:
     plan: free
     region: frankfurt
     dockerfilePath: ./Dockerfile
+    # Restart the notifier if it exits; uvicorn stays the main process Render monitors.
+    dockerCommand: >-
+      sh -c "(while true; do python -m app.jobs.notifier; sleep 5; done) &
+      exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --proxy-headers --forwarded-allow-ips '*'"
     healthCheckPath: /health
     autoDeploy: true
     envVars:
@@ -49,6 +54,12 @@ services:
       # Allow a slow JWKS fetch while the frontend function cold-starts.
       - key: BETTER_AUTH_JWKS_TIMEOUT_SECONDS
         value: "10"
+      # Telegram bot from @BotFather; the bot username is resolved from the token.
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      # Must match the secret_token registered with Telegram's setWebhook.
+      - key: TELEGRAM_WEBHOOK_SECRET
+        sync: false
 
   - type: keyvalue
     name: skrap-redis

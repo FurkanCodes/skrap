@@ -12,9 +12,11 @@ Supabase (Free)         skrap        Postgres for both apps
 
 ## What does not work on the free tier
 
-- **No scheduler, scheduler worker, or notifier.** Render has no free background
-  workers, so tracked items are never re-checked automatically and no alerts are
-  sent. Scraping, discovery, and creating/listing tracked items all work.
+- **No scheduler.** Render has no free background workers, so the notifier runs
+  inside the API container (see `dockerCommand` in `render.yaml`) but the
+  scheduler does not run. Tracked items are never re-checked automatically and
+  no price-drop alerts are sent. Telegram linking and "tracking started/stopped"
+  messages work. Scraping, discovery, and creating/listing tracked items work.
 - **Cold starts.** The Render service sleeps after 15 minutes idle; the first
   request after that takes about a minute. Open the API URL before a demo.
 - **512 MB RAM.** Plain HTTP scrapes are fine. Sites that need a headless browser
@@ -48,9 +50,10 @@ Required variables (billing/Paddle are not needed; checkout buttons just fail if
 
 1. render.com → **New → Blueprint** → connect `FurkanCodes/skrap`.
    Render reads `render.yaml` and creates `skrap-api` and `skrap-redis`.
-2. Fill in the five variables marked `sync: false` from `render.env`:
+2. Fill in the variables marked `sync: false` from `render.env`:
    `TRACKING_DATABASE_URL`, `CORS_ALLOW_ORIGINS`, `BETTER_AUTH_JWKS_URL`,
-   `BETTER_AUTH_JWT_ISSUER`, `BETTER_AUTH_JWT_AUDIENCE`. Everything else,
+   `BETTER_AUTH_JWT_ISSUER`, `BETTER_AUTH_JWT_AUDIENCE`, `TELEGRAM_BOT_TOKEN`,
+   `TELEGRAM_WEBHOOK_SECRET`. Everything else,
    including the Redis URL, is set by the blueprint. `ENVIRONMENT=demo` (not
    `production`) so the backend does not require Paddle billing config.
 3. Apply. The first build takes several minutes (Playwright base image).
@@ -63,6 +66,24 @@ update these and redeploy the affected service:
 
 - Vercel: `BACKEND_BASE_URL`, `BETTER_AUTH_JWT_AUDIENCE`, `BETTER_AUTH_URL`, `NEXT_PUBLIC_BETTER_AUTH_URL`.
 - Render: `CORS_ALLOW_ORIGINS`, `BETTER_AUTH_JWKS_URL`, `BETTER_AUTH_JWT_ISSUER`, `BETTER_AUTH_JWT_AUDIENCE`.
+
+## 4. Point the Telegram bot at Render
+
+Telegram must know where to deliver bot updates (used when a user links their
+chat). Register the webhook once the API is live, using the same secret as
+`TELEGRAM_WEBHOOK_SECRET`:
+
+```bash
+curl -s "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/setWebhook" \
+  -d "url=https://skrap-api.onrender.com/api/v1/integrations/telegram/webhook" \
+  -d "secret_token=$TELEGRAM_WEBHOOK_SECRET"
+```
+
+Check it with `getWebhookInfo`. Because the free service sleeps, the first
+update after an idle period can take about a minute; Telegram retries until the
+API responds.
+
+## Notes
 
 The backend verifies frontend-issued JWTs by fetching
 `<vercel-url>/api/auth/jwks`, so issuer/audience must match on both sides exactly.
